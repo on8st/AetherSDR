@@ -1407,6 +1407,16 @@ target_include_directories(tx_voice_processor_test PRIVATE src)
 target_link_libraries(tx_voice_processor_test PRIVATE aethercore Qt6::Core)
 add_test(NAME tx_voice_processor_test COMMAND tx_voice_processor_test)
 
+# hl2-lab tx-dynamics diagnostic: measures whether the TX capture path flattens
+# a speech envelope, with one station's real settings. Deliberately NOT
+# registered with ctest -- it answers a question about a configuration, not
+# about the code's contract.
+add_executable(tx_capture_path_probe
+    tests/tx_capture_path_probe.cpp
+)
+target_include_directories(tx_capture_path_probe PRIVATE src)
+target_link_libraries(tx_capture_path_probe PRIVATE aethercore Qt6::Core)
+
 # Pins the SkyRoof-parity WFM DSP chain: NCO offset correction removes the
 # discriminator DC term (fixed pan + Doppler-stepped slice), twin linear-phase
 # resamplers deliver exactly 48 kHz from any native DAX IQ rate, and streaming
