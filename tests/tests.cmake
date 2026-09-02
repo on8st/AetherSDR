@@ -1417,6 +1417,15 @@ add_executable(tx_capture_path_probe
 target_include_directories(tx_capture_path_probe PRIVATE src)
 target_link_libraries(tx_capture_path_probe PRIVATE aethercore Qt6::Core)
 
+# hl2-lab tx-dynamics diagnostic: measures the modulator's ABSOLUTE level at the
+# EP2 wire boundary, where ep2WriteTxIq's +-1.0 clamp lives. Every earlier
+# measurement in that investigation was a ratio, which a clamp is invisible to.
+add_executable(hl2_wire_envelope_probe
+    tests/hl2_wire_envelope_probe.cpp
+)
+target_include_directories(hl2_wire_envelope_probe PRIVATE src)
+target_link_libraries(hl2_wire_envelope_probe PRIVATE aethercore Qt6::Core)
+
 # Pins the SkyRoof-parity WFM DSP chain: NCO offset correction removes the
 # discriminator DC term (fixed pan + Doppler-stepped slice), twin linear-phase
 # resamplers deliver exactly 48 kHz from any native DAX IQ rate, and streaming
