@@ -129,9 +129,25 @@ int main(int argc, char** argv)
         else if (std::string(argv[i]) == "--ep2" && i + 1 < argc) ep2Path = argv[++i];
     }
 
+    // --tone measures the ANALYTIC SENSE of the modulator's output instead of
+    // its envelope: which side of DC a single audio tone lands on. That turns a
+    // derivation about filter kernel signs into a measurement, which is what it
+    // has to be before anyone acts on it.
+    double toneHz = 0.0;
+    for (int i = 2; i < argc; ++i)
+        if (std::string(argv[i]) == "--tone" && i + 1 < argc)
+            toneHz = std::atof(argv[++i]);
+
     std::vector<float> audio;
     int rate = 24000;
-    if (!readWav(argv[1], audio, rate)) { std::fprintf(stderr, "bad wav\n"); return 2; }
+    if (toneHz > 0.0) {
+        rate = 24000;
+        audio.resize(size_t(rate * 3));
+        for (size_t n = 0; n < audio.size(); ++n)
+            audio[n] = 0.3f * float(std::sin(2.0 * M_PI * toneHz * double(n) / rate));
+    } else if (!readWav(argv[1], audio, rate)) {
+        std::fprintf(stderr, "bad wav\n"); return 2;
+    }
 
     Hl2TxDsp dsp;
     Hl2TxDsp::Config cfg;
@@ -155,6 +171,36 @@ int main(int argc, char** argv)
         dsp.processAudioBlock(mono, /*clientLeveled=*/false);
     }
     if (iq.empty()) { std::fprintf(stderr, "modulator produced nothing\n"); return 2; }
+
+    if (toneHz > 0.0) {
+        // Correlate against e^-jwt and e^+jwt. Whichever is larger says which
+        // side of the carrier this IQ puts the tone on, with no FFT and no
+        // assumption about the filter kernels.
+        const double w = 2.0 * M_PI * toneHz / double(cfg.outputSampleRateHz);
+        std::complex<double> pos{}, neg{};
+        const size_t skip = std::min<size_t>(iq.size() / 4, 8192);   // settle
+        for (size_t n = skip; n < iq.size(); ++n) {
+            const std::complex<double> z(iq[n].real(), iq[n].imag());
+            pos += z * std::exp(std::complex<double>(0, -w * double(n)));
+            neg += z * std::exp(std::complex<double>(0, +w * double(n)));
+        }
+        const double mp = std::abs(pos), mn = std::abs(neg);
+        const bool above = mp > mn;
+        std::printf("\n  TONE TEST: %.0f Hz audio, mode %s\n", toneHz,
+                    committed ? "USB (committed ALC)" : "USB");
+        std::printf("    energy at +%.0f Hz  %12.1f\n", toneHz, mp);
+        std::printf("    energy at -%.0f Hz  %12.1f\n", toneHz, mn);
+        std::printf("    ratio             %12.1f dB\n",
+                    20.0 * std::log10(std::max(mp, mn) / std::max(1e-9, std::min(mp, mn))));
+        std::printf("\n    The modulator puts a USB tone %s the carrier.\n",
+                    above ? "ABOVE" : "BELOW");
+        std::printf("    %s\n\n", above
+            ? "That is the STANDARD analytic convention on the wire."
+            : "That is the CONJUGATE of the standard analytic convention:\n"
+              "    what reaches the wire is mirrored, and the radio's mixer sign\n"
+              "    is what decides whether that is correct.");
+        return 0;
+    }
 
     // ---- what the wire clamp does to it -------------------------------
     double peakAbs = 0;
