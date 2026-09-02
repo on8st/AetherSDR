@@ -56,8 +56,8 @@ public:
         // around -32 dBFS. A real transceiver closes that gap with mic gain,
         // compression and ALC; this is the ALC.
         bool alcEnabled = true;
-        double alcTargetPeak = 0.85;   // leave headroom below clipping
-        double alcMaxGainDb = 40.0;    // do not amplify a silent room forever
+        double alcTargetPeak = 0.55;   // #5198: was 0.85
+        double alcMaxGainDb = 0.0;     // #5198: was 40.0 -- no makeup gain
         double alcAttackSec = 0.005;   // catch a syllable's onset
         double alcReleaseSec = 0.500;  // slow enough not to pump between words
 

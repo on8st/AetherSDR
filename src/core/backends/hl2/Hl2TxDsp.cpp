@@ -229,6 +229,10 @@ void Hl2TxDsp::processAudioBlock(const std::vector<float>& mono, bool clientLeve
     // attenuated at whatever the loudest block called for. That is
     // path-dependent gain — the same class of defect as #4796, mirrored — and
     // hl2_txdsp_test's recovery case pins it.
+    // #5198: the gain this block starts from, so it can be ramped rather
+    // than stepped across the block boundary.
+    const double gainFrom = m_alcGain;
+
     if (m_config.alcEnabled) {
         float blockPeak = 0.0f;
         for (std::size_t s = 0; s < consumed; ++s)
@@ -275,6 +279,10 @@ void Hl2TxDsp::processAudioBlock(const std::vector<float>& mono, bool clientLeve
         // pre-existing behaviour for an operator who has turned the ALC off.
         m_alcGain = 1.0;
     }
+
+    // #5198: where this block's peak asked the gain to land.
+    const double gainTo = m_alcGain;
+
     // Published unconditionally, including when the ALC is off and the answer
     // is a flat 0 dB. The TX:ALC meter is fed from this, and a meter that stops
     // updating reads as a stuck needle rather than as "no gain is being
@@ -294,7 +302,16 @@ void Hl2TxDsp::processAudioBlock(const std::vector<float>& mono, bool clientLeve
         // Hard limit AFTER the ALC. The ALC is a smoothed estimate and will
         // overshoot on a transient; letting that through would transmit
         // distortion across the band rather than merely clipping our own audio.
-        const float in = std::clamp(static_cast<float>(preAlc * m_alcGain),
+        // #5198: ramp the ALC gain across the block instead of applying it
+        // as a block-constant scalar. Stepping it puts a discontinuity
+        // between two adjacent samples at every block edge -- measured at
+        // up to 9.5 dB, ~47 times a second -- and a hard edge in the audio
+        // domain is broadband splatter in the RF domain.
+        const double t = (consumed > 1)
+                       ? static_cast<double>(s) / static_cast<double>(consumed - 1)
+                       : 1.0;
+        const double g = gainFrom + (gainTo - gainFrom) * t;
+        const float in = std::clamp(static_cast<float>(preAlc * g),
                                     -1.0f, 1.0f);
         postAlcPeak = std::max(postAlcPeak, std::fabs(in));
 
