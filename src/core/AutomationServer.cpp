@@ -3109,6 +3109,21 @@ const std::vector<AutomationServer::VerbSpec>& AutomationServer::verbRegistry()
             parseTargetPath,
             [](AutomationServer& s, A&, QLocalSocket*) { return s.doDisconnect(); });
 
+        add("injecttx", {},
+            "injecttx <wav> <clientleveled|operatorleveled> — play a 24 kHz "
+            "16-bit wav through the transmit path. Span: Hl2TxDsp -> Metis -> "
+            "wire; the CAPTURE PATH IS BYPASSED, so this does not exercise "
+            "TxVoiceProcessor. The regime is required and has no default: "
+            "clientleveled gives the reduce-only ALC that TCI/DAX get, "
+            "operatorleveled gives the ALC the microphone gets. Does not key.",
+            parseActionValueExact,
+            [](AutomationServer& s, A& a, QLocalSocket*) -> QJsonObject {
+                if (a.action.isEmpty())
+                    return err(QStringLiteral(
+                        "injecttx requires <wav> <clientleveled|operatorleveled>"));
+                return s.doInjectTx(a.action, a.value.toLower());
+            });
+
         add("txtest", {}, "txtest <twotone|off> — TX-gated test signal",
             parseActionOnly,
             [](AutomationServer& s, A& a, QLocalSocket*) -> QJsonObject {
@@ -6602,6 +6617,138 @@ QJsonObject AutomationServer::doHealth()
 // still backstops it. NOTE: two-tone does not pass through the mic/speech
 // processor, so it does not exercise the compression meter — that needs a real
 // mic-audio source (DAX TX), which is a separate, larger effort.
+// Play a WAV through the transmit path with the ALC regime chosen explicitly.
+//
+// SPAN THIS COVERS, and it is not the whole chain: Hl2TxDsp -> Metis -> wire.
+// The capture path is BYPASSED. AudioEngine::feedDaxTxAudioInternal says so in
+// its own comment — this route carries pre-shaped tones from TCI/DAX, so no
+// compressor, EQ, Quindar or brickwall limiter runs on it. Audio injected here
+// enters at the modulator, not at the microphone, so it does not exercise
+// TxVoiceProcessor and must not be read as if it did.
+//
+// The regime is a required argument with no default. feedDaxTxAudio() would
+// force clientLeveled=true, under which the ALC may only reduce and never lift
+// (#4796) — a different ALC from the one an operator's voice meets. Defaulting
+// either way would silently decide which transmitter is being measured.
+//
+// This verb does NOT key. Hl2Backend::submitTxAudio drops audio unless the
+// radio is keyed, so injecting into an unkeyed radio is a no-op rather than an
+// accident, and keying stays with the verb that owns it.
+QJsonObject AutomationServer::doInjectTx(const QString& path,
+                                         const QString& regime)
+{
+    if (!m_audioEngine)
+        return err(QStringLiteral("no audio engine available"));
+    if (path.isEmpty())
+        return err(QStringLiteral("injecttx requires a wav path"));
+
+    bool clientLeveled = false;
+    if (regime == QLatin1String("clientleveled"))
+        clientLeveled = true;
+    else if (regime == QLatin1String("operatorleveled"))
+        clientLeveled = false;
+    else
+        return err(QStringLiteral(
+            "injecttx requires an explicit regime: clientleveled (ALC may only "
+            "reduce, as for TCI/DAX) or operatorleveled (ALC as for the "
+            "microphone). There is deliberately no default."));
+
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly))
+        return err(QStringLiteral("cannot open ") + path);
+    const QByteArray raw = f.readAll();
+    f.close();
+    if (raw.size() < 44 || raw.left(4) != QByteArrayLiteral("RIFF"))
+        return err(QStringLiteral("not a RIFF wav: ") + path);
+
+    // Minimal RIFF walk. Deliberately strict about rate and depth: resampling
+    // here would put a filter in the path and change the very thing being
+    // measured, so an unusable file is refused rather than converted.
+    int channels = 0, bits = 0, rate = 0;
+    int dataOff = 0, dataLen = 0;
+    for (int pos = 12; pos + 8 <= raw.size();) {
+        const QByteArray id = raw.mid(pos, 4);
+        const quint32 sz = static_cast<quint8>(raw[pos + 4])
+                         | (static_cast<quint8>(raw[pos + 5]) << 8)
+                         | (static_cast<quint8>(raw[pos + 6]) << 16)
+                         | (static_cast<quint32>(static_cast<quint8>(raw[pos + 7])) << 24);
+        if (id == QByteArrayLiteral("fmt ") && pos + 8 + 16 <= raw.size()) {
+            channels = static_cast<quint8>(raw[pos + 10])
+                     | (static_cast<quint8>(raw[pos + 11]) << 8);
+            rate = static_cast<quint8>(raw[pos + 12])
+                 | (static_cast<quint8>(raw[pos + 13]) << 8)
+                 | (static_cast<quint8>(raw[pos + 14]) << 16)
+                 | (static_cast<quint32>(static_cast<quint8>(raw[pos + 15])) << 24);
+            bits = static_cast<quint8>(raw[pos + 22])
+                 | (static_cast<quint8>(raw[pos + 23]) << 8);
+        } else if (id == QByteArrayLiteral("data")) {
+            dataOff = pos + 8;
+            dataLen = qMin<int>(static_cast<int>(sz), raw.size() - dataOff);
+        }
+        pos += 8 + static_cast<int>(sz) + (sz & 1);
+    }
+    if (!dataOff || bits != 16 || (channels != 1 && channels != 2))
+        return err(QStringLiteral("need 16-bit mono or stereo PCM"));
+    if (rate != AudioEngine::DEFAULT_SAMPLE_RATE)
+        return err(QStringLiteral("need %1 Hz; this file is %2 Hz. Resampling "
+                                  "here would add a filter to the path being "
+                                  "measured, so it is refused rather than "
+                                  "converted.")
+                       .arg(AudioEngine::DEFAULT_SAMPLE_RATE).arg(rate));
+
+    // To float32 interleaved STEREO, which is what the seam consumes.
+    const auto* pcm = reinterpret_cast<const qint16*>(raw.constData() + dataOff);
+    const int frames = (dataLen / 2) / channels;
+    QByteArray f32(frames * 2 * static_cast<int>(sizeof(float)), Qt::Uninitialized);
+    auto* dst = reinterpret_cast<float*>(f32.data());
+    for (int i = 0; i < frames; ++i) {
+        const float l = pcm[i * channels] / 32768.0f;
+        const float r = (channels == 2) ? pcm[i * channels + 1] / 32768.0f : l;
+        dst[i * 2] = l;
+        dst[i * 2 + 1] = r;
+    }
+
+    m_injectPcm = f32;
+    m_injectPos = 0;
+    m_injectClientLeveled = clientLeveled;
+    if (!m_injectTimer) {
+        m_injectTimer = new QTimer(this);
+        m_injectTimer->setTimerType(Qt::PreciseTimer);
+        connect(m_injectTimer, &QTimer::timeout, this, [this] {
+            constexpr int kFramesPerBlock = 480;   // 20 ms at 24 kHz
+            const int stride = kFramesPerBlock * 2 * static_cast<int>(sizeof(float));
+            if (m_injectPos >= m_injectPcm.size()) {
+                m_injectTimer->stop();
+                m_injectPcm.clear();
+                m_injectPos = 0;
+                qCInfo(lcAutomation) << "injecttx: finished";
+                return;
+            }
+            const int n = qMin(stride, m_injectPcm.size() - m_injectPos);
+            QMetaObject::invokeMethod(
+                m_audioEngine, "injectTxAudio", Qt::QueuedConnection,
+                Q_ARG(QByteArray, m_injectPcm.mid(m_injectPos, n)),
+                Q_ARG(bool, m_injectClientLeveled));
+            m_injectPos += n;
+        });
+    }
+    m_injectTimer->start(20);
+
+    const double secs = static_cast<double>(frames)
+                      / AudioEngine::DEFAULT_SAMPLE_RATE;
+    qCInfo(lcAutomation).noquote()
+        << "injecttx:" << path << QStringLiteral("%1 s").arg(secs, 0, 'f', 2)
+        << (clientLeveled ? "clientLeveled" : "operatorLeveled");
+    return QJsonObject{
+        {QStringLiteral("ok"), true},
+        {QStringLiteral("injecttx"), path},
+        {QStringLiteral("seconds"), secs},
+        {QStringLiteral("clientLeveled"), clientLeveled},
+        {QStringLiteral("span"), QStringLiteral(
+             "Hl2TxDsp -> Metis -> wire; capture path bypassed")},
+        {QStringLiteral("keys"), false}};
+}
+
 QJsonObject AutomationServer::doTxTest(const QString& action)
 {
     if (!m_radioModel)

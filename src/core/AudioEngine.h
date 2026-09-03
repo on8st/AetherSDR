@@ -223,6 +223,25 @@ public:
     Q_INVOKABLE void clearTxAccumulators();
     Q_INVOKABLE void feedDaxTxAudio(const QByteArray& float32pcm);
 
+    // Inject TX audio with the ALC regime chosen EXPLICITLY.
+    //
+    // feedDaxTxAudio() hardcodes markExternalSource=true, and that one flag
+    // conflates two separate things: whether the caller owns its own level (so
+    // the ALC may only reduce, never lift — #4796), and whether the local mic
+    // capture path is suppressed so two producers do not collide.
+    //
+    // An injected test signal always wants the second and must be able to
+    // choose the first: run it clientLeveled and the ALC behaves as it does for
+    // TCI/DAX, run it not-clientLeveled and it behaves as it does for the
+    // operator's voice. A verb that could only do one would silently measure
+    // the wrong regime, and on this radio the ALC is the thing under
+    // investigation.
+    //
+    // Suppression is unconditional here for that reason: without it a live
+    // microphone keeps feeding onTxAudioReady and mixes into the measurement.
+    Q_INVOKABLE void injectTxAudio(const QByteArray& float32pcm,
+                                   bool clientLeveled);
+
     // Plays RADE decoded speech (int16 stereo 24kHz) bypassing m_radeMode block
     void feedDecodedSpeech(const QByteArray& pcm);
 

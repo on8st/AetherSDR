@@ -9042,6 +9042,18 @@ void AudioEngine::feedDaxTxAudio(const QByteArray& inPcm)
     feedDaxTxAudioInternal(inPcm, true, false);
 }
 
+void AudioEngine::injectTxAudio(const QByteArray& inPcm, bool clientLeveled)
+{
+    if (inPcm.isEmpty())
+        return;
+    // Always suppress the local mic path, whatever the ALC regime: two
+    // producers feeding the modulator at once is not a measurement of either.
+    // feedDaxTxAudioInternal only starts this when markExternalSource is set,
+    // which is why it cannot be reached through feedDaxTxAudio() alone.
+    m_tciAudioTimer.start();
+    feedDaxTxAudioInternal(inPcm, clientLeveled, /*forceRadioDaxRoute=*/false);
+}
+
 void AudioEngine::feedDaxTxAudioInternal(const QByteArray& inPcm,
                                          bool markExternalSource,
                                          bool forceRadioDaxRoute)

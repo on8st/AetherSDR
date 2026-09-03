@@ -613,6 +613,15 @@ private:
     void finishConnectWait(const std::shared_ptr<ConnectWait>& wait, bool timedOut);
     // TX test-signal control (two-tone) and ATU control. Both gated by
     // AETHER_AUTOMATION_ALLOW_TX where they key the transmitter.
+    QJsonObject doInjectTx(const QString& path, const QString& regime);
+    // Injection pump state. The file is fed in real-time blocks rather than in
+    // one call: what C-06b measures is modulator-output-to-wire PACING, and a
+    // single bulk submission would exercise the DSP's own buffering instead of
+    // a realistic feed.
+    QTimer*    m_injectTimer = nullptr;
+    QByteArray m_injectPcm;      // float32, interleaved stereo, 24 kHz
+    int        m_injectPos = 0;
+    bool       m_injectClientLeveled = false;
     QJsonObject doTxTest(const QString& action);
     // Backend-sourced radio health. Read-only; see the definition for why it is
     // deliberately not assembled from the models.
