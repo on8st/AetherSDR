@@ -134,9 +134,26 @@ int main(int argc, char** argv)
     // derivation about filter kernel signs into a measurement, which is what it
     // has to be before anyone acts on it.
     double toneHz = 0.0;
-    for (int i = 2; i < argc; ++i)
-        if (std::string(argv[i]) == "--tone" && i + 1 < argc)
-            toneHz = std::atof(argv[++i]);
+    const char* wavOut = nullptr;
+    bool noAlc = false;
+    for (int i = 2; i < argc; ++i) {
+        const std::string a2(argv[i]);
+        if (a2 == "--tone" && i + 1 < argc) toneHz = std::atof(argv[++i]);
+        // --wav-out writes Re(IQ): for USB the modulator emits z = bi - j*bq,
+        // so the real part IS the audio after Hl2TxDsp's own 255-tap
+        // Blackman-windowed bandpass. That is the point -- it is the KERNEL
+        // itself, not a reimplementation of its nominal corners, and two
+        // implementations of "300-2700 Hz" have already been measured 7% apart.
+        //
+        // Written at the modulator's 48 kHz output rate deliberately. Resampling
+        // to 24 kHz would put ANOTHER filter in the path and contaminate exactly
+        // the property this file exists to carry.
+        else if (a2 == "--wav-out" && i + 1 < argc) wavOut = argv[++i];
+        // --no-alc isolates the FILTER. The ALC is a dynamics processor, so
+        // leaving it in measures filter+ALC and cannot answer "what does the
+        // filter alone do to the crest".
+        else if (a2 == "--no-alc") noAlc = true;
+    }
 
     std::vector<float> audio;
     int rate = 24000;
@@ -153,6 +170,7 @@ int main(int argc, char** argv)
     Hl2TxDsp::Config cfg;
     cfg.inputSampleRateHz = rate;
     if (committed) { cfg.alcTargetPeak = 0.85; cfg.alcMaxGainDb = 40.0; }
+    if (noAlc) cfg.alcEnabled = false;
     std::string err;
     if (!dsp.configure(cfg, &err)) {
         std::fprintf(stderr, "configure failed: %s\n", err.c_str());
@@ -200,6 +218,39 @@ int main(int argc, char** argv)
               "    what reaches the wire is mirrored, and the radio's mixer sign\n"
               "    is what decides whether that is correct.");
         return 0;
+    }
+
+    if (wavOut) {
+        // 48 kHz mono 16-bit PCM, no further processing of any kind.
+        std::vector<int16_t> pcm(iq.size());
+        double pk = 0;
+        for (size_t n = 0; n < iq.size(); ++n) pk = std::max(pk, double(std::fabs(iq[n].real())));
+        for (size_t n = 0; n < iq.size(); ++n)
+            pcm[n] = int16_t(std::clamp(iq[n].real(), -1.0f, 1.0f) * 32767.0f);
+        FILE* f = std::fopen(wavOut, "wb");
+        if (!f) { std::fprintf(stderr, "cannot write %s\n", wavOut); return 2; }
+        const uint32_t rate = uint32_t(cfg.outputSampleRateHz);
+        const uint32_t dataBytes = uint32_t(pcm.size() * 2);
+        const uint32_t riff = 36 + dataBytes;
+        const uint16_t one = 1, bits = 16, blockAlign = 2;
+        const uint32_t fmtLen = 16, byteRate = rate * 2;
+        std::fwrite("RIFF", 1, 4, f); std::fwrite(&riff, 4, 1, f);
+        std::fwrite("WAVEfmt ", 1, 8, f); std::fwrite(&fmtLen, 4, 1, f);
+        std::fwrite(&one, 2, 1, f); std::fwrite(&one, 2, 1, f);
+        std::fwrite(&rate, 4, 1, f); std::fwrite(&byteRate, 4, 1, f);
+        std::fwrite(&blockAlign, 2, 1, f); std::fwrite(&bits, 2, 1, f);
+        std::fwrite("data", 1, 4, f); std::fwrite(&dataBytes, 4, 1, f);
+        std::fwrite(pcm.data(), 2, pcm.size(), f);
+        std::fclose(f);
+        std::printf("\n  wrote %s\n", wavOut);
+        std::printf("    Re(IQ) at %u Hz, %zu samples, peak %.4f\n",
+                    rate, pcm.size(), pk);
+        std::printf("    filter: Hl2TxDsp 255-tap Blackman analytic bandpass,"
+                    " %.0f-%.0f Hz\n", cfg.filterLowHz, cfg.filterHighHz);
+        std::printf("    ALC: %s\n", cfg.alcEnabled
+                    ? (committed ? "ENABLED, target 0.85 / makeup 40 dB"
+                                 : "ENABLED, working-tree values")
+                    : "DISABLED -- this isolates the filter");
     }
 
     // ---- what the wire clamp does to it -------------------------------
