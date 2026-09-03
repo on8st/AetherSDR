@@ -136,6 +136,11 @@ int main(int argc, char** argv)
     double toneHz = 0.0;
     const char* wavOut = nullptr;
     bool noAlc = false;
+    // --check turns this from a diagnostic that prints and exits 0 into a test
+    // with a verdict. The criteria are the PROPERTIES FACTS established, not
+    // the exact figures it recorded: those were measured on a different
+    // stimulus, so asserting them against this fixture would pin a coincidence.
+    bool check = false;
     for (int i = 2; i < argc; ++i) {
         const std::string a2(argv[i]);
         if (a2 == "--tone" && i + 1 < argc) toneHz = std::atof(argv[++i]);
@@ -153,6 +158,7 @@ int main(int argc, char** argv)
         // leaving it in measures filter+ALC and cannot answer "what does the
         // filter alone do to the crest".
         else if (a2 == "--no-alc") noAlc = true;
+        else if (a2 == "--check") check = true;
     }
 
     std::vector<float> audio;
@@ -210,6 +216,27 @@ int main(int argc, char** argv)
         std::printf("    energy at -%.0f Hz  %12.1f\n", toneHz, mn);
         std::printf("    ratio             %12.1f dB\n",
                     20.0 * std::log10(std::max(mp, mn) / std::max(1e-9, std::min(mp, mn))));
+        if (check) {
+            // Row C-13. Measured 115.6 dB of rejection; 40 dB is that property
+            // with a wide margin, and the SIDE is the assertion that matters --
+            // whether "below" is correct depends on the gateware TX mixer sign,
+            // which is a different stream's read. This pins what AetherSDR
+            // does, so a silent change of convention cannot pass unnoticed.
+            const double rejectDb =
+                20.0 * std::log10(std::max(mp, mn) / std::max(1e-9, std::min(mp, mn)));
+            int failures = 0;
+            const auto ck = [&](bool ok, const char* what) {
+                std::printf("  [%s] %s\n", ok ? "PASS" : "FAIL", what);
+                if (!ok) ++failures;
+            };
+            std::printf("\n");
+            ck(!above, "a USB tone leaves the modulator BELOW the carrier "
+                       "(the conjugate convention this code applies on purpose)");
+            ck(rejectDb >= 40.0,
+               "the opposite side is rejected by at least 40 dB");
+            std::printf("\n  rejection %.1f dB\n\n", rejectDb);
+            return failures == 0 ? 0 : 1;
+        }
         std::printf("\n    The modulator puts a USB tone %s the carrier.\n",
                     above ? "ABOVE" : "BELOW");
         std::printf("    %s\n\n", above
@@ -308,8 +335,32 @@ int main(int argc, char** argv)
         }
     }
 
+    const double before = envRatio(envBefore, cfg.outputSampleRateHz);
+    const double after  = envRatio(envAfter,  cfg.outputSampleRateHz);
+    if (check) {
+        // Row C-04. Crest is peak/mean of the analytic envelope over 100 ms RMS
+        // frames, amplitude basis, on IQ produced by Hl2TxDsp's own 255-tap
+        // Blackman analytic bandpass at 300-2700 Hz.
+        int failures = 0;
+        const auto ck = [&](bool ok, const char* what) {
+            std::printf("  [%s] %s\n", ok ? "PASS" : "FAIL", what);
+            if (!ok) ++failures;
+        };
+        std::printf("\n");
+        ck(clamped == 0,
+           "no sample is altered by ep2WriteTxIq's +-1.0 clamp");
+        ck(peakAbs < 1.0,
+           "the modulator stays inside full scale");
+        ck(std::fabs(after - before) < 1e-6,
+           "the wire clamp does not change the envelope crest");
+        ck(after >= 2.5,
+           "crest stays above the speech floor (>= 2.5 at 100 ms frames)");
+        std::printf("\n  peak |z| %.3f   crest %.2f   clamped %zu samples\n\n",
+                    peakAbs, after, clamped);
+        return failures == 0 ? 0 : 1;
+    }
+
     std::printf("\n  The transmitted envelope was measured at 1.09-1.14.\n");
-    const double after = envRatio(envAfter, cfg.outputSampleRateHz);
     if (peakAbs > 1.0 && after < 1.35)
         std::printf("  THE WIRE CLAMP IS THE FLATTENER. The modulator overdrives\n"
                     "  full scale and ep2WriteTxIq clips it into a flat envelope.\n\n");

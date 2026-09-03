@@ -10,9 +10,21 @@
 // This measures that span directly, with the operator's real configuration,
 // offline. No radio, no operator, no microphone.
 //
-// It is deliberately NOT a unit test and is not registered with ctest: it
-// answers a question about one station's settings, not about the code's
-// contract.
+// REGISTERED AS A TEST as of the acceptance suite (row C-01). It was previously
+// a diagnostic that printed and exited 0, which is right for a probe and wrong
+// for a test.
+//
+// The pass criteria are the properties FACTS established, not the exact numbers
+// it recorded. The numbers there -- 3.34 in, 3.41 out, 102% retained -- were
+// measured on a different stimulus, so asserting them against this fixture
+// would be pinning a coincidence. What transfers is the PROPERTY: the span
+// retains the envelope. Every threshold below carries its basis, window and
+// frame period, because a crest figure without them names nothing.
+//
+// The positive control is part of the assertion, not a separate mode. A test
+// that cannot detect flattening would pass on a chain that flattens everything,
+// so this runs the aggressive-ClientComp configuration too and REQUIRES it to
+// collapse. If both legs pass, the clean leg means something.
 //
 // Usage:
 //   tx_capture_path_probe <mono-48k-16bit.wav> [--comp]
@@ -120,24 +132,15 @@ Stats measure(const std::vector<float>& x, int rate)
 
 } // namespace
 
-int main(int argc, char** argv)
+// One pass of the capture path. Returns the 100 ms-frame crest in and out.
+static bool runOnce(const std::vector<float>& in, int rate,
+                    bool positiveControl, Stats& a, Stats& b)
 {
-    if (argc < 2) {
-        std::fprintf(stderr,
-            "usage: %s <mono-48k-16bit.wav> [--comp]\n", argv[0]);
-        return 2;
-    }
-    const bool positiveControl =
-        argc > 2 && std::string(argv[2]) == "--comp";
-
-    std::vector<float> in;
-    int rate = 48000;
-    if (!readWav(argv[1], in, rate)) return 2;
 
     TxVoiceProcessor proc;
     const int block = 1024;
     if (!proc.prepare(rate, block)) {
-        std::fprintf(stderr, "prepare(%d) failed\n", rate); return 2;
+        std::fprintf(stderr, "prepare(%d) failed\n", rate); return false;
     }
 
     // The operator's real configuration, read from AetherSDR.db app_settings
@@ -185,24 +188,68 @@ int main(int argc, char** argv)
         for (int j = 0; j < frames; ++j) out.push_back(o[j * 2] / 32768.0f);
     }
 
-    const Stats a = measure(in, rate);
-    const Stats b = measure(out, TxVoiceProcessor::kTransportRate);
+    a = measure(in, rate);
+    b = measure(out, TxVoiceProcessor::kTransportRate);
+    std::printf("  %-34s in %6.2f  out %6.2f  retained %5.0f%%\n",
+                positiveControl ? "aggressive ClientComp (control)"
+                                : "operator settings, all stages off",
+                a.rms100, b.rms100,
+                a.rms100 > 0 ? 100.0 * b.rms100 / a.rms100 : 0.0);
+    return true;
+}
 
-    std::printf("\n  config: %s\n", positiveControl
-        ? "POSITIVE CONTROL - aggressive ClientComp (thr -40, ratio 20:1)"
-        : "the operator's real settings - every dynamics stage off");
-    std::printf("  %zu in @ %d Hz  ->  %zu out @ %d Hz\n\n",
-                in.size(), rate, out.size(), TxVoiceProcessor::kTransportRate);
-    std::printf("  %-28s %12s %12s\n", "peak/mean", "100 ms RMS", "10 Hz point");
-    std::printf("  %-28s %12.2f %12.2f\n", "capture path IN",  a.rms100, a.point10);
-    std::printf("  %-28s %12.2f %12.2f\n", "capture path OUT", b.rms100, b.point10);
-    if (a.rms100 > 0) {
-        std::printf("  %-28s %11.0f%% %11.0f%%\n", "retained",
-                    100.0 * b.rms100 / a.rms100, 100.0 * b.point10 / a.point10);
+int main(int argc, char** argv)
+{
+    if (argc < 2) {
+        std::fprintf(stderr, "usage: %s <mono-16bit.wav>\n", argv[0]);
+        return 2;
     }
-    std::printf("\n  The transmitted envelope was measured at 1.09-1.14.\n");
-    std::printf("  %s\n\n", b.rms100 < 1.35
-        ? "  This span FLATTENS. It is the fault."
-        : "  This span preserves the dynamics. It is not the fault.");
-    return 0;
+    std::vector<float> in;
+    int rate = 48000;
+    if (!readWav(argv[1], in, rate)) return 2;
+
+    std::printf("\n  fixture: %s  (%zu samples @ %d Hz, %.2f s)\n",
+                argv[1], in.size(), rate, double(in.size()) / rate);
+    std::printf("  crest is peak/mean of the analytic envelope over 100 ms RMS\n"
+                "  frames, amplitude basis, window trimmed to whole frames.\n\n");
+
+    Stats cleanIn{}, cleanOut{}, compIn{}, compOut{};
+    if (!runOnce(in, rate, /*positiveControl=*/false, cleanIn, cleanOut)) {
+        std::fprintf(stderr, "clean pass produced nothing\n");
+        return 1;
+    }
+    if (!runOnce(in, rate, /*positiveControl=*/true, compIn, compOut)) {
+        std::fprintf(stderr, "control pass produced nothing\n");
+        return 1;
+    }
+
+    const double retained = cleanIn.rms100 > 0 ? cleanOut.rms100 / cleanIn.rms100 : 0.0;
+    const double control  = compIn.rms100  > 0 ? compOut.rms100  / compIn.rms100  : 0.0;
+
+    // Row C-01. FACTS measured 102% retained on a different stimulus; 0.95 is
+    // that property with margin, not that number re-asserted.
+    constexpr double kMinRetained = 0.95;
+    // Catalogue B1's floor for speech that still has its dynamics.
+    constexpr double kMinCrest = 2.5;
+    // The control must visibly collapse, or the clean leg proves nothing.
+    constexpr double kMaxControl = 0.80;
+
+    int failures = 0;
+    const auto check = [&](bool ok, const char* what) {
+        std::printf("  [%s] %s\n", ok ? "PASS" : "FAIL", what);
+        if (!ok) ++failures;
+    };
+    std::printf("\n");
+    check(retained >= kMinRetained,
+          "the capture path retains the envelope (>= 95% of input crest)");
+    check(cleanOut.rms100 >= kMinCrest,
+          "output crest stays above the speech floor (>= 2.5 at 100 ms)");
+    check(control <= kMaxControl,
+          "POSITIVE CONTROL: aggressive ClientComp collapses the crest (<= 80%)");
+    check(control < retained,
+          "the control is measurably worse than the clean path");
+
+    std::printf("\n  retained %.0f%%   control %.0f%%\n\n",
+                100.0 * retained, 100.0 * control);
+    return failures == 0 ? 0 : 1;
 }

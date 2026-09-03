@@ -1416,6 +1416,12 @@ add_executable(tx_capture_path_probe
 )
 target_include_directories(tx_capture_path_probe PRIVATE src)
 target_link_libraries(tx_capture_path_probe PRIVATE aethercore Qt6::Core)
+# The fixture is committed rather than generated. The probes used to take a WAV
+# made with macOS `say`, which is not byte-stable across OS versions, so a crest
+# asserted on one machine would not reproduce on another.
+add_test(NAME tx_capture_path_test
+         COMMAND tx_capture_path_probe
+                 ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/speech_14s_24k_mono.wav)
 
 # hl2-lab tx-dynamics diagnostic: measures the modulator's ABSOLUTE level at the
 # EP2 wire boundary, where ep2WriteTxIq's +-1.0 clamp lives. Every earlier
@@ -1425,6 +1431,12 @@ add_executable(hl2_wire_envelope_probe
 )
 target_include_directories(hl2_wire_envelope_probe PRIVATE src)
 target_link_libraries(hl2_wire_envelope_probe PRIVATE aethercore Qt6::Core)
+add_test(NAME hl2_wire_envelope_test
+         COMMAND hl2_wire_envelope_probe
+                 ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/speech_14s_24k_mono.wav
+                 --check)
+add_test(NAME hl2_analytic_sense_test
+         COMMAND hl2_wire_envelope_probe unused --tone 1500 --check)
 
 # Pins the SkyRoof-parity WFM DSP chain: NCO offset correction removes the
 # discriminator DC term (fixed pan + Doppler-stepped slice), twin linear-phase
