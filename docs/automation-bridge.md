@@ -3973,7 +3973,7 @@ receiver capacity. It never enables transmit and remains available without
 The complete registry, generated from the `add(...)` table in `AutomationServer.cpp` by `tools/gen_bridge_docs.py`. CI fails if this drifts from the code.
 
 <!-- BEGIN GENERATED VERB TABLE (tools/gen_bridge_docs.py) -->
-<!-- Do not edit by hand — run tools/gen_bridge_docs.py. 72 verbs. -->
+<!-- Do not edit by hand — run tools/gen_bridge_docs.py. 73 verbs. -->
 
 | Verb | Aliases | Description |
 |---|---|---|
@@ -4046,6 +4046,7 @@ The complete registry, generated from the `add(...)` table in `AutomationServer.
 | `menu` | — | menu list \| open <name> — menu-bar menus |
 | `whoami` | — | bridge instance info: pid, socket, label, station, txAllowed |
 | `health` | — | backend health snapshot — what the RADIO reports, not what was asked for |
+| `telemetry` | — | telemetry target <ip> — aim the stream-free HL2 poller WITHOUT connecting (read-only; `telemetry target off` stops it) |
 | `log` | — | log <categories\|get\|set\|reset\|tail\|subscribe\|unsubscribe> [args] |
 | `mark` | — | mark <text> — timestamped annotation in the log ring |
 | `qrz` | — | qrz <status\|cached\|lookup\|spottext> [args] |
