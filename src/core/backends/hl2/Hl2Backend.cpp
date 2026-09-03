@@ -3591,8 +3591,11 @@ void Hl2Backend::applyDrive(int percent)
         setTxDriveLevel(0);
         return;
     }
-    const int clamped = percent < 0 ? 0 : (percent > 100 ? 100 : percent);
-    setTxDriveLevel(clamped * kTxDriveMax / 100);
+    // Evaluated from Hl2TxLevelPolicy rather than open-coded here, so the suite
+    // exercises the same expression the radio runs. The arithmetic is
+    // unchanged; what the move buys is a pinned table and a way to say which of
+    // the radio's 16 steps a percentage actually reaches.
+    setTxDriveLevel(driveByteForPercent(percent, kTxDriveMax));
 }
 
 std::pair<int, int> Hl2Backend::effectiveTxPassband(const QString& mode) const

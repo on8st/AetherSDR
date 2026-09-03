@@ -23,6 +23,8 @@
 using AetherSDR::hl2::fwdPeakHoldStep;
 using AetherSDR::hl2::micSliderToGainDb;
 using AetherSDR::hl2::micSliderToLinear;
+using AetherSDR::hl2::driveByteForPercent;
+using AetherSDR::hl2::driveStepForPercent;
 
 namespace {
 
@@ -122,6 +124,60 @@ int main()
     // leave the gauge claiming power out of a radio that has stopped.
     check(near(fwdPeakHoldStep(6.0, 0.0, /*keyed=*/false, kRelease), 0.0),
           "unkeyed, the reading drops to the instantaneous sample at once");
+
+    // ---- Transmit drive: 101 slider positions, 16 radio states -------------
+    //
+    // The table is pinned rather than described, because the property that
+    // matters is not "roughly linear" but exactly WHICH percentages collapse
+    // onto the same radio state. A change that moved a step edge would be
+    // invisible to any looser assertion and audible on the air.
+    {
+        constexpr int kMax = 255;   // kTxDriveMax
+
+        // The byte is linear and truncating: percent * 255 / 100. This is the
+        // arithmetic piHPSDR, Quisk and Thetis all use; see the header.
+        check(driveByteForPercent(0,   kMax) == 0,   "0% -> byte 0");
+        check(driveByteForPercent(1,   kMax) == 2,   "1% -> byte 2");
+        check(driveByteForPercent(6,   kMax) == 15,  "6% -> byte 15");
+        check(driveByteForPercent(7,   kMax) == 17,  "7% -> byte 17");
+        check(driveByteForPercent(50,  kMax) == 127, "50% -> byte 127");
+        check(driveByteForPercent(100, kMax) == 255, "100% -> byte 255");
+
+        // Out of range is clamped, not wrapped.
+        check(driveByteForPercent(-5,  kMax) == 0,   "negative clamps to 0");
+        check(driveByteForPercent(140, kMax) == 255, "above 100 clamps to full");
+
+        // THE SIX-POSITION DEAD ZONE. 1% through 6% are one radio state, at the
+        // PA's minimum, with the PA enabled — MetisClient::setTxDriveLevel ties
+        // PA-enable to a non-zero byte, so only 0% is genuinely off. This is the
+        // operator-visible consequence of the top-nibble decode and it is
+        // pinned here so it cannot change silently.
+        for (int pct = 1; pct <= 6; ++pct) {
+            check(driveStepForPercent(pct, kMax) == 0,
+                  "1-6% all land on step 0, the PA minimum");
+            check(driveByteForPercent(pct, kMax) > 0,
+                  "1-6% still enable the PA: only 0% is off");
+        }
+        check(driveStepForPercent(0, kMax) == 0, "0% is step 0 with the PA off");
+        check(driveStepForPercent(7, kMax) == 1, "7% is the first step above minimum");
+
+        // The measured pair from docs/HERMES.md 17.7: 44% and 50% are the same
+        // radio state (1.984 W vs 2.001 W, measurement noise), and 51% is the
+        // next one (+1.25 dB).
+        check(driveStepForPercent(44, kMax) == driveStepForPercent(50, kMax),
+              "44% and 50% are one state — the measured 0.04 dB is noise");
+        check(driveStepForPercent(51, kMax) == driveStepForPercent(50, kMax) + 1,
+              "51% crosses to the next step — the measured +1.25 dB");
+
+        // Monotonic and spanning all 16 states, so no step is unreachable.
+        int prev = -1, distinct = 0;
+        for (int pct = 0; pct <= 100; ++pct) {
+            const int step = driveStepForPercent(pct, kMax);
+            check(step >= prev, "the step never decreases as the slider rises");
+            if (step != prev) { ++distinct; prev = step; }
+        }
+        check(distinct == 16, "all 16 steps are reachable from the slider");
+    }
 
     if (g_failures == 0) {
         std::printf("\nALL PASS\n");

@@ -70,6 +70,69 @@ namespace AetherSDR::hl2 {
     return std::pow(10.0, micSliderToGainDb(level) / 20.0);
 }
 
+// ---- Transmit drive ---------------------------------------------------------
+
+// The RF POWER slider (0..100) as the drive register byte.
+//
+// This is the mapping Hl2Backend::applyDrive already ran, lifted here UNCHANGED
+// and pinned by the suite. It is deliberately not "improved": see the block
+// below for why a different curve would be a regression rather than a fix.
+//
+// kTxDriveMax is 255, so this is `percent * 255 / 100` in integer arithmetic —
+// linear in the byte, truncating.
+[[nodiscard]] constexpr int driveByteForPercent(int percent, int driveMax) noexcept
+{
+    const int clamped = percent < 0 ? 0 : (percent > 100 ? 100 : percent);
+    return clamped * driveMax / 100;
+}
+
+// The step the RADIO actually holds, which is what the operator hears.
+//
+// The gateware decodes only the drive field's TOP NIBBLE, so the byte above has
+// 256 values and the radio has 16 states. Measured on hardware (docs/HERMES.md
+// 17.7, 14.200 MHz USB, 1 kHz tone at -10 dBFS, dummy load, gateware v74):
+// slider 44% and 50% both land on nibble 7 and read 1.984 W and 2.001 W — a
+// 0.04 dB difference, which is measurement noise — while 50% to 51% crosses to
+// nibble 8 and is +1.25 dB.
+//
+// The consequence worth naming, because it is the one an operator meets: the
+// SIX lowest non-zero slider positions, 1% through 6%, all produce byte 2..15
+// and therefore all land on step 0. They are one radio state, at the PA's
+// minimum output, with the PA enabled — MetisClient::setTxDriveLevel ties the
+// PA-enable bit to a non-zero byte, so only 0% is genuinely off.
+[[nodiscard]] constexpr int driveStepForPercent(int percent, int driveMax) noexcept
+{
+    return driveByteForPercent(percent, driveMax) >> 4;
+}
+
+// WHY THIS CURVE IS NOT CHANGED, recorded here because the next reader will ask.
+//
+// Every HPSDR client that drives this radio maps the operator's setting
+// LINEARLY onto the drive byte and lets the gateware discard the low nibble.
+// None of them rounds to the nearest step:
+//
+//   * piHPSDR   `buffer[C1] = power & 0xFF;` — the drive level straight into
+//               C1 of 0x12, no HL2 special case (src/old_protocol.c).
+//   * Quisk     `tx_level = int(tx_level * reduc / 100.0)` then
+//               `self.pc2hermes[4 * 9] = tx_level` — linear and TRUNCATING,
+//               which is this function's arithmetic exactly
+//               (hermes/quisk_hardware.py).
+//   * Thetis    the mi0bot HL2 fork computes RadioVolume = slider * pctBand /
+//               100 / 93.75, then wire_byte = RadioVolume * 1.02 * 255 —
+//               linear, no nibble awareness (Console/clsHardwareSpecific.cs
+//               767-795, Console/console.cs 49290-49299).
+//
+// Rounding to the nearest 16-count step, which is what Zeus's
+// HermesLite2DriveProfile does, is the only counter-example found and it moves
+// the step edges without removing a single one: the slider still has 101
+// positions and the radio still has 16. docs/HERMES.md 17.7 reaches the same
+// conclusion from the hardware side — "the quantisation is a hardware fact, not
+// a defect ... rounding differently would only move the step edges."
+//
+// So this stays linear and truncating. What was missing was not a better curve
+// but the ability to SAY which step a percentage lands on, which is what
+// driveStepForPercent() above provides.
+
 // ---- Forward-power peak hold -----------------------------------------------
 
 // One step of the transmit forward-power peak hold, in watts.
