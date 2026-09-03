@@ -591,6 +591,47 @@ int main()
               "reverse above forward clamps to a very high SWR, not negative");
     }
 
+    // ---- No command may address 0x17 (PTT hang time / TX buffer latency) ----
+    //
+    // This guards an ABSENCE, which is the kind of property that regresses
+    // without anyone noticing. Address 0x17 carries tx_buffer_latency in
+    // DATA[6:0] and ptt_hang_time in DATA[12:8]. The gateware treats
+    // ptt_hang_time == 31 as a MODE, not a duration: at 31 the transmit hang
+    // timer expires and the radio does NOT unkey, leaving only a host-issued
+    // PTT clear — which is exactly what a hung or killed host cannot do.
+    //
+    // We never write 0x17, so ptt_hang_time stays at the gateware default of
+    // 12 ms and the auto-unkey cannot be disabled. That is a safety property
+    // we hold today purely by not having the code.
+    //
+    // If someone later adds 0x17 support to set the TX buffer latency — a
+    // reasonable thing to want — this test fails and says why. Clamping a
+    // user's hang-time value to the 5-bit field width lands exactly on 31,
+    // which is the one value that is not a hang time.
+    {
+        const std::uint8_t kForbiddenC0 = 0x2E;   // 0x17 << 1, MOX clear
+
+        const Cc all[] = {
+            ccConfig(SampleRate::R48k, 1, 0x00),
+            ccRxFreq(0, 7'074'000),
+            ccRx1Freq(7'074'000),
+            ccRxGain(-12),
+            ccRxGain(48),
+            ccAdcAssign(),
+            ccPipelineReset(),
+            ccTxFreq(7'074'000),
+            ccTxDrive(0, false),
+            ccTxDrive(255, true),
+        };
+
+        for (const Cc& cc : all) {
+            // Compare against both MOX states: withMox() only touches bit 0,
+            // so a keyed command addressing 0x17 would read as 0x2F.
+            check((cc[0] & ~kC0MoxBit) != kForbiddenC0,
+                  "no HL2 command addresses 0x17 (would put ptt_hang_time in reach)");
+        }
+    }
+
     if (g_failures == 0)
         std::fprintf(stderr, "hl2_metis_protocol_test: all checks passed\n");
     return g_failures == 0 ? 0 : 1;
