@@ -115,6 +115,7 @@ public:
                          const QVariant& arg) override;
 
     HealthSnapshot healthSnapshot() const override;
+    QVariantList dspChains() const override;
     LinkStats linkStats() const override;
 
 signals:
