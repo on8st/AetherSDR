@@ -3762,7 +3762,7 @@ receiver capacity. It never enables transmit and remains available without
 The complete registry, generated from the `add(...)` table in `AutomationServer.cpp` by `tools/gen_bridge_docs.py`. CI fails if this drifts from the code.
 
 <!-- BEGIN GENERATED VERB TABLE (tools/gen_bridge_docs.py) -->
-<!-- Do not edit by hand — run tools/gen_bridge_docs.py. 71 verbs. -->
+<!-- Do not edit by hand — run tools/gen_bridge_docs.py. 72 verbs. -->
 
 | Verb | Aliases | Description |
 |---|---|---|
@@ -3791,6 +3791,7 @@ The complete registry, generated from the `add(...)` table in `AutomationServer.
 | `get` | — | get <model> [selector] [property] — live model snapshot; get eqstats [selector] [reset] reports Client EQ paint/cache counters |
 | `connect` | — | connect <list\|show\|hide\|local\|ip\|wait> [args] |
 | `disconnect` | — | disconnect from the radio |
+| `injecttx` | — | injecttx <wav> <clientleveled\|operatorleveled> — play a 24 kHz 16-bit wav through the transmit path. Span: Hl2TxDsp -> Metis -> wire; the CAPTURE PATH IS BYPASSED, so this does not exercise TxVoiceProcessor. The regime is required and has no default: clientleveled gives the reduce-only ALC that TCI/DAX get, operatorleveled gives the ALC the microphone gets. Does not key. |
 | `txtest` | — | txtest <twotone\|off> — TX-gated test signal |
 | `atu` | — | atu <bypass\|start> — antenna tuner (start is TX-gated) |
 | `slice` | — | slice <action> [args] — slice lifecycle/config (see doSlice) |
@@ -3820,7 +3821,7 @@ The complete registry, generated from the `add(...)` table in `AutomationServer.
 | `audioCapture` | — | audioCapture <start\|stop\|status\|read\|probeNr2Stereo\|probeDspStereo> [args] — RN2 probe accepts rate=Legacy24k\|Native48k output=PreserveRxStereo\|ProcessedMono blocks=<frames,...> |
 | `txwaterfall` | — | txwaterfall <on\|off> — show keyed TX in the waterfall |
 | `liveness` | — | liveness — per-class data ages and the producer->consumer meter join |
-| `civ` | — | civ <send <hex>\|trace [all]\|session\|scheduler> — CI-V inject, frame trace, RS-BA1 lease health, or command-scheduler health (Icom; send is TX-gated) |
+| `civ` | — | civ <send <hex>\|trace [all]\|session\|scheduler\|incident> — CI-V inject, frame trace, lease/scheduler health, or last incident (Icom; send is TX-gated) |
 | `controls` | — | controls <map\|meters\|scrub [id\|plane]> — the CI-V control and meter registry joined against what is actually wired, and a linkage check that drives every settable control without moving any of them (Icom) |
 | `radiocert` | — | radiocert <tune\|rx\|tx\|meters\|all> [freqMhz] — radio bring-up diagnostic, in dependency order (tx/meters key) |
 | `transmit` | — | transmit <rfpower\|tunepower> <0..100> — transmit drive (TX-gated) |
