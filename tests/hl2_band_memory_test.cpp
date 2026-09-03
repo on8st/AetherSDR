@@ -21,6 +21,7 @@
 #include <cstdio>
 
 using AetherSDR::hl2::bandMemoryWriteback;
+using AetherSDR::hl2::bandChangeLna;
 using AetherSDR::hl2::connectLna;
 
 namespace {
@@ -129,6 +130,50 @@ int main()
                                      false, 0, kDefault, kMin, kMax);
         check(seed.liveDb == kMax,
               "a stored entry above the range clamps to the ceiling");
+    }
+
+
+    // ---- Does a band change apply the stored entry? -----------------------
+    //
+    // B-07/D-lna-band claimed it never does, on the evidence of "one LNA line
+    // per session across four band changes". That evidence cannot support it:
+    // the log line belongs to setPanRfGain, and this path reaches
+    // applyLnaGainDb, which logs nothing at all. These assert what the code
+    // actually does.
+    {
+        // A band with a stored entry: that entry is what gets applied.
+        const auto r = bandChangeLna(/*bandKeyChanged=*/true,
+                                     /*newBandHasEntry=*/true, /*newBandDb=*/-6,
+                                     /*liveDb=*/-12, kDefault, kMin, kMax);
+        check(r.changedBand && r.write && r.db == -6,
+              "a band change DOES apply the new band's stored entry");
+    }
+    {
+        // No entry: the default, not the previous band's value carried across.
+        const auto r = bandChangeLna(true, /*newBandHasEntry=*/false, 0,
+                                     /*liveDb=*/-12, kDefault, kMin, kMax);
+        check(r.write && r.db == kDefault,
+              "an uncalibrated band takes the default, not the old band's gain");
+    }
+    {
+        // Tuning within a band is not a band change and must touch nothing.
+        const auto r = bandChangeLna(/*bandKeyChanged=*/false, true, -6,
+                                     -12, kDefault, kMin, kMax);
+        check(!r.changedBand && !r.write,
+              "tuning inside the same band applies nothing");
+    }
+    {
+        // The stored entry already on the register: no write is correct, and
+        // is NOT the same as failing to apply it.
+        const auto r = bandChangeLna(true, true, /*newBandDb=*/-6,
+                                     /*liveDb=*/-6, kDefault, kMin, kMax);
+        check(r.changedBand && !r.write,
+              "a stored entry already live needs no write — a no-op, not a miss");
+    }
+    {
+        const auto r = bandChangeLna(true, true, /*newBandDb=*/-500,
+                                     0, kDefault, kMin, kMax);
+        check(r.db == kMin, "a stored entry below the range clamps to the floor");
     }
 
     if (g_failures == 0) {

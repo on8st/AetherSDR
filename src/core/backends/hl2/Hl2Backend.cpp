@@ -4550,11 +4550,18 @@ void Hl2Backend::applyPerBandStateFor(double freqHz, const char* reason)
     const QString oldBand = m_currentBandKey;
     m_currentBandKey = newBand;
 
-    const int lna = qBound(kLnaGainMinDb,
-                           m_lnaDbByBand.value(newBand, m_lnaDefaultDb),
-                           kLnaGainMaxDb);
-    if (lna != m_lnaGainDb)
-        applyLnaGainDb(lna);
+    // Evaluated from the policy header, not re-typed here: the suite asserts
+    // this decision, and a copy would let the two agree while the backend
+    // drifted. See Hl2BandMemoryPolicy.h for why this one is written down --
+    // it was claimed not to happen at all, on the strength of a log line that
+    // this path does not emit.
+    const auto bc = AetherSDR::hl2::bandChangeLna(
+        /*bandKeyChanged=*/true,
+        m_lnaDbByBand.contains(newBand),
+        m_lnaDbByBand.value(newBand, m_lnaDefaultDb),
+        m_lnaGainDb, m_lnaDefaultDb, kLnaGainMinDb, kLnaGainMaxDb);
+    if (bc.write)
+        applyLnaGainDb(bc.db);
 
     // NEVER inherit the previous band's drive (nigelfenton's RFC rationale:
     // the drive that makes 5 W on 80 m is amplifier-input-unsafe on 10 m).

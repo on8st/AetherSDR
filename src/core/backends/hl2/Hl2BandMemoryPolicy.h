@@ -90,4 +90,41 @@ inline int bandMemoryWriteback(int liveDb, bool sessionPin,
     return liveDb;
 }
 
+// ---- What a band change applies -------------------------------------------
+
+// The LNA a band change should put on the register, or "nothing to do".
+//
+// Extracted to settle a claim rather than to fix a defect. The witnessed run
+// reported "one LNA line per session across four band changes" and concluded
+// the stored per-band entry is never re-applied. It cannot conclude that: the
+// "HL2 LNA gain:" line is emitted by setPanRfGain, and the band-change path
+// reaches applyLnaGainDb, which logs NOTHING. An absent log line is what this
+// path looks like whether it fires or not.
+//
+// Mirrors Hl2Backend::applyPerBandStateFor exactly:
+//   - a "change" to the band already current does nothing;
+//   - otherwise the new band's stored entry applies, or the default if it has
+//     none, clamped;
+//   - and the write is skipped when the value already matches, which is a
+//     no-op rather than a failure to apply.
+struct BandChangeLna {
+    bool changedBand = false;   // did the key actually move?
+    bool write = false;         // must applyLnaGainDb be called?
+    int  db = 0;                // the value it should be called with
+};
+
+inline BandChangeLna bandChangeLna(bool bandKeyChanged,
+                                   bool newBandHasEntry, int newBandDb,
+                                   int liveDb, int defaultDb,
+                                   int minDb, int maxDb)
+{
+    BandChangeLna out;
+    if (!bandKeyChanged)
+        return out;                       // same band: applyPerBandStateFor returns early
+    out.changedBand = true;
+    out.db = clampDb(minDb, newBandHasEntry ? newBandDb : defaultDb, maxDb);
+    out.write = (out.db != liveDb);
+    return out;
+}
+
 }  // namespace AetherSDR::hl2
