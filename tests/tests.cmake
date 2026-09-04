@@ -405,6 +405,18 @@ endif()
 # Standalone DSP smoke tests. Built alongside the main target so they share
 # the same toolchain and warning flags. Run manually with ./build/<target>.
 
+# HERMES 22.3 reproduced: how long is ONE cold WdspChannel open on this tree?
+#
+# add_executable WITHOUT add_test, deliberately. Every REGISTERED test gets
+# AETHER_TEST_WISDOM_DIR, which caps FFTW planning and skips the wisdom export --
+# correct for the suite, and fatal here, since a capped plan is precisely the
+# thing this measures. It also takes ~20 s or more by its nature, which is not a
+# suite's business. Run it by hand with AETHER_WDSP_WISDOM_DIR pointed at an
+# empty directory; it refuses to run if the suite's bound is in its environment.
+add_executable(wdsp_cold_open_bench tests/wdsp_cold_open_bench.cpp)
+target_include_directories(wdsp_cold_open_bench PRIVATE src)
+target_link_libraries(wdsp_cold_open_bench PRIVATE aethercore Qt6::Core)
+
 add_executable(wdsp_channel_test tests/wdsp_channel_test.cpp)
 target_link_libraries(wdsp_channel_test PRIVATE aethercore)
 add_test(NAME wdsp_channel_test COMMAND wdsp_channel_test)
