@@ -72,7 +72,27 @@ int main(int argc, char** argv)
         return 2;
     }
 
-    const std::vector<int> rates = {48000, 96000, 192000, 384000};
+    // Rates from argv when given, so ONE binary can run both of section 22.3's
+    // orderings in one process. That is 22.3's own method -- it tabulates
+    // 48->96->192->384 and 384->192->96->48 -- and reproducing it needs the two
+    // sequences to differ in nothing but order. A second binary, or the same
+    // binary rebuilt, would reintroduce exactly the cross-build confound this
+    // benchmark exists to avoid.
+    std::vector<int> rates = {48000, 96000, 192000, 384000};
+    if (argc > 1) {
+        rates.clear();
+        for (int i = 1; i < argc; ++i) {
+            const long hz = std::strtol(argv[i], nullptr, 10);
+            if (hz <= 0) {
+                std::fprintf(stderr, "REFUSING: bad rate '%s'\n", argv[i]);
+                return 2;
+            }
+            rates.push_back(static_cast<int>(hz));
+        }
+    }
+    std::fprintf(stderr, "order:");
+    for (int r : rates) std::fprintf(stderr, " %d", r);
+    std::fprintf(stderr, "\n");
 
     std::fprintf(stderr, "\n--- cold sequence, %zu opens ---\n", rates.size());
     for (std::size_t i = 0; i < rates.size(); ++i) {
