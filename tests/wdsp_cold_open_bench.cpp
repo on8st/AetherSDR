@@ -102,17 +102,25 @@ int main(int argc, char** argv)
         Hl2RxDsp dsp;
         // THE STRUCT'S OWN DEFAULTS, WHICH ARE NOT WHAT A CONNECT PASSES.
         //
-        // This comment used to say "as the connect path uses them". That was
-        // wrong and it understated every figure this benchmark produces. The
-        // defaults put the passband at 150-3000 Hz; the app runs 100-2900, so a
-        // different filterTaps reaches RXASetNC -- and a stack sample puts 67%
-        // of a cold CONNECT's samples at that one call against 18% of this
-        // benchmark's, roughly seventeen times in absolute terms.
+        // This comment once said "as the connect path uses them", which was
+        // wrong, and was then corrected with a WRONG REASON -- that the app's
+        // 100-2900 passband yields a different filterTaps. It does not:
+        // configure() sets wc.filterTaps = kRxFilterTaps unconditionally and
+        // that is a static constexpr int = 8192, identical whatever the
+        // passband. Two wrong comments in a row on the same line, the second
+        // written while correcting the first.
         //
-        // So what this measures is a FLOOR on the app's cold open, not the app's
-        // cold open. Anything derived from it inherits the floor: 94709 ms here
-        // against a connect's 257.86 s on the same instrument, both essentially
-        // all FFTW planning.
+        // What is MEASURED, and all that should be relied on: the app's own cold
+        // connect costs 3.0x what this benchmark does for the same call sequence
+        // -- 1.8x at build_channel, 4.1x at RXASetNC -- both essentially all
+        // FFTW planning inside one WdspChannel::open. So this measures a FLOOR
+        // on the app's cold open rather than the app's cold open, and every
+        // ratio derived from it is a lower bound.
+        //
+        // WHY the app pays more is unknown. One candidate with a mechanism,
+        // untested: configure() copies m_nbOn and m_nbLevel into the channel
+        // config, and Config deliberately does not carry them, so two objects
+        // built from an identical Config can still open different channels.
         Hl2RxDsp::Config c;
         c.inputSampleRateHz = rates[i];
         std::string error;
