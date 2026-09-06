@@ -3390,6 +3390,23 @@ target_link_libraries(hl2_state_restore_test PRIVATE aethercore Qt6::Core Qt6::T
 set_target_properties(hl2_state_restore_test PROPERTIES AUTOMOC ON)
 add_test(NAME hl2_state_restore_test COMMAND hl2_state_restore_test)
 
+# What the modulator's ABSOLUTE level is where ep2WriteTxIq()'s +-1.0 clamp
+# lives. Every measurement in the #5198 investigation so far has been a RATIO,
+# and a clamp is invisible to a ratio: a modulator that preserves dynamics
+# perfectly but sits above full scale reads correct everywhere upstream and
+# flat on the wire. Offline — reads a wav, drives the real Hl2TxDsp, packs EP2
+# through the real MetisProtocol. No socket, no radio, no app, no keying.
+add_executable(hl2_wire_envelope_probe
+    tests/hl2_wire_envelope_probe.cpp
+)
+target_include_directories(hl2_wire_envelope_probe PRIVATE src)
+target_link_libraries(hl2_wire_envelope_probe PRIVATE aethercore Qt6::Core)
+# Registered on the TONE case only, which synthesises its own stimulus and so
+# needs no fixture. It pins the modulator's analytic sense: a USB tone must
+# leave below the carrier, with the opposite side rejected by at least 40 dB.
+add_test(NAME hl2_analytic_sense_test
+         COMMAND hl2_wire_envelope_probe unused --tone 1500 --check)
+
 # BandStack fold-in (RFC #4603 PR 4): per-radio feature documents,
 # write-through mutations, lazy per-radio legacy import with side-file
 # retirement, panel prefs in AppSettings.
