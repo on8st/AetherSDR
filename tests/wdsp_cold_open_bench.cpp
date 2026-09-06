@@ -100,8 +100,21 @@ int main(int argc, char** argv)
         // which is a different path from the connect path's first build, and
         // the question here is what a connect pays.
         Hl2RxDsp dsp;
-        Hl2RxDsp::Config c;                 // the struct's own defaults, as the
-        c.inputSampleRateHz = rates[i];     // connect path uses them
+        // THE STRUCT'S OWN DEFAULTS, WHICH ARE NOT WHAT A CONNECT PASSES.
+        //
+        // This comment used to say "as the connect path uses them". That was
+        // wrong and it understated every figure this benchmark produces. The
+        // defaults put the passband at 150-3000 Hz; the app runs 100-2900, so a
+        // different filterTaps reaches RXASetNC -- and a stack sample puts 67%
+        // of a cold CONNECT's samples at that one call against 18% of this
+        // benchmark's, roughly seventeen times in absolute terms.
+        //
+        // So what this measures is a FLOOR on the app's cold open, not the app's
+        // cold open. Anything derived from it inherits the floor: 94709 ms here
+        // against a connect's 257.86 s on the same instrument, both essentially
+        // all FFTW planning.
+        Hl2RxDsp::Config c;
+        c.inputSampleRateHz = rates[i];
         std::string error;
 
         QElapsedTimer t;
