@@ -256,6 +256,36 @@ void PhoneCwApplet::buildPhonePanel()
     m_compGauge->setHoverValuePopupEnabled(true);
     vbox->addWidget(m_compGauge);
 
+    // ── ALC Gain gauge (dB: -20 to +40) ──────────────────────────────────
+    // Beside Compression because they answer the same kind of question — how
+    // much is the chain changing my audio — where the ALC gauge below answers
+    // where the audio ended up. The two are easily confused and the difference
+    // is the whole reason this one exists: a post-ALC level meter sits pinned
+    // near its target by construction, so an operator whose microphone is 30 dB
+    // too quiet sees an ALC gauge that looks perfect.
+    //
+    // The range is the modulator's, not a preference: +40 dB is the HL2
+    // modulator's makeup ceiling (Hl2TxDsp::Config::alcMaxGainDb), so a reading
+    // at the top means the ALC has run out of gain rather than that the face
+    // has run out of scale. -20 covers the reductions this chain produces.
+    m_alcGainGauge = new HGauge(-20.0f, 40.0f, 30.0f, "ALC Gain", "dB",
+        {{-20, "-20dB"}, {-10, "-10"}, {0, "0"}, {10, "+10"}, {20, "+20"},
+         {30, "+30"}, {40, "+40"}}, nullptr, 20.0f);
+    m_alcGainGauge->setObjectName(QStringLiteral("phoneAlcGainGauge"));
+    m_alcGainGauge->setValueImmediate(0.0f);
+    m_alcGainGauge->setAccessibleName("ALC gain gauge");
+    m_alcGainGauge->setAccessibleDescription(
+        "Gain the transmit ALC is applying, in dB; 0 is unity");
+    m_alcGainGauge->setHoverValueFormatter([](float v) {
+        // Signed, unlike Compression's face below, because both directions are
+        // real here: the ALC both adds makeup and takes level away.
+        return QStringLiteral("%1%2 dB")
+            .arg(v > 0.0f ? QStringLiteral("+") : QString())
+            .arg(QString::number(v, 'f', 1));
+    });
+    m_alcGainGauge->setHoverValuePopupEnabled(true);
+    vbox->addWidget(m_alcGainGauge);
+
     // ── ALC gauge (post-SW-ALC SSB-peak, dBFS) ──────────────────────────
     // Mirrored in m_cwPanel; both gauges read from MeterModel::alcValueChanged
     // so SSB operators watching mic gain see the same indicator CW
@@ -1242,6 +1272,25 @@ void PhoneCwApplet::updateCompression(float compPeak)
     // MeterModel exposes a positive physical amount; the face fills in reverse.
     const float compressionDb = qBound(0.0f, compPeak, m_compressionMaximumDb);
     m_compGauge->setValue(-compressionDb);
+}
+
+void PhoneCwApplet::updateAlcGain(float gainDb)
+{
+    if (!m_alcGainGauge)
+        return;
+    // No clamp here: HGauge clamps to its own range, and clamping twice would
+    // hide the case worth seeing — a gain pressed against the modulator's
+    // ceiling, which reads as "the ALC has nothing left" rather than as a
+    // meter at the end of its travel.
+    m_alcGainGauge->setValue(gainDb);
+}
+
+void PhoneCwApplet::resetAlcGain()
+{
+    if (!m_alcGainGauge)
+        return;
+    m_alcGainGauge->setValue(0.0f);
+    m_alcGainGauge->clearPeak();
 }
 
 void PhoneCwApplet::setAlcMeterUnit(const QString& unit)
