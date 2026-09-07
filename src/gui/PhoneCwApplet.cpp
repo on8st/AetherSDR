@@ -264,13 +264,38 @@ void PhoneCwApplet::buildPhonePanel()
     // near its target by construction, so an operator whose microphone is 30 dB
     // too quiet sees an ALC gauge that looks perfect.
     //
-    // The range is the modulator's, not a preference: +40 dB is the HL2
-    // modulator's makeup ceiling (Hl2TxDsp::Config::alcMaxGainDb), so a reading
-    // at the top means the ALC has run out of gain rather than that the face
-    // has run out of scale. -20 covers the reductions this chain produces.
-    m_alcGainGauge = new HGauge(-20.0f, 40.0f, 30.0f, "ALC Gain", "dB",
-        {{-20, "-20dB"}, {-10, "-10"}, {0, "0"}, {10, "+10"}, {20, "+20"},
-         {30, "+30"}, {40, "+40"}}, nullptr, 20.0f);
+    // The range is the modulator's, not a preference, and it is ONE-SIDED
+    // because the stage is. Hl2TxDsp's ALC ceilings at unity on every path, so
+    // the gain it applies is a reduction or nothing: 0 dB is the top of the
+    // face and the resting state, and the needle moves left when the stage
+    // pulls level away. An earlier draft of this gauge ran to +40 dB, taken
+    // from the makeup ceiling the modulator used to carry; that field is gone
+    // and a face two-thirds of which the needle could never reach is the same
+    // lying-control failure this gauge exists to fix.
+    //
+    // -20 is a PRESENTATION floor, not a measured one — the reduction loop has
+    // no configured limit, it reduces toward alcTargetPeak/blockPeak — chosen
+    // wide enough for the reductions this chain produces on real audio.
+    //
+    // No red or yellow zone. HGauge paints its zones RIGHTWARD from a
+    // threshold, and on this face the right end is unity, which is the healthy
+    // state: a zone there would colour correct operation as alarming. The
+    // concerning end is the left one, which this widget cannot express, so both
+    // thresholds sit above the face and the bar reads as one band.
+    m_alcGainGauge = new HGauge(-20.0f, 0.0f, 1.0f, "ALC Gain", "dB",
+        {{-20, "-20dB"}, {-15, "-15"}, {-10, "-10"}, {-5, "-5"}, {0, "0"}},
+        nullptr, 1.0f);
+    // REVERSED, like the Compression gauge above it and for the same reason.
+    // This face is one-sided with its resting value at the RIGHT: the ALC
+    // ceilings at unity, so 0 dB is both the top of the scale and where the
+    // needle sits when nothing is happening. An un-reversed bar therefore
+    // reads FULL when the chain is idle and empties as the stage works —
+    // backwards, and the opposite of every other gauge on this panel.
+    //
+    // Caught by capturing this widget and looking at it. The source was
+    // correct about the SCALE and wrong about the GRAMMAR, which is not a
+    // distinction any of the unit tests can make.
+    m_alcGainGauge->setReversed(true);
     m_alcGainGauge->setObjectName(QStringLiteral("phoneAlcGainGauge"));
     m_alcGainGauge->setValueImmediate(0.0f);
     m_alcGainGauge->setAccessibleName("ALC gain gauge");
