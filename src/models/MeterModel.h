@@ -194,6 +194,25 @@ public:
     // Legacy normalized ALC for TCI compatibility. Native percent meters are
     // mapped to -20..0 here; this is not a physical dBFS measurement on Icom.
     float swAlc() const { return m_swAlc; }
+    // The GAIN the transmitter's ALC is applying, in dB; 0 is unity. The
+    // companion to swAlc(), and a different measurement rather than a different
+    // scaling of it — swAlc() is the post-ALC LEVEL, which sits near the ALC's
+    // target whatever the operator does, and this is how hard the stage is
+    // working to put it there. Positive is makeup, negative is reduction.
+    //
+    // NOT converted anywhere, unlike swAlc()'s dBFS/Percent split. That split
+    // exists because an Icom reports its ALC level as a percentage of its own
+    // full scale; no radio in this tree reports a GAIN in anything but dB, so
+    // a mapping here would be a conversion with nothing to convert from.
+    float alcGainDb() const { return m_alcGainDb; }
+    // Whether a SAMPLE has landed, not merely whether the meter is defined.
+    // Load-bearing here in a way it is not for a level: 0 dB is a real and
+    // common reading — the ALC holding at unity — so the initialiser and a
+    // measurement are the same number, and a gauge keyed on the index alone
+    // would render "no gain is being applied" before anything had been said.
+    // Same shape, and the same reason, as hasCompressionMeterValue().
+    bool hasAlcGainValue() const { return m_hasAlcGainValue; }
+
     // Canonical ALC retains the meter's declared units and accepted sample.
     float alcValue() const;
     QString alcUnit() const;
@@ -293,6 +312,10 @@ signals:
     // Emitted when the post-software-ALC SSB-peak meter changes (dBFS).
     // Retained for normalized consumers such as TCI.
     void swAlcChanged(float dbfs);
+    // Emitted when the ALC's applied GAIN changes (dB, 0 = unity), and when it
+    // is cleared because the reading no longer describes the active
+    // transmitter. See alcGainDb().
+    void alcGainChanged(float db);
     void alcValueChanged(float value, const QString& unit);
 
     // Emitted when either side of the TX-filter pair changes (dBFS in, dBFS out).
@@ -332,6 +355,13 @@ private:
     int activeTxWaveformSourceIndex() const;
     int compPeakIndexForActiveTxSlice() const;
     int swAlcIndexForActiveTxSlice() const;
+    int alcGainIndexForActiveTxSlice() const;
+    // One place that answers "this reading no longer describes the active
+    // transmitter", so the three paths that can invalidate it — a slice change,
+    // a disconnect and the radio withdrawing the meter — cannot drift apart.
+    // Returns whether anything actually changed, so a no-op re-selection does
+    // not emit a clear.
+    bool clearAlcGainState();
     void logCompressionMeterMap(const MeterDef& def) const;
     void logCompressionSummary(const char* reason, bool force = false);
 
@@ -377,6 +407,11 @@ private:
     int m_hwAlcIdx{-1};      // "TX" / "HWALC" — external RCA jack voltage
     QMap<int, int> m_swAlcIdxByTxSource; // TX waveform sourceIndex → "ALC" fallback
     QMap<int, int> m_swAlcIdxBySlice;    // preceding SLC manifest block → "ALC"
+    // Routed exactly like ALC above, for the same reason: an ALC gain belongs
+    // to ONE transmitter, and a single index per meter would be
+    // last-definition-wins and silently watch another slice.
+    QMap<int, int> m_alcGainIdxByTxSource; // TX waveform sourceIndex → "ALCGAIN"
+    QMap<int, int> m_alcGainIdxBySlice;    // preceding SLC manifest block → "ALCGAIN"
     // Per-slice, exactly like COMPPEAK above: a radio can publish one TX
     // waveform meter block PER ACTIVE SLICE. TX- sourceIndex is not a slice-ID
     // contract: models may use distinct values, repeated zero, or mixed 0/9.
@@ -425,6 +460,11 @@ private:
     float m_compLevel{0.0f};
     float m_hwAlc{0.0f};
     float m_swAlc{kAlcGaugeFloorDbfs};
+    // Unity, not a floor: a gain's empty presentation is "nothing is being
+    // added or taken away". Which is also a legitimate reading, hence the
+    // separate has-a-sample flag — see hasAlcGainValue().
+    float m_alcGainDb{0.0f};
+    bool m_hasAlcGainValue{false};
     float m_scMic{0.0f};
     float m_scFilt1{0.0f};
     float m_scFilt2{0.0f};

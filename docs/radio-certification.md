@@ -40,6 +40,7 @@ Hermes-Lite 2 can physically produce it.
 | `TX:FWDPWR` | dBm | yes | rises with drive | raise the drive **one nibble** → rises | see the note below on halving |
 | `TX:REFPWR` | dBm | yes | ≪ forward into a load | key into a dummy load | ≥15 dB below forward |
 | `TX:ALC` | dBFS | **host-side** | post-ALC transmit peak | sweep the input 20 dB → reading does **not** move | **±1 dB across the sweep** |
+| `TX:ALCGAIN` | dB | **host-side** | gain the ALC is applying | sweep the input 20 dB → reading moves 20 dB the other way | **±1 dB across the sweep** |
 | `TX:COMPPEAK` | dB | host-side | compression applied | PROC on → rises above 0 | reads 0 with PROC off |
 | `TX:MIC` | dBFS | host-side | pre-gain mic level | — | not yet wired |
 | `TX:HWALC` | dBFS | **no** | — | Flex RCA jack; no HL2 equivalent | — |

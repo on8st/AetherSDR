@@ -266,6 +266,22 @@ void MainWindow::wireDspApplets()
             m_appletPanel->phoneCwApplet()->resetAlc();
         }
     });
+    // The ALC's applied GAIN, beside the ALC's output level above. Gated the
+    // same way and additionally on the model having a SAMPLE: unity gain and
+    // "nothing has said what the ALC is doing" are the same 0 dB on the face,
+    // so without hasAlcGainValue() a cleared meter would render as a confident
+    // "the ALC is holding at unity" — the fabricated-reading failure §1.8
+    // describes, where a dead meter and a real reading of nothing look alike.
+    connect(&m_radioModel.meterModel(), &MeterModel::alcGainChanged,
+            this, [this](float gainDb) {
+        const bool live = m_radioModel.isRadioTransmitting()
+                       && m_radioModel.meterModel().hasAlcGainValue();
+        if (live) {
+            m_appletPanel->phoneCwApplet()->updateAlcGain(gainDb);
+        } else {
+            m_appletPanel->phoneCwApplet()->resetAlcGain();
+        }
+    });
     // Client-side PC mic metering — radio CODEC meters only see hardware mics.
     // Apply VU-style ballistics: fast attack, slow decay (~20 dB/sec).
     {
