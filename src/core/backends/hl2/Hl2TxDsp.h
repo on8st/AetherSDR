@@ -1,5 +1,8 @@
 #pragma once
 
+#include <atomic>
+#include <QByteArray>
+
 #include "core/dsp/WdspChannel.h"
 
 #include <QObject>
@@ -142,7 +145,42 @@ public slots:
     // start with the tail of the previous one.
     void reset();
 
+public:
+    // Enable/disable the post-ALC capture tap. OFF by default: it is the only
+    // thing in processAudioBlock that allocates, so nobody else's keyed
+    // transmission pays for it. `budgetBytes` bounds the total emitted for one
+    // capture -- a queued connection is a queue, and "trivial at the rate I
+    // expect" is how unbounded growth is always argued.
+    void setPostAlcCapture(bool on, qint64 budgetBytes = 4 * 1024 * 1024);
+
+    // The configuration actually in force, read back from the DSP itself --
+    // not from what a caller intended. Every lesson of 2026-09-06 points here:
+    // read the resource, not the request.
+    bool configuredAlcEnabled() const { return m_config.alcEnabled; }
+    double configuredAlcTargetPeak() const { return m_config.alcTargetPeak; }
+
 signals:
+    // MEASUREMENT INSTRUMENTATION (bench-runner, 2026-09-06). The post-ALC,
+    // post-limit sample block, for a capture point that can see what the ALC
+    // did to the envelope.
+    //
+    // A SIGNAL RATHER THAN A DIRECT CALL, and the reason is the thread. This
+    // object lives on `hl2-io`, which feeds the modulator; the capture path is
+    // safe to call from any thread (it takes an explicit mutex) but calling it
+    // here would make hl2-io contend for a lock the audio thread holds. A
+    // priority inversion on the thread that feeds the transmitter is a worse
+    // failure than a missing measurement, and it would not announce itself:
+    // the number would be right and the transmit path would stutter.
+    //
+    // Queued delivery means the capture timestamp is taken at DELIVERY, not at
+    // generation. Irrelevant for a 100 ms-framed crest; NOT irrelevant for
+    // anything phase-sensitive, so do not compare this against an IQ capture
+    // without accounting for it.
+    //
+    // `f32Mono` is float32 MONO at `sampleRateHz`. It is float32 already --
+    // see the emit site -- so it needs NO conversion.
+    void txPostAlcBlock(const QByteArray& f32Mono, int sampleRateHz);
+
     void iqReady(const std::vector<std::complex<float>>& iq);   // at outputSampleRateHz
     void micPeak(float dbfs);                                   // post-gain, pre-modulation
     void alcGain(float db);                                     // ALC gain applied
@@ -163,6 +201,12 @@ signals:
     void micGainChanged(double linear);
 
 private:
+    // MEASUREMENT INSTRUMENTATION (bench-runner, 2026-09-06). Atomics because
+    // the setter is called from the GUI thread and read on hl2-io.
+    std::atomic<bool>   m_postAlcCapture{false};
+    std::atomic<long long> m_postAlcBudget{0};
+    std::atomic<bool>   m_postAlcTruncated{false};
+
     void designFilters();
     bool isLowerSideband() const;
 

@@ -2876,7 +2876,17 @@ QJsonObject AudioEngine::startAutomationAudioCapture(
         allPoints || normalizedPoints.contains(QStringLiteral("output"));
     const bool captureFinal =
         allPoints || normalizedPoints.contains(QStringLiteral("final"));
-    if (!captureRaw && !capturePost && !captureOutput && !captureFinal) {
+    // TX span points. NOT included in `all`: `all` is what existing callers
+    // already ask for, and silently widening it would change what every other
+    // driver captures.
+    const bool captureTxRaw =
+        normalizedPoints.contains(QStringLiteral("txraw"));
+    const bool captureTxFinal =
+        normalizedPoints.contains(QStringLiteral("txfinal"));
+    const bool captureTxAlc =
+        normalizedPoints.contains(QStringLiteral("txalc"));
+    if (!captureRaw && !capturePost && !captureOutput && !captureFinal
+        && !captureTxRaw && !captureTxFinal && !captureTxAlc) {
         return QJsonObject{
             {QStringLiteral("ok"), false},
             {QStringLiteral("error"),
@@ -2896,6 +2906,12 @@ QJsonObject AudioEngine::startAutomationAudioCapture(
     m_automationCapturePost = capturePost;
     m_automationCaptureOutput = captureOutput;
     m_automationCaptureFinal = captureFinal;
+    m_automationCaptureTxRaw = captureTxRaw;
+    m_automationCaptureTxFinal = captureTxFinal;
+    m_automationCaptureTxAlc = captureTxAlc;
+    // Tell the modulator to start (or stop) accumulating. It allocates only
+    // while this is true, so nobody else's keyed transmission pays for it.
+    emit automationTxAlcCaptureChanged(captureTxAlc);
     m_automationCaptureStartNs = nowNs;
     m_automationCaptureEndNs =
         nowNs + static_cast<qint64>(boundedDurationMs) * 1000000;
@@ -2909,6 +2925,9 @@ QJsonObject AudioEngine::startAutomationAudioCapture(
         {QStringLiteral("post"), capturePost},
         {QStringLiteral("output"), captureOutput},
         {QStringLiteral("final"), captureFinal},
+        {QStringLiteral("txraw"), captureTxRaw},
+        {QStringLiteral("txfinal"), captureTxFinal},
+        {QStringLiteral("txalc"), captureTxAlc},
         {QStringLiteral("maxBytes"),
          static_cast<double>(m_automationCaptureMaxBytes)},
     };
@@ -3783,7 +3802,10 @@ void AudioEngine::captureAutomationAudio(const QString& point,
     if ((point == QLatin1String("raw") && !m_automationCaptureRaw)
         || (point == QLatin1String("post") && !m_automationCapturePost)
         || (point == QLatin1String("output") && !m_automationCaptureOutput)
-        || (point == QLatin1String("final") && !m_automationCaptureFinal)) {
+        || (point == QLatin1String("final") && !m_automationCaptureFinal)
+        || (point == QLatin1String("txraw") && !m_automationCaptureTxRaw)
+        || (point == QLatin1String("txfinal") && !m_automationCaptureTxFinal)
+        || (point == QLatin1String("txalc") && !m_automationCaptureTxAlc)) {
         return;
     }
 
@@ -8374,6 +8396,25 @@ void AudioEngine::onCwRecordPump()
     emit cwSidetoneRecordPcmReady(pcm);
 }
 
+void AudioEngine::onTxPostAlcBlock(const QByteArray& f32Mono, int sampleRateHz)
+{
+    // MEASUREMENT INSTRUMENTATION (bench-runner, 2026-09-06).
+    //
+    // PASSED THROUGH UNCONVERTED, AND THAT IS DELIBERATE. The block is already
+    // float32 mono -- Hl2TxDsp's `in` is a clamped float at
+    // inputSampleRateHz -- so the snapshot's unconditional `float32le` label is
+    // correct BY CONSTRUCTION here. The two taps in onTxAudioReady are correct
+    // BECAUSE they convert Int16; this one is correct because it does not.
+    //
+    // channels = 1. The analysis takes every `channels`-th sample, so a 2 here
+    // would silently read every other sample, halve the effective rate and
+    // change the crest -- a quiet wrong answer rather than an error.
+    if (!m_automationCaptureTxAlc || f32Mono.isEmpty())
+        return;
+    captureAutomationAudio(QStringLiteral("txalc"), QStringLiteral("mic"),
+                           QString(), f32Mono, sampleRateHz, 1);
+}
+
 void AudioEngine::onTxAudioReady()
 {
     // If a TCI client is actively feeding TX audio (binary frames via
@@ -8500,6 +8541,9 @@ void AudioEngine::onTxAudioReady()
     // carried as stereo int16, so choose/average the real mic channel before
     // any resampling, RADE/DAX branch, test tone, DSP, gain, limiter, or meter.
     TxMicChannelNormalizer::Diagnostics channelDiagnostics;
+    // The size BEFORE canonicalization: the diagnostics report what the
+    // normalizer saw, and this is what it was handed.
+    const qsizetype txPreNormalizeBytes = data.size();
     const bool capturedFloat32 = txInputIsFloat32();
     data = capturedFloat32
         ? TxMicChannelNormalizer::canonicalizeFloat32ToMonoStereo(
@@ -8522,6 +8566,39 @@ void AudioEngine::onTxAudioReady()
                                << "bytes:" << channelDiagnostics.inputBytes
                                << "rate:" << channelDiagnostics.inputSampleRate
                                << "channels:" << channelDiagnostics.inputChannels;
+        }
+        // MEASUREMENT INSTRUMENTATION (bench-runner, 2026-09-06). Logged
+        // UNCONDITIONALLY, because the interesting case is the one that sets
+        // no flag: boundRealtimeBlock returns false with nothing recorded when
+        // input.size() < frameBytes, i.e. the block is smaller than one frame.
+        //
+        // `capturedFloat32` is printed because the BRANCH is chosen by
+        // txInputIsFloat32() and not by what the device reported. If those
+        // disagree the Float32 canonicalizer runs on Int16 bytes -- frameBytes
+        // 8 instead of 4 -- and every size judgement is made against the wrong
+        // width. And the engine's m_txInputChannels is printed beside the
+        // normalizer's own derived inputChannels, because they can differ.
+        //
+        // Rate-limited: first occurrence, then once a second with the running
+        // count, so a reader can tell "every callback" from "one in fifty".
+        // The distribution is the finding.
+        ++m_txNormalizerEmptyCount;
+        const qint64 nowMs = txCaptureNowMs();
+        if (m_txNormalizerEmptyLastLogMs < 0
+            || nowMs - m_txNormalizerEmptyLastLogMs >= 1000) {
+            m_txNormalizerEmptyLastLogMs = nowMs;
+            qCWarning(lcAudio)
+                << "AudioEngine: TX mic block produced NO canonical output"
+                << "occurrences:" << m_txNormalizerEmptyCount
+                << "preNormalizeBytes:" << txPreNormalizeBytes
+                << "diag.inputBytes:" << channelDiagnostics.inputBytes
+                << "diag.inputChannels:" << channelDiagnostics.inputChannels
+                << "diag.inputSampleRate:" << channelDiagnostics.inputSampleRate
+                << "diag.partialFrameBytes:" << channelDiagnostics.partialFrameBytes
+                << "diag.inputRejected:" << channelDiagnostics.inputRejected
+                << "engine.m_txInputChannels:" << m_txInputChannels
+                << "engine.m_txInputRate:" << m_txInputRate
+                << "capturedFloat32:" << capturedFloat32;
         }
         return;
     }
@@ -8618,6 +8695,39 @@ void AudioEngine::onTxAudioReady()
         m_txChainPacked.load(std::memory_order_acquire));
     m_txVoiceProcessor->setMicGain(m_pcMicGain.load());
     m_txVoiceProcessor->setRnnoiseEnabled(m_rn2TxEnabled.load());
+    // MEASUREMENT INSTRUMENTATION (bench-runner, 2026-09-06). The SUCCESS
+    // path, logged once. Without it this build can only confirm one of its two
+    // outcomes: "no empty line and no reached line" localises the return
+    // between 8496 and here, and "reached line present but capturedBytes 0"
+    // moves the fault out of the audio path and into the capture plumbing.
+    if (!m_txTapReachedLogged) {
+        m_txTapReachedLogged = true;
+        qCWarning(lcAudio)
+            << "AudioEngine: TX audio REACHED the voice-processor seam"
+            << "bytes:" << data.size()
+            << "capturedFloat32:" << capturedFloat32
+            << "engine.m_txInputChannels:" << m_txInputChannels
+            << "engine.m_txInputRate:" << m_txInputRate;
+    }
+    // MEASUREMENT TAP: before the voice processor. Read-only -- it copies
+    // `data` and converts to float32 for the capture snapshot, which labels
+    // every chunk `float32le` unconditionally. `data` itself is untouched, so
+    // the signal path is unchanged; a tap that altered what it observes would
+    // be worthless for this.
+    if (m_automationCaptureTxRaw) {
+        QByteArray f32;
+        if (capturedFloat32) {
+            f32 = data;
+        } else {
+            const auto* i16 = reinterpret_cast<const int16_t*>(data.constData());
+            const int n = static_cast<int>(data.size() / sizeof(int16_t));
+            f32.resize(static_cast<qsizetype>(n) * static_cast<qsizetype>(sizeof(float)));
+            auto* fd = reinterpret_cast<float*>(f32.data());
+            for (int i = 0; i < n; ++i) fd[i] = i16[i] / 32768.0f;
+        }
+        captureAutomationAudio(QStringLiteral("txraw"), QStringLiteral("mic"),
+                               QString(), f32, m_txInputRate, 2);
+    }
     // Both routes return the same transport Int16 in `data`, so every tap,
     // monitor, meter and the Opus encoder below are untouched by this branch.
     const bool voiceProcessed = capturedFloat32
@@ -8666,6 +8776,20 @@ void AudioEngine::onTxAudioReady()
     // slot fast-returns when not recording / not transmitting, so this is cheap.
     // Mic-chain audio: the level is ours to manage, so the backend's ALC stays
     // in play.
+    // MEASUREMENT TAP: after the voice processor, beside the existing monitor
+    // feeds. `data` is transport Int16 at TxVoiceProcessor::kTransportRate by
+    // this point; converted to float32 for the snapshot, original untouched.
+    if (m_automationCaptureTxFinal) {
+        const auto* i16 = reinterpret_cast<const int16_t*>(data.constData());
+        const int n = static_cast<int>(data.size() / sizeof(int16_t));
+        QByteArray f32(static_cast<qsizetype>(n) * static_cast<qsizetype>(sizeof(float)),
+                       Qt::Uninitialized);
+        auto* fd = reinterpret_cast<float*>(f32.data());
+        for (int i = 0; i < n; ++i) fd[i] = i16[i] / 32768.0f;
+        captureAutomationAudio(QStringLiteral("txfinal"), QStringLiteral("mic"),
+                               QString(), f32,
+                               TxVoiceProcessor::kTransportRate, 2);
+    }
     emit txFinalMonitorPcmReady(data, /*clientLeveled=*/false);
 
     // ── TX post-final-limiter scope tap ─────────────────────────

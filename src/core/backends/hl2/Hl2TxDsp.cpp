@@ -170,6 +170,16 @@ bool Hl2TxDsp::isLowerSideband() const
     }
 }
 
+void Hl2TxDsp::setPostAlcCapture(bool on, long long budgetBytes)
+{
+    // MEASUREMENT INSTRUMENTATION (bench-runner, 2026-09-06). Called from the
+    // GUI thread; read on hl2-io. Atomics, no lock: the DSP must never wait on
+    // a capture decision.
+    m_postAlcBudget.store(on ? budgetBytes : 0, std::memory_order_relaxed);
+    m_postAlcTruncated.store(false, std::memory_order_relaxed);
+    m_postAlcCapture.store(on, std::memory_order_release);
+}
+
 // `clientLeveled` is unused since the ALC's ceiling became unity on every path;
 // see the declaration in Hl2TxDsp.h for why the parameter is kept for now.
 void Hl2TxDsp::processAudioBlock(const std::vector<float>& mono,
@@ -289,6 +299,19 @@ void Hl2TxDsp::processAudioBlock(const std::vector<float>& mono,
     // than one gauge that changes meaning.
     emit alcGain(static_cast<float>(alcGainDb()));
 
+    // MEASUREMENT INSTRUMENTATION (bench-runner, 2026-09-06). THE GATE IS HERE,
+    // before anything is allocated -- not before the emit. This tap is the only
+    // thing in this function that allocates, because the post-ALC sample exists
+    // only as a loop-local scalar and there is no existing buffer to copy. No
+    // other user's keyed transmission may pay for an allocation only a bench
+    // reads.
+    const bool tapOn = m_postAlcCapture.load(std::memory_order_acquire);
+    QByteArray postAlcTap;
+    if (tapOn) {
+        postAlcTap.resize(static_cast<qsizetype>(consumed * sizeof(float)));
+    }
+    auto* tapOut = tapOn ? reinterpret_cast<float*>(postAlcTap.data()) : nullptr;
+
     for (std::size_t s = 0; s < consumed; ++s) {
         // Mic peak is measured BEFORE the ALC, deliberately.
         //
@@ -306,6 +329,18 @@ void Hl2TxDsp::processAudioBlock(const std::vector<float>& mono,
         const float in = std::clamp(static_cast<float>(preAlc * m_alcGain),
                                     -1.0f, 1.0f);
         postAlcPeak = std::max(postAlcPeak, std::fabs(in));
+
+        // THE TAP. `in` is ALREADY float32, mono, at m_config.inputSampleRateHz
+        // and clamped to [-1,1].
+        //
+        // DO NOT CONVERT IT. automationAudioCaptureSnapshot labels every chunk
+        // `float32le` unconditionally, and here that label is correct BY
+        // CONSTRUCTION. The other two TX taps convert Int16 -> float32 and are
+        // correct BECAUSE they convert; this one is correct because it does
+        // not. A reader who has internalised "the snapshot lies about format,
+        // always convert" would corrupt this by following our own rule.
+        if (tapOut)
+            tapOut[s] = in;
 
         for (int u = 0; u < m_upsample; ++u) {
             // Zero-stuff: only the first sub-sample carries energy. The bandpass
@@ -355,6 +390,24 @@ void Hl2TxDsp::processAudioBlock(const std::vector<float>& mono,
         emit iqReady(m_iq);
     // PRE-modulation level: this is what a mic-gain control acts on, so it is
     // the number that tells an operator whether they are overdriving.
+    if (tapOn && !postAlcTap.isEmpty()) {
+        // A queued connection is a queue. Bound the total emitted for one
+        // capture and REPORT truncation rather than growing -- "trivial at the
+        // rate I expect" is how unbounded growth is always argued.
+        const long long want = static_cast<long long>(postAlcTap.size());
+        const long long left = m_postAlcBudget.fetch_sub(
+            want, std::memory_order_relaxed);
+        if (left >= want) {
+            emit txPostAlcBlock(postAlcTap, m_config.inputSampleRateHz);
+        } else if (!m_postAlcTruncated.exchange(true,
+                                                std::memory_order_relaxed)) {
+            qWarning()
+                << "Hl2TxDsp: post-ALC capture TRUNCATED -- budget exhausted."
+                << "The delivery path fell behind or the capture ran longer"
+                << "than budgeted. Reported, not grown.";
+        }
+    }
+
     emit micPeak(peak > 0.0f ? 20.0f * std::log10(peak) : -140.0f);
     // POST-ALC level, which is a different question and needs its own meter:
     // how close to full modulation the signal reaching the wire actually is.

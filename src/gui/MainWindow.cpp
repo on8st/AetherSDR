@@ -6913,6 +6913,28 @@ void MainWindow::wireBackendSeam(IRadioBackend* backend)
                 [this](const QString&, int, int) { armWdspSetupDialog(); });
         connect(hl2Backend, &hl2::Hl2Backend::dspSetupFinished, this,
                 [this] { dismissWdspSetupDialog(); });
+
+        // MEASUREMENT INSTRUMENTATION (bench-runner, 2026-09-06). The post-ALC
+        // capture tap is wired HERE because this is the only place that can
+        // see both objects: AudioEngine cannot reach the HL2 backend and the
+        // backend cannot reach AudioEngine, and neither seam is worth spending
+        // on a diagnostic.
+        //
+        // DATA OUT, queued from hl2-io so the modulator's thread never waits on
+        // the capture mutex. ENABLE IN, so the DSP allocates only while a
+        // capture is actually running.
+        if (m_audio) {
+            disconnect(hl2Backend, &hl2::Hl2Backend::txPostAlcBlock,
+                       m_audio, nullptr);
+            disconnect(m_audio, &AudioEngine::automationTxAlcCaptureChanged,
+                       hl2Backend, nullptr);
+            connect(hl2Backend, &hl2::Hl2Backend::txPostAlcBlock,
+                    m_audio, &AudioEngine::onTxPostAlcBlock,
+                    Qt::QueuedConnection);
+            connect(m_audio, &AudioEngine::automationTxAlcCaptureChanged,
+                    hl2Backend, &hl2::Hl2Backend::setPostAlcCapture,
+                    Qt::QueuedConnection);
+        }
     }
 
     // The demo delivers native 128-sample frames, which the improved 1024/4 NR2

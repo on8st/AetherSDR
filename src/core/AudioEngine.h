@@ -696,7 +696,24 @@ public slots:
     void setKiwiSdrAudioTransmitMuted(bool muted);
     void removeKiwiSdrAudioSource(const QString& sourceId);
 
+public slots:
+    // MEASUREMENT INSTRUMENTATION (bench-runner, 2026-09-06). Receives the
+    // modulator's post-ALC block, QUEUED from hl2-io -- so it is public: it is
+    // the target of a cross-object connection, not an internal handler like
+    // onTxAudioReady beside which it was first (wrongly) declared.
+    //
+    // float32 mono already -- see Hl2TxDsp's emit site -- so it is passed
+    // through UNCONVERTED.
+    void onTxPostAlcBlock(const QByteArray& f32Mono, int sampleRateHz);
+
 signals:
+    // MEASUREMENT INSTRUMENTATION (bench-runner, 2026-09-06). AudioEngine
+    // cannot reach the HL2 backend any more than the backend can reach it, so
+    // the ENABLE travels out by signal exactly as the DATA travels in. Wired
+    // where both objects are already visible.
+    void automationTxAlcCaptureChanged(bool on);
+
+
     void rxStarted();
     void rxStopped();
     void levelChanged(float rms);  // audio level for VU meter, 0.0–1.0
@@ -1435,6 +1452,28 @@ private:
     bool                   m_automationCapturePost{false};
     bool                   m_automationCaptureOutput{false};
     bool                   m_automationCaptureFinal{false};
+    // MEASUREMENT INSTRUMENTATION (bench-runner, 2026-09-06). The four points
+    // above are all on the RECEIVE path, so the transmit chain is unobservable
+    // from outside the process. These two make it a SPAN: before the voice
+    // processor and after it.
+    bool                   m_automationCaptureTxRaw{false};
+    bool                   m_automationCaptureTxFinal{false};
+    // The post-ALC point. Unlike the two above it is fed from OUTSIDE this
+    // class -- Hl2TxDsp lives on hl2-io and delivers by queued signal -- so
+    // AudioEngine only holds the flag and the receiving slot.
+    bool                   m_automationCaptureTxAlc{false};
+    // WHY THE TX TAPS READ ZERO (bench-runner, 2026-09-06). The return at the
+    // channel normalizer's empty result is SILENT BY CONSTRUCTION: of
+    // boundRealtimeBlock's three false paths, only the oversize one sets a
+    // flag, so an under-one-frame block returns with no log and no counter.
+    // These count it and rate-limit the line -- at a 5 ms poll the branch can
+    // fire 200x/s and would bury the log it exists to illuminate.
+    quint64                m_txNormalizerEmptyCount{0};
+    qint64                 m_txNormalizerEmptyLastLogMs{-1};
+    // And the SUCCESS path announces itself once, so that "no empty line and
+    // no reached line" localises the return between them. A probe that can
+    // only confirm one of its outcomes is not a probe.
+    bool                   m_txTapReachedLogged{false};
     qint64                 m_automationCaptureStartNs{0};
     qint64                 m_automationCaptureEndNs{0};
     qsizetype              m_automationCaptureBytes{0};

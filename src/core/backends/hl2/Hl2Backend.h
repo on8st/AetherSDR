@@ -115,6 +115,13 @@ public:
     void setTxAudioMonitor(bool on) override;
     void setTxFrequency(double hz);
     void setTxDriveLevel(int level);
+    // Enable the post-ALC capture tap on the modulator. OFF by default.
+    void setPostAlcCapture(bool on);
+
+    // MEASUREMENT INSTRUMENTATION (bench-runner, 2026-09-06). The ALC
+    // condition this connect is running, recorded so healthSnapshot can report
+    // it on EVERY run including shipping.
+    QString m_alcCondition{QStringLiteral("shipping")};
     // Baseband TX test tone, offsetHz from the carrier, amplitude 0..1.
     // Opt-in only — never enabled by a default.
     void setTxTestTone(double offsetHz, double amplitude);
@@ -160,6 +167,13 @@ signals:
     // Emitted from the GUI thread, including the terminal one, so a slot may
     // touch widgets directly.
     void dspSetupProgress(const QString& stage, int done, int total);
+
+    // MEASUREMENT INSTRUMENTATION (bench-runner, 2026-09-06). Forwarded from
+    // Hl2TxDsp so the tap's data can leave the backend without AudioEngine
+    // being reachable from inside it -- that seam is clean and a diagnostic is
+    // not worth spending it. Backend-specific on purpose, like
+    // dspSetupProgress above: no other family has an Hl2TxDsp.
+    void txPostAlcBlock(const QByteArray& f32Mono, int sampleRateHz);
     void dspSetupFinished();
 
 private:

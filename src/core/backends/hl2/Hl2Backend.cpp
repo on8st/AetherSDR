@@ -578,6 +578,11 @@ Hl2Backend::Hl2Backend(QObject* parent) : IRadioBackend(parent)
         m_alcGainDb = db;
         emit meterUpdate(QStringLiteral("TX:ALCGAIN"), db);
     });
+    // MEASUREMENT INSTRUMENTATION (bench-runner, 2026-09-06). Straight
+    // forward, no processing: this backend is a conduit for the tap, not a
+    // participant in it.
+    connect(m_txDsp, &Hl2TxDsp::txPostAlcBlock,
+            this, &Hl2Backend::txPostAlcBlock);
     // The modulator's own copy of the mic gain, for healthSnapshot(). Reported
     // ALONGSIDE m_micLevel rather than instead of it: the operator's request and
     // the modulator's state are different facts, and a diagnosis needs to see
@@ -1961,6 +1966,101 @@ void Hl2Backend::connectRadio(const RadioConnectRequest& request)
     const Receiver* txRx = rx(m_txDdc);
     const QString txMode = txRx ? txRx->mode : QStringLiteral("USB");
     Hl2TxDsp::Config tc;
+    // MEASUREMENT INSTRUMENTATION (bench-runner, 2026-09-06). ONE VARIABLE
+    // NAMING THE CONDITION, not two independent overrides.
+    //
+    // Two overrides would admit combinations nobody designed -- alcEnabled
+    // false with a makeup of 17 dB, say -- and the recorded condition would
+    // then be a tuple a reader has to decode. One string maps to one Config
+    // HERE, where the mapping is reviewable, rather than being assembled at
+    // the call site.
+    //
+    // ABSENT YIELDS SHIPPING. The struct defaults ARE the shipping
+    // configuration, so an unset variable leaves them untouched and the
+    // condition records as "shipping" -- never a silent third state.
+    //
+    // A MALFORMED VALUE REFUSES; IT DOES NOT FALL BACK. A fallback would make
+    // a mistyped condition look like a SUCCESSFUL RUN OF A DIFFERENT
+    // CONDITION: the run would report "off", silently measure shipping, and
+    // every check would pass. configure() already refuses an invalid sample
+    // rate rather than guessing; this matches that.
+    m_alcCondition = QStringLiteral("shipping");
+    if (qEnvironmentVariableIsSet("AETHER_HL2_ALC_CONDITION")) {
+        const QString want =
+            qEnvironmentVariable("AETHER_HL2_ALC_CONDITION").trimmed().toLower();
+        if (want == QLatin1String("shipping")) {
+            // defaults, left exactly as they are
+        } else if (want == QLatin1String("off")) {
+            tc.alcEnabled = false;
+        } else {
+            // REFUSE THE CONNECT, using this function's own failure idiom
+            // (emit connectionError then return) so the caller is told rather
+            // than left waiting. A silent return would look like a connect
+            // that never completed, which is the shape #5413 is about.
+            const QString msg = QStringLiteral(
+                "HL2: AETHER_HL2_ALC_CONDITION is '%1' -- expected "
+                "shipping|off. 'no-makeup' is RETIRED: it set "
+                "alcMaxGainDb, which no longer exists now that the ALC "
+                "ceilings at unity, so the condition it named IS "
+                "shipping. Aliasing it would report an A/B whose two "
+                "legs were the same binary. Refusing to connect: "
+                "falling back to "
+                "a default here would make a mistyped condition look like a "
+                "successful run of a different one.")
+                .arg(want.isEmpty() ? QStringLiteral("(empty)") : want);
+            qCCritical(lcHl2).noquote() << msg;
+            m_alcCondition = QStringLiteral("REFUSED:") + want;
+            emit connectionError(msg);
+            return;
+        }
+        m_alcCondition = want;
+    }
+
+    // MEASUREMENT INSTRUMENTATION (bench-runner, 2026-09-06): drive the mic
+    // slider from the environment.
+    //
+    // WHY THIS EXISTS. The ALC's upward hold compares the block peak AFTER mic
+    // gain against alcHoldBelowDbfs, so the operator's slider is what decides
+    // whether a given room floor crosses the threshold. Sweeping it is the
+    // whole experiment. The slider is a GUI control that is only reachable when
+    // the Phone/CW applet is VISIBLE ("refused: 'Microphone gain' is not
+    // visible"), and a fresh profile has no workspace layout, so a bench cannot
+    // reach it without first constructing one.
+    //
+    // THIS GOES THROUGH setMicGain(), THE OPERATOR'S OWN ENTRY POINT, rather
+    // than writing m_micLevel or Hl2TxDsp::setMicGain directly. So it uses the
+    // same micSliderToLinear mapping, sets the same m_micLevel, and publishes
+    // the same micLevel / micGainDb / micGainAppliedLinear rows the GUI path
+    // does -- which means a run's readback check still verifies the real value
+    // and cannot be fooled by the override itself.
+    //
+    // WHAT IT DOES NOT TEST is the GUI wiring between the slider widget and
+    // TransmitModel. That is not what is under test, and a run using this must
+    // say so rather than implying it drove the operator's control.
+    //
+    // A MALFORMED VALUE REFUSES; IT DOES NOT FALL BACK -- same reasoning as the
+    // ALC condition above: a mistyped level would otherwise report one slider
+    // position while measuring another, and every check would pass.
+    if (qEnvironmentVariableIsSet("AETHER_HL2_MIC_LEVEL")) {
+        const QString raw =
+            qEnvironmentVariable("AETHER_HL2_MIC_LEVEL").trimmed();
+        bool okLevel = false;
+        const int level = raw.toInt(&okLevel);
+        if (!okLevel || level < 0 || level > 100) {
+            const QString msg = QStringLiteral(
+                "HL2: AETHER_HL2_MIC_LEVEL is '%1' -- expected an integer "
+                "0..100. Refusing to connect: a fallback here would report one "
+                "slider position while measuring another.")
+                .arg(raw.isEmpty() ? QStringLiteral("(empty)") : raw);
+            qCCritical(lcHl2).noquote() << msg;
+            emit connectionError(msg);
+            return;
+        }
+        qCInfo(lcHl2) << "HL2: mic slider driven from the environment to"
+                      << level << "(bench instrumentation)";
+        setMicGain(level);
+    }
+
     tc.inputSampleRateHz = 24000;    // AudioEngine's rate; submitTxAudio re-checks
     tc.outputSampleRateHz = 48000;   // EP2 is fixed at 48 kHz
     tc.mode = modeFromString(txMode);
@@ -4019,6 +4119,15 @@ void Hl2Backend::setTxPower(int percent)
     applyDrive(m_rfPowerPercent);
 }
 
+void Hl2Backend::setPostAlcCapture(bool on)
+{
+    // Queued: m_txDsp lives on hl2-io and this is called from the GUI thread.
+    if (m_txDsp)
+        QMetaObject::invokeMethod(m_txDsp, [dsp = m_txDsp, on] {
+            dsp->setPostAlcCapture(on);
+        }, Qt::QueuedConnection);
+}
+
 void Hl2Backend::setTxDriveLevel(int level)
 {
     if (!m_metis)
@@ -4405,6 +4514,21 @@ IRadioBackend::HealthSnapshot Hl2Backend::healthSnapshot() const
     put("alcTargetPeak",
         QStringLiteral("ALC target peak (linear, all paths)"),
         m_alcTargetPeak);
+    // THE ALC'S CONFIGURATION, BESIDE ITS BEHAVIOUR, ON EVERY RUN INCLUDING
+    // SHIPPING -- so a capture is self-describing rather than described by the
+    // absence of a field, and a run records what the APPLICATION says it is
+    // running rather than what the environment was set to.
+    put("alcCondition", QStringLiteral("ALC condition in force"),
+        m_alcCondition.isEmpty() ? QStringLiteral("shipping") : m_alcCondition);
+    put("alcEnabledCfg", QStringLiteral("ALC enabled (configured)"),
+        m_txDsp ? QVariant(m_txDsp->configuredAlcEnabled()) : QVariant());
+    // WAS alcMaxGainDbCfg. That field is gone with the makeup half, and the
+    // quantity that now bounds the stage is the target it reduces toward, so
+    // this row is re-pointed rather than dropped: a capture must still say
+    // what the modulator was configured with, and a bench reading an absent
+    // row cannot tell "not instrumented" from "not configured".
+    put("alcTargetPeakCfg", QStringLiteral("ALC target peak (configured)"),
+        m_txDsp ? QVariant(m_txDsp->configuredAlcTargetPeak()) : QVariant());
     put("alcGainDb", QStringLiteral("ALC gain applied (dB)"),
         std::isnan(m_alcGainDb) ? QVariant() : QVariant(m_alcGainDb));
     put("alcPeakDbfs", QStringLiteral("Post-ALC peak (dBFS)"),
