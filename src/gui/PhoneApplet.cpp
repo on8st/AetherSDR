@@ -1,6 +1,7 @@
 #include "PhoneApplet.h"
 #include "GuardedSlider.h"
 #include "models/TransmitModel.h"
+#include "core/ShortcutManager.h"
 #include "Theme.h"
 
 #include <QPushButton>
@@ -161,6 +162,10 @@ void PhoneApplet::buildUI()
         m_voxBtn->setFixedSize(52, 22);
         m_voxBtn->setAccessibleName("VOX voice-operated transmit");
         m_voxBtn->setAccessibleDescription("Toggle voice-activated transmit");
+        m_voxBtn->setToolTip(tr("Toggle voice-activated transmit"));
+        // Names the shortcut that works this button; ShortcutManager appends the
+        // bound key to the tooltip. Declared with the widget, not in a list.
+        m_voxBtn->setProperty(ShortcutManager::kActionProperty, "vox_toggle");
         m_voxBtn->setStyleSheet(kBtnBase + kGreenActive);
         connect(m_voxBtn, &QPushButton::toggled, this, [this](bool on) {
             if (!m_updatingFromModel && m_model) m_model->setVoxEnable(on);

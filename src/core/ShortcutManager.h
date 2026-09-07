@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QObject>
+#include <QEvent>
 #include <QByteArray>
 #include <QKeySequence>
 #include <QShortcut>
@@ -91,6 +92,51 @@ public:
     // have their arrow keys stolen by window-level shortcuts.
     void setShortcutsEnabled(bool enabled);
 
+    // ── Shortcut tooltips ────────────────────────────────────────────────
+    // TELL THE OPERATOR WHICH KEY WORKS A BUTTON, ON THE BUTTON.
+    //
+    // The shortcuts have always been there; nothing pointed at them. A widget
+    // opts in by carrying a dynamic property naming its action:
+    //
+    //     btn->setProperty(ShortcutManager::kActionProperty, "mox_toggle");
+    //
+    // and applyShortcutTooltips() walks the tree appending " (T)" to its
+    // tooltip. The property idiom rather than a list of button pointers here,
+    // for the same reason markTxKeying uses one: the declaration lives WITH the
+    // widget, and a hand-maintained list in this header would drift the way
+    // #4057's TX id list did (atu_start was missed).
+    //
+    // Re-runnable, and it stays correct in three situations that all occur:
+    //   * Re-applied after a rebind — the un-annotated text is stashed in
+    //     kBaseTooltipProperty, so the suffix is REPLACED, not accumulated.
+    //   * The widget rewrites its own tooltip later (TxApplet rewrites TUNE and
+    //     ATU on every availability change). applyShortcutTooltips installs
+    //     this manager as an event filter on each opted-in widget and
+    //     re-annotates on QEvent::ToolTipChange, so the annotation survives
+    //     without every such call site having to know about shortcuts.
+    //   * An action bound to no key is left entirely alone. An empty bracket
+    //     would advertise a shortcut that does not exist, and most TX actions
+    //     ship unbound.
+    //
+    // shortcutsEnabled is the View-menu master toggle (KeyboardShortcutsEnabled,
+    // which defaults to False), NOT setShortcutsEnabled's transient slider
+    // lease. Pass it through: with the master toggle off, no key does anything,
+    // and a tooltip promising one would be a lie. Passing false strips the
+    // annotations back to the widgets' own text; call it again from the toggle
+    // so they come back when the operator switches shortcuts on.
+    //
+    // A widget with no tooltip of its own gets the key alone — still more than
+    // nothing. A property naming an unknown action is left untouched, so a typo
+    // cannot silently eat a tooltip.
+    //
+    // Display uses QKeySequence::NativeText: a Mac shows the glyph forms, Linux
+    // and Windows show "Ctrl".
+    static constexpr const char* kActionProperty = "shortcutAction";
+    static constexpr const char* kBaseTooltipProperty = "shortcutBaseToolTip";
+    static constexpr const char* kAppliedTooltipProperty = "shortcutAppliedToolTip";
+    static constexpr const char* kTooltipFilterProperty = "shortcutToolTipFiltered";
+    void applyShortcutTooltips(QWidget* root, bool shortcutsEnabled = true);
+
     // Query
     const QVector<Action>& actions() const { return m_actions; }
     Action* action(const QString& id);
@@ -104,11 +150,20 @@ public:
 signals:
     void bindingsChanged();
 
+protected:
+    // Watches opted-in widgets for QEvent::ToolTipChange so an out-of-band
+    // setToolTip() is re-annotated rather than silently dropping the key.
+    bool eventFilter(QObject* watched, QEvent* event) override;
+
 private:
     void normalizeDuplicateBindings();
+    void annotateShortcutTooltip(QWidget* w) const;
 
     QVector<Action> m_actions;
     QVector<QShortcut*> m_shortcuts;
+    // Latched by applyShortcutTooltips so the ToolTipChange re-annotation,
+    // which takes no arguments, honours the same master toggle.
+    bool m_shortcutTooltipsEnabled{true};
 };
 
 } // namespace AetherSDR

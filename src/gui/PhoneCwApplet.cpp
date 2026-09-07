@@ -7,6 +7,7 @@
 #include "models/TransmitModel.h"
 #include "Theme.h"
 #include "core/AppSettings.h"
+#include "core/ShortcutManager.h"
 
 #include <cmath>
 #include <QPushButton>
@@ -369,6 +370,10 @@ void PhoneCwApplet::buildPhonePanel()
         m_procBtn->setFixedWidth(48);
         m_procBtn->setAccessibleName("Speech processor");
         m_procBtn->setAccessibleDescription("Toggle speech processor for compression");
+        m_procBtn->setToolTip(tr("Toggle speech processor for compression"));
+        // Names the shortcut that works this button; ShortcutManager appends the
+        // bound key to the tooltip. Declared with the widget, not in a list.
+        m_procBtn->setProperty(ShortcutManager::kActionProperty, "speech_proc_toggle");
         m_procBtn->setStyleSheet(QString(kButtonBase) + kGreenActive);
         row->addWidget(m_procBtn);
 
@@ -414,6 +419,8 @@ void PhoneCwApplet::buildPhonePanel()
         m_daxBtn->setFixedWidth(48);
         m_daxBtn->setAccessibleName("DAX digital audio");
         m_daxBtn->setAccessibleDescription("Toggle DAX digital audio exchange");
+        m_daxBtn->setToolTip(tr("Toggle DAX digital audio exchange"));
+        m_daxBtn->setProperty(ShortcutManager::kActionProperty, "dax_toggle");
         m_daxBtn->setStyleSheet(QString(kButtonBase) + kBlueActive);
         row->addWidget(m_daxBtn);
 
@@ -447,6 +454,8 @@ void PhoneCwApplet::buildPhonePanel()
         m_monBtn->setFixedWidth(48);
         m_monBtn->setAccessibleName("TX monitor");
         m_monBtn->setAccessibleDescription("Toggle sidetone monitor of transmitted audio");
+        m_monBtn->setToolTip(tr("Toggle sidetone monitor of transmitted audio"));
+        m_monBtn->setProperty(ShortcutManager::kActionProperty, "tx_monitor_toggle");
         m_monBtn->setStyleSheet(QString(kButtonBase) + kGreenActive);
         row->addWidget(m_monBtn);
 

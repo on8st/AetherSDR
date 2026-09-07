@@ -6,6 +6,7 @@
 #include <QRegularExpression>
 #include <QSaveFile>
 #include <QStringConverter>
+#include <QEvent>
 #include <QWidget>
 #include <QDebug>
 
@@ -730,6 +731,106 @@ QStringList ShortcutManager::categories()
 {
     return {"Frequency", "Band", "Mode", "TX", "CW", "Audio", "Slice",
             "Filter", "Tuning", "DSP", "AGC", "EQ", "Display", "RIT/XIT"};
+}
+
+// ── Shortcut tooltips ───────────────────────────────────────────────────────
+// See the block comment on applyShortcutTooltips in ShortcutManager.h for why
+// this is a per-widget property rather than a list of buttons.
+
+namespace {
+
+// The one place the annotation's shape is written. Both the tree walk and the
+// live ToolTipChange re-apply go through it, so they cannot disagree about what
+// "already annotated" looks like.
+QString annotatedToolTip(const QString& base, const QKeySequence& key)
+{
+    if (key.isEmpty())
+        return base;
+    const QString keyText = key.toString(QKeySequence::NativeText);
+    if (keyText.isEmpty())
+        return base;
+    return base.isEmpty() ? keyText : QStringLiteral("%1 (%2)").arg(base, keyText);
+}
+
+} // namespace
+
+void ShortcutManager::annotateShortcutTooltip(QWidget* w) const
+{
+    const QVariant idVar = w->property(kActionProperty);
+    if (!idVar.isValid())
+        return;
+    const QString id = idVar.toString();
+
+    const Action* a = nullptr;
+    for (const Action& candidate : m_actions) {
+        if (candidate.id == id) {
+            a = &candidate;
+            break;
+        }
+    }
+    // A property naming an action this manager does not know — a typo, or a
+    // widget from a build where the action was removed. Leave the widget's own
+    // tooltip completely alone rather than blanking it.
+    if (!a)
+        return;
+
+    const QString current = w->toolTip();
+    const QVariant appliedVar = w->property(kAppliedTooltipProperty);
+
+    QString base;
+    if (appliedVar.isValid() && appliedVar.toString() == current) {
+        // Still exactly what we last wrote, so the stashed base is still the
+        // widget's own text. Re-reading `current` as the base here is what would
+        // grow a second suffix on every rebind.
+        base = w->property(kBaseTooltipProperty).toString();
+    } else {
+        // First pass, or the widget rewrote its tooltip out of band. Whatever
+        // is there now IS the widget's own text.
+        base = current;
+        w->setProperty(kBaseTooltipProperty, base);
+    }
+
+    // Master toggle off → treat every action as unbound, which is exactly the
+    // truth: with KeyboardShortcutsEnabled false, shortcutGuard() refuses every
+    // handler and no key does anything.
+    const QString wanted = annotatedToolTip(
+        base, m_shortcutTooltipsEnabled ? a->currentKey : QKeySequence());
+    // Record before writing: setToolTip sends ToolTipChange synchronously, which
+    // re-enters this function through the event filter. It must see its own
+    // write as already-ours and stop, or this recurses.
+    w->setProperty(kAppliedTooltipProperty, wanted);
+    if (wanted != current)
+        w->setToolTip(wanted);
+}
+
+void ShortcutManager::applyShortcutTooltips(QWidget* root, bool shortcutsEnabled)
+{
+    m_shortcutTooltipsEnabled = shortcutsEnabled;
+    if (!root)
+        return;
+    QList<QWidget*> targets = root->findChildren<QWidget*>();
+    targets.prepend(root);
+    for (QWidget* w : targets) {
+        if (!w->property(kActionProperty).isValid())
+            continue;
+        // Idempotent: this walk re-runs on every rebind, and installEventFilter
+        // would otherwise stack a duplicate filter each time.
+        if (!w->property(kTooltipFilterProperty).toBool()) {
+            w->setProperty(kTooltipFilterProperty, true);
+            w->installEventFilter(this);
+        }
+        annotateShortcutTooltip(w);
+    }
+}
+
+bool ShortcutManager::eventFilter(QObject* watched, QEvent* event)
+{
+    if (event->type() == QEvent::ToolTipChange) {
+        if (auto* w = qobject_cast<QWidget*>(watched))
+            annotateShortcutTooltip(w);
+    }
+    // Never consume: the tooltip change still has to reach the widget.
+    return QObject::eventFilter(watched, event);
 }
 
 } // namespace AetherSDR

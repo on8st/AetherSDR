@@ -2782,6 +2782,20 @@ target_include_directories(shortcut_manager_test PRIVATE src)
 target_link_libraries(shortcut_manager_test PRIVATE Qt6::Core Qt6::Widgets)
 add_test(NAME shortcut_manager_test COMMAND shortcut_manager_test)
 
+# Shortcut tooltip annotation (ON8ST: "add tooltip on hover over for buttons
+# that have a keyboard shortcut"). Needs QApplication for QWidget, so it is a
+# separate target from the QCoreApplication-based shortcut_manager_test.
+add_executable(shortcut_tooltip_test
+    tests/shortcut_tooltip_test.cpp
+    src/core/ShortcutManager.cpp
+    ${AETHER_SETTINGS_SOURCES}
+)
+target_include_directories(shortcut_tooltip_test PRIVATE src)
+target_link_libraries(shortcut_tooltip_test PRIVATE Qt6::Core Qt6::Widgets)
+add_test(NAME shortcut_tooltip_test COMMAND shortcut_tooltip_test)
+set_tests_properties(shortcut_tooltip_test PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
 add_executable(antenna_alias_test
     tests/antenna_alias_test.cpp
     src/models/AntennaAliasStore.cpp
@@ -4579,6 +4593,7 @@ set(AETHER_SETTINGS_CONSUMERS
     s_meter_geometry_test
     qrz_callsign_test
     shortcut_manager_test
+    shortcut_tooltip_test
     antenna_alias_test
     mqtt_settings_test
     ax25_libmodem_shim_test

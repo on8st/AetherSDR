@@ -4,6 +4,7 @@
 #include "ComboStyle.h"
 #include "HGauge.h"
 #include "Theme.h"
+#include "core/ShortcutManager.h"
 #include "core/TxKeyingMarker.h"
 #include "models/RadioModel.h"
 #include "models/TransmitModel.h"
@@ -269,6 +270,11 @@ void TxApplet::buildUI()
             "border: 1px solid #2a3040; }";
         m_tuneBtn = new QPushButton("TUNE");
         markTxKeying(m_tuneBtn);   // emits a tune carrier — keys TX (#3646)
+        // Declares which shortcut works this button, so its tooltip can say so.
+        // Declared here, with the widget, for the same reason markTxKeying is.
+        // This button rewrites its own tooltip in updateTuneAvailability; the
+        // annotation survives that (ShortcutManager watches ToolTipChange).
+        m_tuneBtn->setProperty(ShortcutManager::kActionProperty, "tune_toggle");
         m_tuneBtn->setStyleSheet(btnStyle);
         m_tuneBtn->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
         m_tuneBtn->setFixedHeight(22);
@@ -289,10 +295,16 @@ void TxApplet::buildUI()
         m_moxBtn->setFixedHeight(22);
         m_moxBtn->setAccessibleName("MOX transmit");
         m_moxBtn->setAccessibleDescription("Toggle manual transmit on or off");
+        // Had no tooltip at all. Give it the text the screen reader already
+        // gets, so the shortcut annotation has something to hang off rather
+        // than leaving the operator hovering over a bare key name.
+        m_moxBtn->setToolTip(tr("Toggle manual transmit on or off"));
+        m_moxBtn->setProperty(ShortcutManager::kActionProperty, "mox_toggle");
         row->addWidget(m_moxBtn);
 
         m_atuBtn = new QPushButton("ATU");
         markTxKeying(m_atuBtn);    // starts ATU tune — keys TX (#3646)
+        m_atuBtn->setProperty(ShortcutManager::kActionProperty, "atu_start");
         m_atuBtn->setStyleSheet(btnStyle);
         m_atuBtn->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
         m_atuBtn->setFixedHeight(22);
@@ -579,7 +591,11 @@ void TxApplet::updateAtuAvailability()
         tip = tr("Antenna tuner controls are unavailable for this radio");
     else if (m_tgxlOperate)
         tip = tr("Disabled — TGXL is in OPERATE mode");
-    m_atuBtn->setToolTip(tip);
+    // The available case used to clear the tooltip entirely. It now carries the
+    // same text the screen reader gets: with atu_start bound to a key, an empty
+    // base would leave the operator hovering over a naked key name with no idea
+    // what it does.
+    m_atuBtn->setToolTip(tip.isEmpty() ? tr("Start automatic antenna tuner") : tip);
     if (!m_radioHasTunerMemories) {
         m_memBtn->setToolTip(tr("ATU memory controls are unavailable for this radio"));
     } else {

@@ -1258,6 +1258,18 @@ void MainWindow::registerShortcutActions()
     s_keyboardShortcutsEnabled = m_keyboardShortcutsEnabled;
     m_shortcutManager.rebuildShortcuts(this, shortcutGuard);
 
+    // Tell the operator which key works a button, on the button. buildUI() has
+    // already run by the time registerShortcutActions() is called, so the walk
+    // finds the applets. Re-run on every rebind so a remap in ShortcutDialog is
+    // reflected on the buttons immediately — the annotation replaces the old
+    // suffix rather than stacking a second one.
+    // m_keyboardShortcutsEnabled is the View-menu master toggle and defaults to
+    // FALSE, so on a stock profile no key does anything and no button claims one.
+    m_shortcutManager.applyShortcutTooltips(this, m_keyboardShortcutsEnabled);
+    connect(&m_shortcutManager, &ShortcutManager::bindingsChanged, this, [this]() {
+        m_shortcutManager.applyShortcutTooltips(this, m_keyboardShortcutsEnabled);
+    });
+
     m_sliderShortcutLeaseTimer.setSingleShot(true);
     connect(&m_sliderShortcutLeaseTimer, &QTimer::timeout, this,
             [this]() { releaseSliderShortcutLease(true); });

@@ -1154,6 +1154,10 @@ void MainWindow::buildMenuBar()
         s_keyboardShortcutsEnabled = on;
         AppSettings::instance().setValue("KeyboardShortcutsEnabled", on ? "True" : "False");
         AppSettings::instance().save();
+        // A button must not advertise a key while this is off — with the master
+        // toggle down, shortcutGuard() refuses every handler and the key does
+        // nothing. Strips the annotations on the way down, restores on the way up.
+        m_shortcutManager.applyShortcutTooltips(this, on);
     });
     auto* configShortcutsAct = viewMenu->addAction("Configure Shortcuts...");
     configShortcutsAct->setMenuRole(QAction::NoRole); // prevent macOS auto-reparenting (#883)
@@ -1162,6 +1166,9 @@ void MainWindow::buildMenuBar()
         dlg.exec();
         // Rebuild shortcuts in case bindings changed
         m_shortcutManager.rebuildShortcuts(this, shortcutGuard);
+        // ...and re-annotate the buttons that name a shortcut, so a remap shows
+        // up on hover without a restart.
+        m_shortcutManager.applyShortcutTooltips(this, m_keyboardShortcutsEnabled);
     });
 
     viewMenu->addSeparator();
