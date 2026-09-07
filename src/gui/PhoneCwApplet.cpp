@@ -260,9 +260,16 @@ void PhoneCwApplet::buildPhonePanel()
     // Beside Compression because they answer the same kind of question — how
     // much is the chain changing my audio — where the ALC gauge below answers
     // where the audio ended up. The two are easily confused and the difference
-    // is the whole reason this one exists: a post-ALC level meter sits pinned
-    // near its target by construction, so an operator whose microphone is 30 dB
-    // too quiet sees an ALC gauge that looks perfect.
+    // is the whole reason this one exists: TX Peak answers "where did my audio
+    // end up", this answers "how much is the stage taking off to put it
+    // there", and only the second tells a quiet operator to reach for the mic
+    // slider.
+    //
+    // (An earlier version of this note said the post-ALC meter "sits pinned
+    // near its target by construction". That described the ALC's makeup half,
+    // which is gone; TX Peak now tracks the real level, and uniquely shows the
+    // hard clamp. See Hl2TxDsp::processAudioBlock.)
+
     //
     // The range is the modulator's, not a preference, and it is ONE-SIDED
     // because the stage is. Hl2TxDsp's ALC ceilings at unity on every path, so

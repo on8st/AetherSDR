@@ -296,17 +296,33 @@ void Hl2TxDsp::processAudioBlock(const std::vector<float>& mono,
     for (std::size_t s = 0; s < consumed; ++s) {
         // Mic peak is measured BEFORE the ALC, deliberately.
         //
-        // A post-ALC meter sits pinned near the target by definition and tells
-        // the operator nothing — it reports the ALC's success, not their input
-        // level. What a mic-gain control acts on is this, and how hard the ALC
-        // is working is reported separately as alcGain(), which reaches the
-        // operator as TX:ALCGAIN.
+        // What a mic-gain control acts on is the level BEFORE the stage, and
+        // how hard the stage is working is reported separately as alcGain(),
+        // which reaches the operator as TX:ALCGAIN.
+        //
+        // THIS COMMENT USED TO SAY the post-ALC meter "sits pinned near the
+        // target by definition and tells the operator nothing". That was true
+        // of the ALC THAT NO LONGER EXISTS: with up to 40 dB of makeup the
+        // stage normalised every input onto alcTargetPeak, so the post-ALC
+        // reading really was the same number whatever the operator did. Under
+        // a unity ceiling the gain is reduction-only, so below the target the
+        // output IS the input and the post-ALC meter tracks something real.
+        //
+        // It also carries something NOTHING ELSE ON THE PANEL CAN SEE — see
+        // postAlcPeak below, which is sampled after the hard clamp.
         const float preAlc = static_cast<float>(m_inBuffer[s] * micGain);
         peak = std::max(peak, std::fabs(preAlc));
 
         // Hard limit AFTER the ALC. The ALC is a smoothed estimate and will
         // overshoot on a transient; letting that through would transmit
         // distortion across the band rather than merely clipping our own audio.
+        //
+        // AND THE PEAK BELOW IS SAMPLED AFTER THE CLAMP, deliberately. Mic
+        // peak plus alcGain predicts this reading exactly — until the clamp
+        // bites, and then it does not. So the post-ALC meter is arithmetically
+        // redundant everywhere EXCEPT the one case that harms other operators,
+        // which is the case worth a gauge. It is the only reading downstream
+        // of the limiter.
         const float in = std::clamp(static_cast<float>(preAlc * m_alcGain),
                                     -1.0f, 1.0f);
         postAlcPeak = std::max(postAlcPeak, std::fabs(in));
