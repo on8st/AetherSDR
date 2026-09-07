@@ -1154,9 +1154,11 @@ void MainWindow::buildMenuBar()
         s_keyboardShortcutsEnabled = on;
         AppSettings::instance().setValue("KeyboardShortcutsEnabled", on ? "True" : "False");
         AppSettings::instance().save();
-        // A button must not advertise a key while this is off — with the master
-        // toggle down, shortcutGuard() refuses every handler and the key does
-        // nothing. Strips the annotations on the way down, restores on the way up.
+        // Re-word the annotations: with the master toggle down a button still
+        // names its key, qualified "(T — shortcuts disabled)", so an operator
+        // who never opened this menu learns both that the key exists and why it
+        // is doing nothing. Hiding it would hide the switch from the only person
+        // who needs it (#5262 doctrine: dim with a reason, never hide).
         m_shortcutManager.applyShortcutTooltips(this, on);
     });
     auto* configShortcutsAct = viewMenu->addAction("Configure Shortcuts...");

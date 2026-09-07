@@ -742,14 +742,25 @@ namespace {
 // The one place the annotation's shape is written. Both the tree walk and the
 // live ToolTipChange re-apply go through it, so they cannot disagree about what
 // "already annotated" looks like.
-QString annotatedToolTip(const QString& base, const QKeySequence& key)
+//
+// `enabled` is the View-menu master toggle. It changes the annotation's WORDING,
+// never its presence: a bound key is named whether or not the master toggle is
+// up, because an operator who cannot see the key cannot discover that the switch
+// exists. See the doctrine note on applyShortcutTooltips in the header.
+QString annotatedToolTip(const QString& base, const QKeySequence& key, bool enabled)
 {
     if (key.isEmpty())
         return base;
     const QString keyText = key.toString(QKeySequence::NativeText);
     if (keyText.isEmpty())
         return base;
-    return base.isEmpty() ? keyText : QStringLiteral("%1 (%2)").arg(base, keyText);
+    // U+2014 EM DASH, not a hyphen: the qualifier is a separate clause, and a
+    // hyphen beside a key name reads as part of the key ("T - shortcuts").
+    const QString inner = enabled
+        ? keyText
+        : QStringLiteral("%1 — %2")
+              .arg(keyText, ShortcutManager::tr("shortcuts disabled"));
+    return base.isEmpty() ? inner : QStringLiteral("%1 (%2)").arg(base, inner);
 }
 
 } // namespace
@@ -790,11 +801,13 @@ void ShortcutManager::annotateShortcutTooltip(QWidget* w) const
         w->setProperty(kBaseTooltipProperty, base);
     }
 
-    // Master toggle off → treat every action as unbound, which is exactly the
-    // truth: with KeyboardShortcutsEnabled false, shortcutGuard() refuses every
-    // handler and no key does anything.
-    const QString wanted = annotatedToolTip(
-        base, m_shortcutTooltipsEnabled ? a->currentKey : QKeySequence());
+    // Master toggle off → the key is still NAMED, and qualified with why it is
+    // not working. Stripping it instead would hide the control's one affordance
+    // from exactly the operator who has not yet found View → Keyboard Shortcuts,
+    // which is the population this whole mechanism exists for. An UNBOUND action
+    // still says nothing, in either state: there is no key to name.
+    const QString wanted =
+        annotatedToolTip(base, a->currentKey, m_shortcutTooltipsEnabled);
     // Record before writing: setToolTip sends ToolTipChange synchronously, which
     // re-enters this function through the event filter. It must see its own
     // write as already-ours and stop, or this recurses.

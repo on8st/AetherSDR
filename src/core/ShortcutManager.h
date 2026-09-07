@@ -120,10 +120,19 @@ public:
     //
     // shortcutsEnabled is the View-menu master toggle (KeyboardShortcutsEnabled,
     // which defaults to False), NOT setShortcutsEnabled's transient slider
-    // lease. Pass it through: with the master toggle off, no key does anything,
-    // and a tooltip promising one would be a lie. Passing false strips the
-    // annotations back to the widgets' own text; call it again from the toggle
-    // so they come back when the operator switches shortcuts on.
+    // lease. It changes the annotation's WORDING, not its presence:
+    //
+    //     enabled   "Toggle manual transmit on or off (T)"
+    //     disabled  "Toggle manual transmit on or off (T — shortcuts disabled)"
+    //
+    // Stripping the key when the toggle is down was the first shape of this and
+    // it is wrong, for the reason #5262's binding doctrine gives: controls are
+    // never HIDDEN per state — dimmed/unavailable, greyed/inactive,
+    // colored/active. A stripped annotation is the hidden state, and it hides
+    // the key from precisely the operator who has not yet found the View menu.
+    // A qualified one is `unavailable` with a reason, which is what the operator
+    // needs: the key exists, it is off, and here is the name of the thing that
+    // is off. Call it again from the toggle handler so the wording follows.
     //
     // A widget with no tooltip of its own gets the key alone — still more than
     // nothing. A property naming an unknown action is left untouched, so a typo

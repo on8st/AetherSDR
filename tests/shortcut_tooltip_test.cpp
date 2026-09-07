@@ -209,10 +209,12 @@ int main(int argc, char** argv)
                        "re-apply after an out-of-band change does not stack");
     }
 
-    // ── The master toggle: no annotation while shortcuts are switched off ───
+    // ── The master toggle qualifies the key; it never hides it ──────────────
     // KeyboardShortcutsEnabled defaults to "False" in AppSettings, so on a stock
-    // profile shortcutGuard() refuses every handler. A tooltip promising "(T)"
-    // there would be a lie, not a hint.
+    // profile shortcutGuard() refuses every handler. The annotation still names
+    // the key and says why it is inert — #5262's doctrine, applied to a tooltip:
+    // dimmed/unavailable WITH A REASON, never hidden. Stripping it would keep
+    // the mechanism invisible to exactly the operator it exists for.
     {
         ShortcutManager m;
         registerTxLikeActions(m);
@@ -223,24 +225,52 @@ int main(int argc, char** argv)
         mox->setProperty(ShortcutManager::kActionProperty, "mox_toggle");
 
         m.applyShortcutTooltips(&root, /*shortcutsEnabled=*/false);
-        ok &= expectEq(mox->toolTip(), QStringLiteral("Toggle manual transmit"),
-                       "master toggle off: no key is advertised");
+        ok &= expectEq(mox->toolTip(),
+                       QStringLiteral("Toggle manual transmit (T — shortcuts disabled)"),
+                       "master toggle off: the key is named AND qualified");
 
-        // Switching shortcuts on brings the annotation back...
+        // Switching shortcuts on drops the qualifier, leaving the bare key...
         m.applyShortcutTooltips(&root, /*shortcutsEnabled=*/true);
         ok &= expectEq(mox->toolTip(), QStringLiteral("Toggle manual transmit (T)"),
-                       "master toggle on: the key appears");
+                       "master toggle on: the qualifier goes, the key stays");
 
-        // ...and switching them off again takes it away without eating the base.
+        // ...and switching off again re-qualifies without stacking or eating
+        // the base — the round trip is what would break if the base were
+        // re-read from the live tooltip.
         m.applyShortcutTooltips(&root, /*shortcutsEnabled=*/false);
-        ok &= expectEq(mox->toolTip(), QStringLiteral("Toggle manual transmit"),
-                       "master toggle off again: the base survives intact");
+        ok &= expectEq(mox->toolTip(),
+                       QStringLiteral("Toggle manual transmit (T — shortcuts disabled)"),
+                       "master toggle off again: re-qualified, base intact");
 
-        // The live re-annotation path must honour the same latch: an out-of-band
-        // tooltip written while shortcuts are off must not acquire a key.
+        // The live re-annotation path honours the same latch: a tooltip written
+        // out of band while shortcuts are off is qualified the same way.
         mox->setToolTip(QStringLiteral("Transmitter is not available"));
-        ok &= expectEq(mox->toolTip(), QStringLiteral("Transmitter is not available"),
-                       "ToolTipChange while off does not smuggle the key back in");
+        ok &= expectEq(mox->toolTip(),
+                       QStringLiteral("Transmitter is not available (T — shortcuts disabled)"),
+                       "ToolTipChange while off is qualified, not bare");
+    }
+
+    // ── An UNBOUND action says nothing, in either master-toggle state ───────
+    // The qualifier explains why a key does nothing. Where there is no key,
+    // there is nothing to explain, and "(— shortcuts disabled)" on a button
+    // that never had a binding would invent a shortcut. Seven of the nine TX
+    // actions ship unbound, so this is the common case, not the corner.
+    {
+        ShortcutManager m;
+        registerTxLikeActions(m);
+
+        QWidget root;
+        auto* atu = new QPushButton(&root);
+        atu->setToolTip(QStringLiteral("Start automatic antenna tuner"));
+        atu->setProperty(ShortcutManager::kActionProperty, "atu_start");
+
+        m.applyShortcutTooltips(&root, /*shortcutsEnabled=*/false);
+        ok &= expectEq(atu->toolTip(), QStringLiteral("Start automatic antenna tuner"),
+                       "unbound action, shortcuts off: no annotation at all");
+
+        m.applyShortcutTooltips(&root, /*shortcutsEnabled=*/true);
+        ok &= expectEq(atu->toolTip(), QStringLiteral("Start automatic antenna tuner"),
+                       "unbound action, shortcuts on: still no annotation");
     }
 
     // ── The display string is NativeText, not PortableText ──────────────────
