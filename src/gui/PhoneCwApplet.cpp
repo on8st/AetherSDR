@@ -256,7 +256,7 @@ void PhoneCwApplet::buildPhonePanel()
     m_compGauge->setHoverValuePopupEnabled(true);
     vbox->addWidget(m_compGauge);
 
-    // ── ALC Gain gauge (dB: -20 to +40) ──────────────────────────────────
+    // ── ALC Gain gauge (dB: -20 to 0) ────────────────────────────────────
     // Beside Compression because they answer the same kind of question — how
     // much is the chain changing my audio — where the ALC gauge below answers
     // where the audio ended up. The two are easily confused and the difference
@@ -264,21 +264,38 @@ void PhoneCwApplet::buildPhonePanel()
     // near its target by construction, so an operator whose microphone is 30 dB
     // too quiet sees an ALC gauge that looks perfect.
     //
-    // The range is the modulator's, not a preference: +40 dB is the HL2
-    // modulator's makeup ceiling (Hl2TxDsp::Config::alcMaxGainDb), so a reading
-    // at the top means the ALC has run out of gain rather than that the face
-    // has run out of scale. -20 covers the reductions this chain produces.
-    m_alcGainGauge = new HGauge(-20.0f, 40.0f, 30.0f, "ALC Gain", "dB",
-        {{-20, "-20dB"}, {-10, "-10"}, {0, "0"}, {10, "+10"}, {20, "+20"},
-         {30, "+30"}, {40, "+40"}}, nullptr, 20.0f);
+    // The range is the modulator's, not a preference, and it is ONE-SIDED
+    // because the stage is. Hl2TxDsp's ALC ceilings at unity on every path, so
+    // the gain it applies is a reduction or nothing: 0 dB is the top of the
+    // face and the resting state, and the needle moves left when the stage
+    // pulls level away. An earlier draft of this gauge ran to +40 dB, taken
+    // from the makeup ceiling the modulator used to carry; that field is gone
+    // and a face two-thirds of which the needle could never reach is the same
+    // lying-control failure this gauge exists to fix.
+    //
+    // -20 is a PRESENTATION floor, not a measured one — the reduction loop has
+    // no configured limit, it reduces toward alcTargetPeak/blockPeak — chosen
+    // wide enough for the reductions this chain produces on real audio.
+    //
+    // No red or yellow zone. HGauge paints its zones RIGHTWARD from a
+    // threshold, and on this face the right end is unity, which is the healthy
+    // state: a zone there would colour correct operation as alarming. The
+    // concerning end is the left one, which this widget cannot express, so both
+    // thresholds sit above the face and the bar reads as one band.
+    m_alcGainGauge = new HGauge(-20.0f, 0.0f, 1.0f, "ALC Gain", "dB",
+        {{-20, "-20dB"}, {-15, "-15"}, {-10, "-10"}, {-5, "-5"}, {0, "0"}},
+        nullptr, 1.0f);
     m_alcGainGauge->setObjectName(QStringLiteral("phoneAlcGainGauge"));
     m_alcGainGauge->setValueImmediate(0.0f);
     m_alcGainGauge->setAccessibleName("ALC gain gauge");
     m_alcGainGauge->setAccessibleDescription(
         "Gain the transmit ALC is applying, in dB; 0 is unity");
     m_alcGainGauge->setHoverValueFormatter([](float v) {
-        // Signed, unlike Compression's face below, because both directions are
-        // real here: the ALC both adds makeup and takes level away.
+        // Signed, unlike Compression's face below, so that 0 reads as unity
+        // rather than as "nothing". The positive branch is unreachable while
+        // the ALC ceilings at unity; it is kept because the sign is what tells
+        // the operator which way the stage is working, and a reading that
+        // dropped its sign would have to be inferred from the label.
         return QStringLiteral("%1%2 dB")
             .arg(v > 0.0f ? QStringLiteral("+") : QString())
             .arg(QString::number(v, 'f', 1));
