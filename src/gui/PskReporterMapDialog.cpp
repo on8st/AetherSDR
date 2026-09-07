@@ -478,11 +478,36 @@ PskReporterMapDialog::PskReporterMapDialog(AudioEngine* audioEngine,
     // the equivalent knob here had no UI at all, so an operator who came out
     // underdriven had nothing to reach for. Ceiling of -3 rather than 0 keeps a
     // little headroom ahead of the radio's own TX chain.
+    //
+    // THE DEFAULT IS BACKEND-DEPENDENT, AND ON A HOST-MODULATING RADIO THIS
+    // CONTROL ONLY RECENTLY STARTED WORKING AT ALL.
+    //
+    // Until the HL2's ALC lost its makeup half, this spinbox was very nearly
+    // inert there: the ALC normalised anything from roughly -45 dBFS up to the
+    // ceiling onto its own target, so -40 and -10 went out at the SAME level.
+    // The knob added for the underdriven operator could not have helped them.
+    // With the makeup gone the setting is real — the level set here is the
+    // level transmitted — and -20 dBFS became 18.58 dB of unattended
+    // shortfall, measured against both binaries with the same stimulus.
+    //
+    // So a host-modulating backend generates near the top of the range, WSJT-X
+    // style, and the operator attenuates from there. A radio that modulates on
+    // ITS side (Flex, Icom) keeps -20: that audio never enters Hl2TxDsp, the
+    // radio applies its own mic gain and ALC, and raising the source 17 dB
+    // would overdrive an input the operator has already set up.
+    //
+    // This moves only operators who never touched the control — the spinbox
+    // writes beaconLevelDbFs on valueChanged, so a deliberate setting has a
+    // stored key and is read back below untouched. That is exactly the
+    // population the shortfall was silently costing.
     m_beaconLevel->setRange(-60, -3);
     m_beaconLevel->setSingleStep(1);
     m_beaconLevel->setSuffix(tr(" dBFS"));
+    const bool hostModulates =
+        m_audioEngine && m_audioEngine->hostModulation();
+    const int defaultLevelDbFs = hostModulates ? -3 : -20;
     m_beaconLevel->setValue(
-        pskSettings().value("beaconLevelDbFs").toInt(-20));
+        pskSettings().value("beaconLevelDbFs").toInt(defaultLevelDbFs));
     m_beaconLevel->setAccessibleName(tr("WSPR transmit audio level"));
     m_beaconLevel->setAccessibleDescription(
         tr("Generated audio level in decibels full scale, from -60 to -3"));
