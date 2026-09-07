@@ -99,10 +99,10 @@ int main(int argc, char** argv)
         if (widget->accessibleName() == "Compression gauge") {
             compression = widget;
         }
-        if (widget->accessibleName() == "ALC gauge (Phone)") {
+        if (widget->accessibleName() == "TX peak gauge (Phone)") {
             alcPhone = widget;
         }
-        if (widget->accessibleName() == "ALC gauge (CW)") {
+        if (widget->accessibleName() == "TX peak gauge (CW)") {
             alcCw = widget;
         }
     }

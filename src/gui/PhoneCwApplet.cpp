@@ -282,9 +282,29 @@ void PhoneCwApplet::buildPhonePanel()
     // state: a zone there would colour correct operation as alarming. The
     // concerning end is the left one, which this widget cannot express, so both
     // thresholds sit above the face and the bar reads as one band.
-    m_alcGainGauge = new HGauge(-20.0f, 0.0f, 1.0f, "ALC Gain", "dB",
+    m_alcGainGauge = new HGauge(-20.0f, 0.0f, 1.0f, "ALC", "dB",
         {{-20, "-20dB"}, {-15, "-15"}, {-10, "-10"}, {-5, "-5"}, {0, "0"}},
         nullptr, 1.0f);
+    // NAMED "ALC", AND THE GAUGE BELOW IS NO LONGER ALLOWED TO BE.
+    //
+    // On a transceiver an ALC meter means how hard the ALC is pulling down —
+    // the REDUCTION. That is this gauge. The one below shows the post-ALC
+    // PEAK LEVEL in dBFS, which is a different quantity that happens to span
+    // the same numbers, so "ALC" and "ALC Gain" sat side by side with
+    // identical -20..0 scales, filling in OPPOSITE directions, distinguished
+    // only by a unit that is not on the face. An operator reported being
+    // unable to tell them apart, which is the whole complaint.
+    //
+    // The rename was always the plan and its condition has been met: TX:ALCGAIN
+    // was added beside TX:ALC rather than repointing it, precisely so the
+    // rename could follow "once something renders the new one". Something now
+    // does.
+    //
+    // LABELS ONLY. TX:ALC and TX:ALCGAIN are published meter surfaces consumed
+    // by MeterModel, both gauges, the certification table and the bridge;
+    // changing what a published KEY means breaks those silently. Renaming the
+    // key is a separate question and is not smuggled in here.
+    //
     // REVERSED, like the Compression gauge above it and for the same reason.
     // This face is one-sided with its resting value at the RIGHT: the ALC
     // ceilings at unity, so 0 dB is both the top of the scale and where the
@@ -298,7 +318,7 @@ void PhoneCwApplet::buildPhonePanel()
     m_alcGainGauge->setReversed(true);
     m_alcGainGauge->setObjectName(QStringLiteral("phoneAlcGainGauge"));
     m_alcGainGauge->setValueImmediate(0.0f);
-    m_alcGainGauge->setAccessibleName("ALC gain gauge");
+    m_alcGainGauge->setAccessibleName("ALC gauge");
     m_alcGainGauge->setAccessibleDescription(
         "Gain the transmit ALC is applying, in dB; 0 is unity");
     m_alcGainGauge->setHoverValueFormatter([](float v) {
@@ -315,11 +335,11 @@ void PhoneCwApplet::buildPhonePanel()
     // Mirrored in m_cwPanel; both gauges read from MeterModel::alcValueChanged
     // so SSB operators watching mic gain see the same indicator CW
     // operators use to verify clean keying envelope shape.
-    m_alcGaugePhone = new HGauge(kAlcGaugeFloorDbfs, 0.0f, -3.0f, "ALC", "dBFS",
+    m_alcGaugePhone = new HGauge(kAlcGaugeFloorDbfs, 0.0f, -3.0f, "TX Peak", "dBFS",
         {{-20, "-20"}, {-15, "-15"}, {-10, "-10"}, {-5, "-5"}, {0, "0"}});
     m_alcGaugePhone->setFillFromRight(true);  // empty at -20, fills leftward toward 0
     m_alcGaugePhone->setValueImmediate(kAlcGaugeFloorDbfs);
-    m_alcGaugePhone->setAccessibleName("ALC gauge (Phone)");
+    m_alcGaugePhone->setAccessibleName("TX peak gauge (Phone)");
     m_alcGaugePhone->setAccessibleDescription("Automatic level control — post-software-ALC SSB peak (dBFS)");
     m_alcGaugePhone->setHoverValueFormatter(alcHoverFormatter());
     m_alcGaugePhone->setHoverValuePopupEnabled(true);
@@ -630,11 +650,11 @@ void PhoneCwApplet::buildCwPanel()
     // Mirrors the Phone-panel ALC gauge — both read from the same
     // MeterModel::alcValueChanged source.  Range covers normal operating
     // window by default (-20…0 dBFS); capabilities select native percent.
-    m_alcGaugeCw = new HGauge(kAlcGaugeFloorDbfs, 0.0f, -3.0f, "ALC", "dBFS",
+    m_alcGaugeCw = new HGauge(kAlcGaugeFloorDbfs, 0.0f, -3.0f, "TX Peak", "dBFS",
         {{-20, "-20"}, {-15, "-15"}, {-10, "-10"}, {-5, "-5"}, {0, "0"}});
     m_alcGaugeCw->setFillFromRight(true);  // empty at -20, fills leftward toward 0
     m_alcGaugeCw->setValueImmediate(kAlcGaugeFloorDbfs);
-    m_alcGaugeCw->setAccessibleName("ALC gauge (CW)");
+    m_alcGaugeCw->setAccessibleName("TX peak gauge (CW)");
     m_alcGaugeCw->setAccessibleDescription("Automatic level control — post-software-ALC SSB peak (dBFS)");
     m_alcGaugeCw->setHoverValueFormatter(alcHoverFormatter());
     m_alcGaugeCw->setHoverValuePopupEnabled(true);

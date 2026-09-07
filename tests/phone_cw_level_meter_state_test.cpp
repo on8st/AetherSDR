@@ -112,8 +112,14 @@ int main(int argc, char** argv)
     });
     QList<HGauge*> alcGauges;
     for (QWidget* widget : applet.findChildren<QWidget*>()) {
-        if (widget->accessibleName() == "ALC gauge (Phone)"
-            || widget->accessibleName() == "ALC gauge (CW)") {
+        // RENAMED from "ALC gauge (Phone/CW)". This widget shows the
+        // post-ALC PEAK LEVEL in dBFS; the gauge that shows the ALC's
+        // REDUCTION is the one now labelled ALC. The two carried near
+        // identical names over identical -20..0 scales and an operator could
+        // not tell them apart. The meter KEYS (TX:ALC, TX:ALCGAIN) did not
+        // move — only the labels and these accessible names.
+        if (widget->accessibleName() == "TX peak gauge (Phone)"
+            || widget->accessibleName() == "TX peak gauge (CW)") {
             alcGauges.append(static_cast<HGauge*>(widget));
         }
     }
