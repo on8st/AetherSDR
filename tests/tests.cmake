@@ -3637,6 +3637,15 @@ target_link_libraries(automation_tx_watchdog_test PRIVATE
 )
 add_test(NAME automation_tx_watchdog_test COMMAND automation_tx_watchdog_test)
 
+add_executable(automation_key_readback_test
+    tests/automation_key_readback_test.cpp
+)
+target_include_directories(automation_key_readback_test PRIVATE src)
+target_link_libraries(automation_key_readback_test PRIVATE
+    aethercore Qt6::Core Qt6::Network Qt6::Widgets
+)
+add_test(NAME automation_key_readback_test COMMAND automation_key_readback_test)
+
 add_executable(automation_rn2_probe_test
     tests/automation_rn2_probe_test.cpp
 )
@@ -4703,6 +4712,7 @@ set(AETHER_AUTOMATION_SERVER_TESTS
     automation_double_click_test
     automation_drag_at_test
     automation_tx_watchdog_test
+    automation_key_readback_test
     automation_rn2_probe_test
     connect_state_model_test
     automation_dsp_backend_readback_test
