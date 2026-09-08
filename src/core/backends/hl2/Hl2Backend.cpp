@@ -5273,27 +5273,42 @@ void Hl2Backend::defineMeters()
     def(8, QStringLiteral("TX"),  QStringLiteral("COMPPEAK"), QStringLiteral("dB"),
         0.0, 25.0,     QStringLiteral("Speech processor compression"));
     // The gain the ALC is applying — the companion to meter 7, not a second
-    // form of it. Seven is the post-ALC LEVEL and sits near the target
-    // whatever the operator does; this is how hard the stage is working to put
-    // it there, and it is the half that moves when a mic is too quiet.
+    // form of it. Seven is the post-ALC LEVEL, this is how hard the stage is
+    // working to put it there, and it is the half that moves when a mic is
+    // too quiet.
     //
-    // The range is the modulator's own, not a display preference. The top is
-    // Hl2TxDsp::Config::alcMaxGainDb (40 dB of makeup on the mic path), so a
-    // reading at the ceiling means the ALC has run out of gain rather than that
-    // the meter has run out of scale. The bottom is reduction, which has no
-    // configured limit — the loop reduces toward alcTargetPeak/blockPeak — so
-    // -20 is a PRESENTATION floor rather than a measured one, wide enough for
-    // the reductions this chain produces on real audio. The largest figure
-    // recorded anywhere in the tree is the -21.41 dB in processAudioBlock's
-    // own comment, which is a full-scale client-leveled block and not speech;
-    // that lands just off the bottom of the face and reads "hard down", which
-    // is the right answer for it.
+    // (An earlier version of this note said meter 7 "sits near the target
+    // whatever the operator does". That described the ALC's makeup half, which
+    // is gone: meter 7 now tracks the real level. The same correction was made
+    // where PhoneCwApplet builds the gauge and was missed here, which is how a
+    // deleted mechanism ends up asserted in two places and repaired in one.)
+    //
+    // THE RANGE IS ONE-SIDED, because the stage is. The ALC ceilings at unity
+    // on every path, so the gain it applies is a reduction or nothing and the
+    // top of this meter is 0.
+    //
+    // It used to be +40, taken from Hl2TxDsp::Config::alcMaxGainDb, with this
+    // comment explaining that "a reading at the ceiling means the ALC has run
+    // out of gain". That field no longer exists and there is no ceiling left
+    // to run out of. The declaration is not decoration: MeterModel serialises
+    // low/high into the meter inventory the automation bridge and the
+    // certification report read, so a stale +40 would tell every consumer this
+    // meter reaches a value the DSP cannot produce and the gauge cannot draw.
+    //
+    // The bottom is reduction, which has no configured limit — the loop
+    // reduces toward alcTargetPeak/blockPeak — so -20 is a PRESENTATION floor
+    // rather than a measured one, wide enough for the reductions this chain
+    // produces on real audio, and matching the gauge's face. The largest
+    // figure recorded anywhere in the tree is the -21.41 dB in
+    // processAudioBlock's own comment, which is a full-scale client-leveled
+    // block and not speech; that lands just off the bottom of the face and
+    // reads "hard down", which is the right answer for it.
     //
     // sourceIndex stays at its default 0 for the same reason COMPPEAK's does:
     // one transmitter, so it lands in MeterModel's by-slice map under the
     // implicit slice rather than the explicit TX-waveform map.
     def(9, QStringLiteral("TX"),  QStringLiteral("ALCGAIN"), QStringLiteral("dB"),
-        -20.0, 40.0,   QStringLiteral("Gain the ALC is applying"));
+        -20.0, 0.0,    QStringLiteral("Gain the ALC is applying"));
 }
 
 void Hl2Backend::publishTelemetry(const Hl2Telemetry& t)

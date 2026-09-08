@@ -127,6 +127,33 @@ void testHl2PublishesAlcGain()
     // mechanism the code no longer has, which this tree treats as a defect.
     check("the \"alcGain drives no meter\" comment is gone",
           !backend.contains("alcGain drives no meter"));
+
+    // THE SAME RULE, APPLIED TO THE MECHANISM THIS SERIES ITSELF DELETED.
+    //
+    // TX:ALCGAIN was declared -20..+40 and its comment named
+    // Hl2TxDsp::Config::alcMaxGainDb as the source of the +40 — "so a reading
+    // at the ceiling means the ALC has run out of gain". The unity-ceiling
+    // change removed that field: the ALC now reduces or does nothing, so the
+    // top of this meter is 0 and there is no ceiling left to run out of.
+    //
+    // The declared range is not decoration. MeterModel serialises low/high
+    // into the meter inventory that the automation bridge and the
+    // certification report read, so a stale +40 tells every consumer this
+    // meter reaches a value the DSP cannot produce and the gauge cannot draw.
+    //
+    // Checked on the CLAIM, not on the NAME. A check for "alcMaxGainDb"
+    // anywhere in the file was tried first and is wrong: this tree
+    // deliberately keeps past-tense citations of deleted symbols — Hl2TxDsp.h
+    // still says the flag "used to select ... alcMaxGainDb (40 dB)" and that
+    // sentence is correct and worth keeping. Banning the name would forbid the
+    // history and reward deleting it. What must not survive is the
+    // PRESENT-TENSE assertion that the field is where this meter's top comes
+    // from, and that sentence has a fragment nothing else would produce.
+    check("the +40 top is no longer claimed to come from the deleted field",
+          !backend.contains("(40 dB of makeup on the mic path)"));
+    check("TX:ALCGAIN is declared -20..0, the range the unity ceiling leaves",
+          backend.contains("QStringLiteral(\"ALCGAIN\"), QStringLiteral(\"dB\"),\n"
+                           "        -20.0, 0.0,"));
 }
 
 }  // namespace

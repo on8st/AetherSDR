@@ -112,7 +112,12 @@ inline constexpr std::array<MeterSurface, 10> kMeterSurfaces{{
     // same line — `TXA_ALC_PK` and `TXA_ALC_GAIN` are separate entries in
     // `txaMeterType` in `third_party/wdsp/upstream/TXA.h`.
     {"TX:ALCGAIN", "dB", "MeterModel::alcGainChanged / alcGainDb()",
-     "Phone/CW applet ALC Gain gauge (Phone panel, beside Compression)", true},
+     // "ALC gauge", not "ALC Gain gauge": the widget was relabelled when the
+     // two ALC gauges were made distinguishable, and the KEY was deliberately
+     // not renamed with it. This string is what the certification report
+     // prints as the place to go and look, so it has to name the label an
+     // operator can actually see.
+     "Phone/CW applet ALC gauge (Phone panel, beside Compression)", true},
 
     {"TX:COMPPEAK", "dB", "MeterModel::compressionChanged",
      "Phone/CW applet Compression gauge", true},

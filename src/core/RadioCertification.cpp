@@ -112,7 +112,7 @@ constexpr MeterSpec kMeterTable[] = {
     // finding. tests/meter_surfaces_test.cpp now fails the build for it.
     {"TX",  "ALCGAIN",  true,  true,  false, "gain the host ALC is applying, in dB; "
                                              "MeterModel::alcGainDb() consumes it and "
-                                             "the Phone/CW ALC Gain gauge renders it"},
+                                             "the Phone/CW ALC gauge renders it"},
     {"TX",  "COMPPEAK", true,  true,  false, "host speech processor, polled onto the "
                                              "meter at 20 Hz; reads 0 with PROC off, "
                                              "which is a value and not a silence"},

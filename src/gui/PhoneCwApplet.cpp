@@ -256,7 +256,18 @@ void PhoneCwApplet::buildPhonePanel()
     m_compGauge->setHoverValuePopupEnabled(true);
     vbox->addWidget(m_compGauge);
 
-    // ── ALC Gain gauge (dB: -20 to +40) ──────────────────────────────────
+    // ── ALC gauge (the ALC's reduction, dB: -20 to 0, fills right-to-left) ─
+    //
+    // The banner used to read "ALC Gain gauge (dB: -20 to +40)" and was left
+    // behind twice over: the face was rescaled to -20..0 when the unity
+    // ceiling removed the ALC's makeup half, and the widget was relabelled
+    // from "ALC Gain" to "ALC" when the two ALC gauges were made
+    // distinguishable. Neither change came back to this line, so the section
+    // header asserted a 60 dB span two-thirds of which the needle cannot
+    // reach, over a label nothing renders. A comment asserting a mechanism
+    // the code does not implement is a defect in this codebase, not
+    // untidiness — the same thing this gauge exists to stop the METER doing.
+    //
     // Beside Compression because they answer the same kind of question — how
     // much is the chain changing my audio — where the ALC gauge below answers
     // where the audio ended up. The two are easily confused and the difference
@@ -329,8 +340,16 @@ void PhoneCwApplet::buildPhonePanel()
     m_alcGainGauge->setAccessibleDescription(
         "Gain the transmit ALC is applying, in dB; 0 is unity");
     m_alcGainGauge->setHoverValueFormatter([](float v) {
-        // Signed, unlike Compression's face below, because both directions are
-        // real here: the ALC both adds makeup and takes level away.
+        // Signed, unlike Compression's readout, and the "+" branch is kept
+        // deliberately even though THIS ALC can no longer reach it. The old
+        // reason ("the ALC both adds makeup and takes level away") died with
+        // the makeup half; the surviving reason is that TX:ALCGAIN is a
+        // published meter surface and a backend that does run makeup gain may
+        // feed it a positive value. HGauge clamps the FILL to the face but
+        // keeps m_value unclamped, so that number would arrive here intact,
+        // and printing "5.0 dB" for a 5 dB lift would be the readout lying
+        // about direction. Reachable-by-this-backend is not the test; what
+        // the surface admits is.
         return QStringLiteral("%1%2 dB")
             .arg(v > 0.0f ? QStringLiteral("+") : QString())
             .arg(QString::number(v, 'f', 1));
@@ -338,7 +357,10 @@ void PhoneCwApplet::buildPhonePanel()
     m_alcGainGauge->setHoverValuePopupEnabled(true);
     vbox->addWidget(m_alcGainGauge);
 
-    // ── ALC gauge (post-SW-ALC SSB-peak, dBFS) ──────────────────────────
+    // ── TX Peak gauge (post-SW-ALC SSB peak, dBFS) ──────────────────────
+    // Banner renamed with the widget: this is the gauge labelled "TX Peak".
+    // Calling it "the ALC gauge" here now names a label nothing renders AND
+    // collides with the gauge above, which is the confusion the rename fixed.
     // Mirrored in m_cwPanel; both gauges read from MeterModel::alcValueChanged
     // so SSB operators watching mic gain see the same indicator CW
     // operators use to verify clean keying envelope shape.
@@ -653,7 +675,10 @@ void PhoneCwApplet::buildCwPanel()
     vbox->setContentsMargins(4, 2, 4, 6);
     vbox->setSpacing(4);
 
-    // ── ALC gauge (post-SW-ALC SSB-peak, dBFS) ──────────────────────────
+    // ── TX Peak gauge (post-SW-ALC SSB peak, dBFS) ──────────────────────
+    // Banner renamed with the widget: this is the gauge labelled "TX Peak".
+    // Calling it "the ALC gauge" here now names a label nothing renders AND
+    // collides with the gauge above, which is the confusion the rename fixed.
     // Mirrors the Phone-panel ALC gauge — both read from the same
     // MeterModel::alcValueChanged source.  Range covers normal operating
     // window by default (-20…0 dBFS); capabilities select native percent.
@@ -1331,9 +1356,19 @@ void PhoneCwApplet::updateAlcGain(float gainDb)
     if (!m_alcGainGauge)
         return;
     // No clamp here: HGauge clamps to its own range, and clamping twice would
-    // hide the case worth seeing — a gain pressed against the modulator's
-    // ceiling, which reads as "the ALC has nothing left" rather than as a
-    // meter at the end of its travel.
+    // hide the case worth seeing.
+    //
+    // WHICH case that is changed with the unity ceiling, and this comment used
+    // to name the old one — "a gain pressed against the modulator's ceiling,
+    // which reads as the ALC has nothing left". That ceiling was
+    // Hl2TxDsp::Config::alcMaxGainDb, the +40 dB of makeup, and it is gone.
+    // The reduction loop has no configured limit, so nothing here can run out
+    // of anything; -20 is a PRESENTATION floor chosen for the face.
+    //
+    // The case worth seeing now is a reduction DEEPER than that floor. Letting
+    // the raw value through means value() reports it and the hover readout
+    // prints it while the bar sits pinned, so "the reduction is off the bottom
+    // of the scale" stays distinguishable from "the reduction is exactly 20 dB".
     m_alcGainGauge->setValue(gainDb);
 }
 
