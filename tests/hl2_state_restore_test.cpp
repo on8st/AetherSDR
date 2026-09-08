@@ -435,14 +435,26 @@ int main(int argc, char** argv)
         RestoredRadioState corrupt;
         corrupt.mode = QStringLiteral("QRM");   // <= 8 chars, but not a mode
         backend.applyRestoredState(corrupt);
-        check(backend.currentOperatingState().mode
-                  != QStringLiteral("QRM"),
-              "a plausible-length garbage mode never reaches Receiver::mode");
+        // Assert on the VALIDATED DOCUMENT, for the same reason the CW-passband
+        // block below does (#5000): currentOperatingState() reads the
+        // receivers, and a restored mode only reaches a receiver in
+        // pushInitialState(), at linkUp. Pre-connect the snapshot reports a
+        // construction default whatever the validator did — so the old
+        // `currentOperatingState().mode != "QRM"` here held even with
+        // isKnownModeString() deleted from applyRestoredState(). It could not
+        // tell a working boundary from no boundary at all.
+        check(backend.restoredStateForTest().mode.isEmpty(),
+              "a plausible-length garbage mode is dropped at the boundary, "
+              "not stashed for pushInitialState()");
+
+        // The positive half. Without it a boundary that dropped EVERY mode
+        // would satisfy the check above; and the casing is load-bearing,
+        // because a hand-edited "cw" must not round-trip into the UI.
         RestoredRadioState genuine;
         genuine.mode = QStringLiteral("cw");    // case-insensitive, real
         backend.applyRestoredState(genuine);
-        // (Applied at pushInitialState on hardware; boundary acceptance is
-        // what's provable here: it survived validation into the stash.)
+        check(backend.restoredStateForTest().mode == QStringLiteral("CW"),
+              "a real mode survives validation into the stash, canonically cased");
     }
 
     // ---- the connect-time power push is an echo, not an overwrite ---------
