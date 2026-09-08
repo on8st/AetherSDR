@@ -3712,6 +3712,30 @@ filter and the `mox_toggle` shortcut take, which `invoke` can't reach.
 **toggle**: keyed → unkeys (allowed), idle → keys (gated). Keying arms the
 force-unkey watchdog.
 
+**Both directions are verified before they report success (#5252).** `key ... off`
+re-reads the transmit state after issuing the unkey and returns an error, not
+`ok:true`, if the radio still reports transmitting — and on that branch it
+deliberately leaves the force-unkey watchdog **armed**, because a transmitter
+that would not stop is exactly when the backstop is needed:
+
+```json
+→ {"cmd":"key","action":"ptt","value":"off"}
+← {"ok":false,"error":"key ptt off did not take effect — the radio still reports transmitting; the TX watchdog is left armed"}
+```
+
+`key ... on` is verified the same way, so a key an interlock or a receive-only
+backend refused reports the refusal instead of `ok:true`, and does not arm a
+watchdog over a transmitter that was never on.
+
+**What the read-back can and cannot see.** It joins this client's transmit
+intent with the backend's *observed* mox/tune state. On a backend that declares
+`hasRadioPttReadback` (Icom) the observed half is decoded from the radio; on one
+that does not (HL2), every flag it can reach is derived from the command just
+issued, so the check is sound but cannot detect a radio that ignored the unkey.
+Verifying that case on an HL2 needs the hardware PTT bit the EP6 frame already
+carries (`health` reports it as `ptt`, "PTT (radio)") to be routed into the
+transmit state — which it is not today.
+
 ### `cwx`
 Drive the CWX CW keyer — the easy repro for post-TX FFT-floor recovery (#3804).
 

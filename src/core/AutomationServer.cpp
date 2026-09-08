@@ -7047,12 +7047,34 @@ void AutomationServer::clearTxBridgeInitiated()
     m_txBridgeInitiated = false;   // a later operator key is not ours
 }
 
-bool AutomationServer::txBridgeOwnsCurrentTransmit() const
+// IS THE TRANSMITTER UP, BY ANY OWNER AND BY ANY OBSERVATION WE HAVE.
+//
+// The three flags are NOT interchangeable and the difference is the whole of
+// #5252. TransmitModel::isTransmitting() is this client's OPTIMISTIC INTENT:
+// RadioModel::setTransmit() writes it synchronously on the way past ("Optimistic
+// edge gating: TX off: stop immediately to avoid 'stuck TX tail' during
+// UNKEY_REQUESTED"), so it is false the instant an unkey is issued whatever the
+// radio does. isMox() is the OBSERVED half — TransmitModel::applyChanges()
+// assigns it from the backend's TransmitDelta, and its comment there calls it
+// "observed radio state, not this client's transmit intent". isTuning() covers
+// a tune carrier, which is keying by another name.
+//
+// So a read-back that consults only isTransmitting() asserts its own assignment
+// and cannot fail. Joining the observed flags is what gives it something to
+// disagree with.
+bool AutomationServer::transmitterStillKeyed() const
 {
-    if (!m_radioModel || !m_txBridgeInitiated)
+    if (!m_radioModel)
         return false;
     const TransmitModel& tx = m_radioModel->transmitModel();
     return tx.isTransmitting() || tx.isTuning() || tx.isMox();
+}
+
+bool AutomationServer::txBridgeOwnsCurrentTransmit() const
+{
+    if (!m_txBridgeInitiated)
+        return false;
+    return transmitterStillKeyed();
 }
 
 // TX safety watchdog (#3646). The poller runs while automation TX permission is
@@ -8565,6 +8587,20 @@ QJsonObject AutomationServer::doKey(const QString& name, const QString& arg)
             return err(QStringLiteral("blocked: key '") + what
                        + QStringLiteral("' keys the transmitter — set AETHER_AUTOMATION_ALLOW_TX=1 to allow"));
         m_radioModel->setTransmit(true);               // == space-bar PTT press (Mox)
+        // A key the radio refused never happened, and the refusal paths say so:
+        // RadioModel::refuseKeyWithInterlock() rolls the optimistic transmit
+        // state back on an RX-only backend, an RX-only mode, and a local-PTT
+        // interlock. Arming the watchdog first would leave a PHANTOM claim — a
+        // backstop that fires at m_txMaxKeyMs and force-unkeys a transmitter
+        // that was never on. So the arming moves BELOW the check.
+        if (!transmitterStillKeyed()) {
+            qCWarning(lcAutomation).noquote()
+                << "key" << what << "ON did not take effect";
+            return err(QStringLiteral("key ") + what
+                       + QStringLiteral(" on did not take effect — the radio is "
+                                        "not transmitting (an interlock or a "
+                                        "receive-only backend refused the key)"));
+        }
         m_txKeyedSinceMs = QDateTime::currentMSecsSinceEpoch();  // arm watchdog window
         m_txBridgeInitiated = true;   // the watchdog polices scripts, not people
         qCInfo(lcAutomation).noquote() << "key" << what << "ON (ALLOW_TX)";
@@ -8573,8 +8609,41 @@ QJsonObject AutomationServer::doKey(const QString& name, const QString& arg)
     };
     auto keyOff = [&](const QString& what) -> QJsonObject {
         m_radioModel->setTransmit(false);              // == space-bar PTT release
-        m_txKeyedSinceMs = 0;
-        m_txBridgeInitiated = false;   // hand policing back: a later operator key is not ours
+        // VERIFY BEFORE REPORTING SUCCESS (#5252). This is the one command whose
+        // silent failure leaves a transmitter on the air, and doCwx twenty lines
+        // below already states the principle: "An honest error beats an ok:true
+        // for work that never happened."
+        //
+        // THE ORDER MATTERS AS MUCH AS THE CHECK. The arming state is cleared
+        // ONLY on the confirmed-off branch. Clearing it first — as this lambda
+        // used to, unconditionally — disarms onTxWatchdog()'s force-unkey at
+        // m_txMaxKeyMs at exactly the moment it becomes the last backstop. Fail
+        // closed: a failed unkey keeps both the flag and the original
+        // timestamp, so the limit still measures from the real key.
+        //
+        // THE WAIT, AND WHY THERE IS NONE HERE. #5252 and its triage both
+        // propose pausing ~150 ms before the read-back. Measured on the HL2 path
+        // against hpsdrsim, the interval buys nothing: every flag this predicate
+        // can reach is written synchronously by the unkey itself, because
+        // Hl2Backend declares RadioCapabilities::hasRadioPttReadback = false and
+        // therefore has no status plane to be late. A backend that DOES have one
+        // (Icom, which emits IRadioBackend::keyingStateConfirmed) can report
+        // late, and for it the honest wait is not a fixed sleep but the deferred
+        // reply this file already implements for `connect --wait`:
+        // deferredResponse() plus a ConnectWait-shaped record that completes on
+        // the backend's own signal with a timeout. That is a strictly larger
+        // change than the finding needs, so it is deliberately NOT made here;
+        // this read-back is the same-turn one, and the seam for a deferred
+        // variant is this single call site.
+        if (transmitterStillKeyed()) {
+            qCWarning(lcAutomation).noquote()
+                << "key" << what << "OFF did not take effect — watchdog left armed";
+            return err(QStringLiteral("key ") + what
+                       + QStringLiteral(" off did not take effect — the radio "
+                                        "still reports transmitting; the TX "
+                                        "watchdog is left armed"));
+        }
+        releaseEdgeHandsBackPolicing();   // confirmed off: hand policing back
         qCInfo(lcAutomation).noquote() << "key" << what << "OFF";
         return QJsonObject{{QStringLiteral("ok"), true}, {QStringLiteral("key"), what},
                            {QStringLiteral("state"), QStringLiteral("off")}};

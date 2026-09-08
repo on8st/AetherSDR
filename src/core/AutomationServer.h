@@ -637,6 +637,11 @@ private:
     // force-unkey on bridge stop / TX-permission revoke so neither one ends an
     // operator, DAX, TCI, or beacon transmission that the bridge never started.
     bool txBridgeOwnsCurrentTransmit() const;
+    // Whether the transmitter is keyed AT ALL, by any owner. The ownership-free
+    // half of txBridgeOwnsCurrentTransmit(), split out because `key ... off`
+    // has to report a transmitter that would not stop whether or not this
+    // bridge is the thing that keyed it (#5252).
+    bool transmitterStillKeyed() const;
 
     // Slice lifecycle/config actions, disconnected-only fixtures, and VFO tuning.
     // RX/config only; none of these key the transmitter.
