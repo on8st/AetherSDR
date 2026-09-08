@@ -3410,6 +3410,13 @@ target_include_directories(hl2_band_filter_frame_test PRIVATE src)
 target_link_libraries(hl2_band_filter_frame_test PRIVATE aethercore Qt6::Core Qt6::Network)
 add_test(NAME hl2_band_filter_frame_test COMMAND hl2_band_filter_frame_test)
 
+# HL2 emergency stop — the arm/disarm/fire data structure #4581 rewrites. Does
+# NOT exercise the race or the Win64 narrowing; see the file header.
+add_executable(hl2_emergency_stop_test tests/hl2_emergency_stop_test.cpp)
+target_include_directories(hl2_emergency_stop_test PRIVATE src)
+target_link_libraries(hl2_emergency_stop_test PRIVATE aethercore Qt6::Core Qt6::Network)
+add_test(NAME hl2_emergency_stop_test COMMAND hl2_emergency_stop_test)
+
 add_executable(hl2_dbref_test tests/hl2_dbref_test.cpp)
 target_include_directories(hl2_dbref_test PRIVATE src)
 add_test(NAME hl2_dbref_test COMMAND hl2_dbref_test)
