@@ -109,7 +109,14 @@ constexpr MeterSpec kMeterTable[] = {
     // meter present in one and absent from the other is either never checked or
     // checked against nothing — and the last time the two disagreed the run
     // reported UNIT MISMATCH on a correct meter and ranked it above every real
-    // finding. tests/meter_surfaces_test.cpp now fails the build for it.
+    // finding. tests/meter_surfaces_test.cpp now covers it.
+    //
+    // COVERED IS NOT GATED, and the difference matters to whoever adds the
+    // next surface. ci.yml's only ctest steps are the frozen list in
+    // .github/ci-test-gate.txt, and this test is deliberately not on it, so
+    // it does not run on a PR. It runs unfiltered on every push to main
+    // (full-suite.yml) and weekly under the sanitizers — which catches the
+    // divergence, but after the merge rather than before it.
     {"TX",  "ALCGAIN",  true,  true,  false, "gain the host ALC is applying, in dB; "
                                              "MeterModel::alcGainDb() consumes it and "
                                              "the Phone/CW ALC Gain gauge renders it"},
