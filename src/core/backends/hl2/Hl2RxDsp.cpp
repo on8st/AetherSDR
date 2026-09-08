@@ -372,14 +372,61 @@ void Hl2RxDsp::processIqBlock(const std::vector<std::complex<float>>& iq)
     const std::size_t block = static_cast<std::size_t>(m_config.dspBlockSize);
     std::size_t consumed = 0;
     while (m_iqBuffer.size() - consumed >= block) {
+        // ── THROWAWAY BENCH BUILD — leg C of the #5497 factorial. NOT A PATCH.
+        //
+        // WHAT WAS HERE, and it is quoted rather than deleted because its third
+        // reason is the one this build exists to test:
+        //
+        //     if (m_audioMuted) {
+        //         // Clock the audio channel with silence rather than skipping
+        //         // it. Skipping would let the pipeline's contents go stale
+        //         // and emerge on unmute; feeding zeros keeps latency constant
+        //         // and guarantees that what comes out when transmit ends is
+        //         // silence.
+        //         std::fill(m_i.begin(), m_i.end(), 0.0f);
+        //         std::fill(m_q.begin(), m_q.end(), 0.0f);
+        //     } else
+        //
+        // #5497's triage, fix 2, verbatim: "Skipping `fexchange2` while muted
+        // and emitting zeroed output blocks directly preserves the pre-transmit
+        // AGC gain, so any residual leak arrives into a SETTLED AGC rather than
+        // a railed one."
+        //
+        // Emitting a zeroed block of the same size at the same cadence answers
+        // that comment's LATENCY objection and its SILENCE objection. IT DOES
+        // NOT ANSWER THE FIRST ONE. kRxFilterTaps is 8192 at
+        // kWdspDspSampleRateHz 48000, so 170.667 ms of overlap-save history
+        // still holds PRE-TRANSMIT content across a skipped over, and the
+        // triage's noise-blanker precedent does not carry over:
+        // WdspChannel::processIq's own note puts the ANB delay line at 8
+        // samples — 0.17 ms — against a filter history three orders of
+        // magnitude longer. Whether that stale history emerges on unmute is
+        // exactly what this build was made to measure.
+        //
+        // PLACED HERE rather than as an atomic hold inside `WdspChannel`, which
+        // is where the triage puts it. The signal is identical — fexchange2 is
+        // not reached and the emitted block is zero — and the diff is one file.
+        // Declared, because "we tested their fix" would otherwise be a slightly
+        // larger claim than what was built.
+        //
+        // SIDE EFFECT, MEASURED RATHER THAN HIDDEN: meterUpdate now publishes
+        // WdspChannel's FROZEN pre-transmit SignalPeak through the over instead
+        // of the meter taken on demodulated silence, which is where #5497's
+        // triage says the published -252.92 dBm comes from.
+        //
+        // The m_i/m_q zero-fill is kept although nothing now reads it: it is
+        // one std::fill of a block and removing it would enlarge the diff for
+        // no measurable gain.
         if (m_audioMuted) {
-            // Clock the audio channel with silence rather than skipping it.
-            // Skipping would let the pipeline's contents go stale and emerge on
-            // unmute; feeding zeros keeps latency constant and guarantees that
-            // what comes out when transmit ends is silence.
             std::fill(m_i.begin(), m_i.end(), 0.0f);
             std::fill(m_q.begin(), m_q.end(), 0.0f);
-        } else
+            consumed += block;
+            std::fill(m_stereo.begin(), m_stereo.end(), 0.0f);
+            emit audioReady(m_stereo);
+            emit meterUpdate(static_cast<float>(
+                m_channel->meter(WdspChannel::Meter::SignalPeak)));
+            continue;
+        }
         for (std::size_t n = 0; n < block; ++n) {
             // NOT conjugated. This carried a `-imag()` on the stated reasoning
             // that the HPSDR wire order is the opposite handedness to WDSP's
