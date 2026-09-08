@@ -3176,10 +3176,49 @@ void Hl2Backend::setKeying(bool key)
     // measurement turns it on. Applied to every receiver for the same reason the
     // mute is: whichever one the capture is taken from must not be silenced.
     const bool muteWhileKeyed = key && !m_txMonitor;
-    for (Receiver& r : m_rx) {
-        if (r.dsp)
-            QMetaObject::invokeMethod(r.dsp, "setAudioMuted", Qt::QueuedConnection,
-                Q_ARG(bool, muteWhileKeyed));
+    // ── THROWAWAY BENCH BUILD — leg B of the #5497 factorial. NOT A PATCH. ──
+    //
+    // #5497's triage: "On the key-DOWN edge, keep the present ordering — muting
+    // early is free and correct. On the key-UP edge, send setMox(false) first
+    // and defer setAudioMuted(false) until the transmitter has actually
+    // dropped."
+    //
+    // Key-DOWN is unchanged and takes the immediate path below. Key-UP schedules
+    // the unmute kUnmuteDeferMs later; setMox(false) is queued synchronously
+    // further down this same function, so it is delivered on the I/O thread's
+    // next turn and is guaranteed to precede the timer by ~kUnmuteDeferMs.
+    //
+    // kUnmuteDeferMs IS A TEST VALUE, NOT A PROPOSAL. 70 ms covers 11/11 of the
+    // T/R windows D85 measured on ONE radio at ONE station on ONE day (W =
+    // 51.66–66.15 ms, median 59.40) with ~3.8 ms over the worst of them. It is
+    // set generously ON PURPOSE: if the artefact survives 70 ms, the deferred-
+    // unmute mechanism is wrong and no constant rescues it.
+    //
+    // KNOWN INCOMPLETENESS, stated rather than hidden. The guard is `!m_keyed`
+    // at fire time, which correctly suppresses the unmute if the operator has
+    // re-keyed inside the window. It does NOT coalesce two unkeys inside one
+    // window (unkey, key, unkey within kUnmuteDeferMs would unmute early on the
+    // first timer). A shippable version wants an epoch or a member QTimer; this
+    // build exists to answer one question and 4 s keys seconds apart never
+    // reach that case.
+    static constexpr int kUnmuteDeferMs = 70;
+    const bool deferUnmute = !key && keyChanged;
+    if (deferUnmute) {
+        QTimer::singleShot(kUnmuteDeferMs, this, [this] {
+            if (m_keyed)
+                return;   // re-keyed inside the window; the key-down mute stands
+            for (Receiver& r : m_rx) {
+                if (r.dsp)
+                    QMetaObject::invokeMethod(r.dsp, "setAudioMuted",
+                        Qt::QueuedConnection, Q_ARG(bool, false));
+            }
+        });
+    } else {
+        for (Receiver& r : m_rx) {
+            if (r.dsp)
+                QMetaObject::invokeMethod(r.dsp, "setAudioMuted", Qt::QueuedConnection,
+                    Q_ARG(bool, muteWhileKeyed));
+        }
     }
     // Drop whatever was already queued for the mix. On unkey these would be the
     // stalest blocks in the buffer and would play out ahead of live audio.
