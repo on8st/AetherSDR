@@ -228,6 +228,15 @@ bool MetisClient::start(const Params& params)
     m_haveRxSeq = false;
     m_drops = 0;
     m_linkUp = false;
+    // Same rule, and for the same reason as the counters above: this object
+    // outlives a connect, so a window left half-accumulated by the previous
+    // session would be published as the first window of the next one with a
+    // denominator that belongs to neither.
+    m_adcWindowSamples = 0;
+    m_adcWindowOverload = 0;
+    m_telemetry.adcSamples = 0;
+    m_telemetry.adcOverloadSamples = 0;
+    m_telemetry.adcWindowMs = 0;
     // This object OUTLIVES a connect: Hl2Backend builds it in its constructor
     // and deletes it in its destructor, so without this the dedupe would carry
     // a frequency across a disconnect and suppress the first push of the next
@@ -917,6 +926,17 @@ void MetisClient::onReadyRead()
             if (const auto resp = parseEp6Response(bytes.data() + fs)) {
                 m_telemetry.apply(*resp);
                 telemetryChanged = true;
+                // AFTER apply(), and read back off the struct rather than
+                // re-decoding the bit here: one decode of DATA[24] in one place
+                // (Hl2Telemetry::apply) is what stops a second copy of the
+                // layout drifting from the first. apply() writes adcOverload
+                // only for response address 0, so on that address it holds
+                // exactly this response's bit.
+                if (resp->raddr == 0x00 && m_telemetry.adcOverload) {
+                    ++m_adcWindowSamples;
+                    if (*m_telemetry.adcOverload)
+                        ++m_adcWindowOverload;
+                }
             }
         }
         // Coalesce to ~10 Hz: telemetry free-runs continuously, so a frame
@@ -925,7 +945,17 @@ void MetisClient::onReadyRead()
         if (telemetryChanged
             && (!m_telemetryEmitClock.isValid()
                 || m_telemetryEmitClock.elapsed() >= kTelemetryMinIntervalMs)) {
+            // Read the window length BEFORE restarting: this is the
+            // denominator's denominator, and a consumer that assumed 100 ms
+            // would be wrong on the first window after a start and on any
+            // window the I/O thread was late for.
+            m_telemetry.adcWindowMs = m_telemetryEmitClock.isValid()
+                ? static_cast<int>(m_telemetryEmitClock.elapsed()) : 0;
             m_telemetryEmitClock.restart();
+            m_telemetry.adcSamples = m_adcWindowSamples;
+            m_telemetry.adcOverloadSamples = m_adcWindowOverload;
+            m_adcWindowSamples = 0;
+            m_adcWindowOverload = 0;
             emit telemetryUpdated(m_telemetry);
         }
 
