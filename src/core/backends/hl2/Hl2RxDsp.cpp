@@ -5,10 +5,61 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
+#include <limits>
 
 Q_LOGGING_CATEGORY(lcHl2RxDsp, "aether.hl2.rxdsp")
 
 namespace AetherSDR::hl2 {
+
+// ── BENCH INSTRUMENTATION — §13 row 9a. See the header. NOT FOR A PR. ──────
+//
+// Read ONCE, into a function-local static, for two reasons. The obvious one is
+// that getenv on the DSP thread per block is not free. The one that matters is
+// that an arm must not be able to change UNDER a run: the bench alternates arms
+// between app launches, and a switch that could flip mid-session would let a
+// single row contain both arms without saying so.
+Hl2RxDsp::TrMuteMode Hl2RxDsp::trMuteMode() noexcept
+{
+    static const TrMuteMode mode = [] {
+        const char* raw = std::getenv("AETHER_HL2_TR_MUTE_MODE");
+        if (raw != nullptr && std::strcmp(raw, "stop") == 0) {
+            qCInfo(lcHl2RxDsp) << "T/R mute arm B: WdspChannel::setRunning "
+                                  "(AETHER_HL2_TR_MUTE_MODE=stop)";
+            return TrMuteMode::Stop;
+        }
+        // Anything else — unset, empty, "zeros", a typo — is today's behaviour.
+        // FAIL TOWARDS THE SHIPPING PATH: a mistyped arm must not silently
+        // become the experimental one. The log line above is how a run proves
+        // which arm it actually got, rather than trusting the env it set.
+        if (raw != nullptr && std::strcmp(raw, "zeros") != 0) {
+            qCWarning(lcHl2RxDsp) << "AETHER_HL2_TR_MUTE_MODE =" << raw
+                                  << "is not 'zeros' or 'stop'; using zeros";
+        }
+        qCInfo(lcHl2RxDsp) << "T/R mute arm A: zero-fill (default)";
+        return TrMuteMode::Zeros;
+    }();
+    return mode;
+}
+
+int Hl2RxDsp::trMuteDrainBlocks() noexcept
+{
+    static const int blocks = [] {
+        const char* raw = std::getenv("AETHER_HL2_TR_MUTE_DRAIN_BLOCKS");
+        if (raw == nullptr || *raw == '\0')
+            return 2;
+        char* end = nullptr;
+        const long parsed = std::strtol(raw, &end, 10);
+        if (end == raw || *end != '\0' || parsed < 0 || parsed > 64) {
+            qCWarning(lcHl2RxDsp) << "AETHER_HL2_TR_MUTE_DRAIN_BLOCKS =" << raw
+                                  << "is not an integer in 0..64; using 2";
+            return 2;
+        }
+        return static_cast<int>(parsed);
+    }();
+    return blocks;
+}
 
 Hl2RxDsp::Hl2RxDsp(QObject* parent) : QObject(parent)
 {
@@ -220,6 +271,7 @@ void Hl2RxDsp::setAgc(int agcMode, double maximumGainDb)
 
 void Hl2RxDsp::setAudioMuted(bool muted)
 {
+    const bool changed = (m_audioMuted != muted);
     m_audioMuted = muted;
     // The mute path clocks the channel with ZEROS, and the noise blanker
     // triggers on a RATIO — magnitude against a running average magnitude — so
@@ -229,6 +281,32 @@ void Hl2RxDsp::setAudioMuted(bool muted)
     // average instead; WdspChannel flushes it on release.
     if (m_channel)
         m_channel->setNoiseBlankerHold(muted);
+
+    // ── BENCH: arm B. See the header. ─────────────────────────────────────
+    if (trMuteMode() != TrMuteMode::Stop || m_channel == nullptr || !changed)
+        return;
+
+    // SAFE TO TAKE A CONTROL OPERATION HERE, and only because of the thread.
+    // WdspChannel::setRunning must not be called from inside processIq(), and
+    // refuses if a control operation is already in flight. This slot is reached
+    // by a QueuedConnection onto the DSP thread (Hl2Backend posts it), the same
+    // thread that runs processIqBlock(), so the two are serialised by the event
+    // loop and no block is ever in flight when this line executes — exactly the
+    // argument setMode() and setNoiseBlanker() already rely on.
+    if (!m_channel->setRunning(!muted)) {
+        // CHECKED, not fire-and-forget. A refused stop leaves WDSP running and
+        // the channel unfed once the drain expires, which is a MUTE THAT NEVER
+        // LIFTS rather than a measurement. Fall back to arm A's zero-fill for
+        // this edge by leaving the drain counter effectively infinite, and say
+        // so loudly so the row can be discarded rather than believed.
+        qCWarning(lcHl2RxDsp) << "T/R mute arm B: setRunning(" << !muted
+                              << ") REFUSED; this edge ran arm A instead";
+        m_muteDrainBlocks = muted ? std::numeric_limits<int>::max() : 0;
+        return;
+    }
+    // On the way DOWN, owe the stopped channel enough blocks for its down-slew;
+    // on the way UP, nothing is owed. See the header for why this is not zero.
+    m_muteDrainBlocks = muted ? trMuteDrainBlocks() : 0;
 }
 
 void Hl2RxDsp::setSpectrumRateFps(int fps)
@@ -407,10 +485,53 @@ void Hl2RxDsp::processIqBlock(const std::vector<std::complex<float>>& iq)
     std::size_t consumed = 0;
     while (m_iqBuffer.size() - consumed >= block) {
         if (m_audioMuted) {
-            // Clock the audio channel with silence rather than skipping it.
+            // ── BENCH: arm B's dark period. See the header. NOT FOR A PR. ──
+            //
+            // The channel is stopped AND its down-slew has been clocked out, so
+            // from here to the end of transmit WDSP is fed NOTHING — that is the
+            // whole of arm B, and it is what makes the output ring refill from
+            // empty on release.
+            //
+            // THE SINK STILL GETS A BLOCK, and this is the one place where this
+            // experiment could measure its own plumbing instead of WDSP. Arm A
+            // emits one audio block per input block; if arm B emitted none, the
+            // downstream sink would starve and the hole we went looking for
+            // would partly be ours. So silence is emitted HERE, at arm A's exact
+            // cadence and block size, without clocking WDSP.
+            //
+            // The DC blockers are advanced with that silence rather than
+            // skipped, so that the only thing differing between the arms
+            // downstream of the demodulator is the demodulator. (Their zero-
+            // input response is a decay to zero, which is what arm A feeds them
+            // during a mute anyway.)
+            if (trMuteMode() == TrMuteMode::Stop && m_muteDrainBlocks <= 0) {
+                consumed += block;
+                const std::size_t darkN = m_left.size();
+                for (std::size_t k = 0; k < darkN; ++k) {
+                    m_stereo[2 * k]     = m_dcBlockL.process(0.0f);
+                    m_stereo[2 * k + 1] = m_dcBlockR.process(0.0f);
+                }
+                emit audioReady(m_stereo);
+                // The meter is read, not computed: nothing is clocking WDSP, so
+                // this is the FROZEN value from the last block before the stop.
+                // Emitted anyway, because the alternative is a second cadence
+                // difference between the arms. NOT a measurement of anything
+                // during transmit.
+                emit meterUpdate(static_cast<float>(
+                    m_channel->meter(WdspChannel::Meter::SignalPeak)));
+                continue;
+            }
+            // Arm A always, and arm B for its first trMuteDrainBlocks() blocks:
+            // clock the audio channel with silence rather than skipping it.
             // Skipping would let the pipeline's contents go stale and emerge on
             // unmute; feeding zeros keeps latency constant and guarantees that
-            // what comes out when transmit ends is silence.
+            // what comes out when transmit ends is silence. In arm B these are
+            // also the blocks that play WDSP's mute envelope out — the stop
+            // itself only raises a flag, and fexchange2 is what lowers it.
+            if (m_muteDrainBlocks > 0
+                && m_muteDrainBlocks < std::numeric_limits<int>::max()) {
+                --m_muteDrainBlocks;
+            }
             std::fill(m_i.begin(), m_i.end(), 0.0f);
             std::fill(m_q.begin(), m_q.end(), 0.0f);
         } else

@@ -200,8 +200,48 @@ public:
     // updating, but the audio channel is clocked with SILENCE. The pipeline
     // therefore stays running at constant latency and contains nothing but
     // silence when transmit ends.
+    // ^^ that paragraph describes ARM A, which is still the default. See
+    // TrMuteMode below for the runtime switch that is only here for the bench.
     Q_INVOKABLE void setAudioMuted(bool muted);
     [[nodiscard]] bool isConfigured() const noexcept { return m_channel != nullptr; }
+
+    // ── BENCH INSTRUMENTATION — HERMES §13 row 9a. NOT FOR A PR. ──────────
+    //
+    // Row 9a asks whether the T/R mute should become a real
+    // WdspChannel::setRunning(false) instead of clocking zeros. Both sides have
+    // a suspected cost and neither has ever been measured, so this switch lets
+    // ONE binary present both arms and the bench alternate between them inside
+    // a single session. Two builds would have made build-to-build variation a
+    // confounder with the very effect under test.
+    //
+    //   Zeros (default) — today's behaviour, unchanged, byte for byte. WDSP
+    //     keeps running and is fed silence; the Config mute envelope never runs
+    //     on a T/R edge because the channel never stops.
+    //   Stop            — setRunning(false) on the mute edge, setRunning(true)
+    //     on release. WDSP flushes on stop, so its output ring refills from
+    //     empty at the head of every receive period.
+    //
+    // Selected ONCE, from the environment, on first use:
+    //   AETHER_HL2_TR_MUTE_MODE = "zeros" (default) | "stop"
+    //   AETHER_HL2_TR_MUTE_DRAIN_BLOCKS = <int>, default 2
+    //
+    // THE DRAIN IS THE PART THAT CAN FOOL THE EXPERIMENT, so it is a knob and
+    // not a constant. WDSP's stop does not act inside SetChannelState: it sets
+    // a down-slew flag and a flush flag that only the NEXT fexchange2 calls
+    // clear (see WdspChannel::setRunning). A stop followed IMMEDIATELY by "feed
+    // it nothing" therefore never plays the mute envelope out, and arm B would
+    // be measuring a missing ramp rather than a real stop. So arm B keeps
+    // clocking zeros for exactly this many blocks after the stop — one block is
+    // 1024/48000 = 21.3 ms against a 10 ms down-slew, so the default of 2
+    // covers it twice over — and then feeds the channel NOTHING at all for the
+    // rest of the transmit period, emitting silence straight to the sink.
+    // Setting it to 0 is the control that shows what the ramp was worth.
+    //
+    // What is NOT switched: the spectrum path, the noise-blanker hold, and the
+    // sink cadence are identical in both arms.
+    enum class TrMuteMode { Zeros, Stop };
+    [[nodiscard]] static TrMuteMode trMuteMode() noexcept;
+    [[nodiscard]] static int trMuteDrainBlocks() noexcept;
 
     // What the WDSP channel was actually OPENED WITH, for the read-back verb.
     //
@@ -357,6 +397,10 @@ private:
     double m_notchTuneHz = 0.0;
 
     bool m_audioMuted = false;
+    // Arm B only: blocks of zeros still owed to the stopped channel so its
+    // down-slew can finish. Counted down on the DSP thread, set on the T/R
+    // edge. Zero (and mode Stop, and muted) means "feed WDSP nothing".
+    int m_muteDrainBlocks = 0;
     // Panadapter frame-rate cap. 0 = uncapped. m_spectrumClock is started on
     // the first block and only read/written on the DSP thread.
     int m_spectrumIntervalMs = 0;
