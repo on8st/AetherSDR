@@ -70,6 +70,18 @@ Hl2RxDsp::Hl2RxDsp(QObject* parent) : QObject(parent)
     // thread; without this the Mode argument has no metatype and Qt drops the
     // call with only a warning.
     qRegisterMetaType<WdspChannel::Mode>("WdspChannel::Mode");
+    // FORCE THE ARM TO BE DECIDED AND LOGGED HERE, not at first use.
+    //
+    // trMuteMode() is a function-local static, and its only caller is the mute
+    // path -- which first runs on the first KEY. A bench run that refuses to
+    // key until the app has named its arm would therefore deadlock against
+    // itself: the line it waits for cannot appear until the thing it is
+    // gating has already happened. Evaluating both here puts the arm in the
+    // log at construction, before any key and before any measurement.
+    //
+    // Bench instrumentation. Not for a PR.
+    (void)trMuteMode();
+    (void)trMuteDrainBlocks();
 }
 
 Hl2RxDsp::~Hl2RxDsp()
