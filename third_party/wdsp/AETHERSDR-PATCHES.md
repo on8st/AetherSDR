@@ -2,8 +2,8 @@
 
 The source snapshot is pinned to TAPR/OpenHPSDR-wdsp commit
 `584e8aca5ba1c4c6bc66fc0cc164ce567c8ba1e3` (`Release Version 2.00`).
-AetherSDR carries five local fixes in the otherwise exact `Source/*.[ch]`
-snapshot — four teardown fixes and one channel-state fix:
+AetherSDR carries six local fixes in the otherwise exact `Source/*.[ch]`
+snapshot — four teardown fixes and two channel-state fixes:
 
 1. `upstream/nbp.c`: `destroy_notchdb()` now frees the `notchdb` object after
    its member allocations.
@@ -105,17 +105,103 @@ snapshot — four teardown fixes and one channel-state fix:
    start after `reconfigure()` of a stopped channel) and fails on every one
    with this patch reverted.
 
+   **This patch covers the ramp that is still pending, and NOTHING ELSE.** The
+   text here first claimed it made stop/start pairs safe at any spacing; that
+   was true only inside the ramp, and false just past it. See patch 6.
+
+6. `upstream/channel.c`: `SetChannelState()` case 1 now waits out a flush that
+   a *completed* down-ramp already requested, before it arms the up-ramp.
+
+   Patch 5 cancels a ramp that is still **pending**. It cannot cancel a flush
+   that a ramp which already **completed** has requested. At that completion
+   `fexchange0`/`fexchange2` clear `exchange` and release `Sem_Flush`
+   (`iobuffs.c`), and the `flushChannel` thread is left runnable but not
+   necessarily scheduled. When it does run it takes `csDSP` then `csEXCH`,
+   flushes, and does `InterlockedBitTestAndSet (&a->exec_bypass, 0)`. Arm in
+   that window and `flushChannel` sets `exec_bypass` *after* case 1 cleared it;
+   `wdspmain` then skips `dexchange`/`xrxa` entirely (`main.c`) and the worker
+   produces nothing for a channel whose `state` reads 1.
+
+   Two failure modes, both measured on this tree with a probe that stops,
+   clocks N blocks at the 256/48 kHz cadence, starts with **no gap**, and then
+   asks for audio:
+
+   | mode | sweep | patch 5 only | with patch 6 |
+   |---|---|---|---|
+   | non-blocking (what production uses) | spacings 0-10, 40 trials each | 42 of 440 dead — 24 at spacing 3, 18 at spacing 4, **none at 0-2** | 0 of 440 |
+   | blocking | spacings 0-6, 20 trials each | 20 of 140 hung — all at spacing 3 | 0 of 140, no hang |
+
+   A control that sleeps 20 ms before each start, giving the flush thread its
+   slot, is 0 of 440 with patch 5 alone. The ramp is exactly three blocks here
+   (BEGIN 1 + DOWNSLEW `ntdown` + 1 + ZERO `out_size` + 1 = 739 samples at
+   `out_size` 256), so spacing 3 is the first at which it completes — which is
+   why nothing dies at 0-2, the window patch 5 already covered.
+
+   The blocking hang is a hard one: with `exec_bypass` set the worker never
+   releases `Sem_OutReady`, so `fexchange2`'s
+   `if (a->bfo) WaitForSingleObject (a->Sem_OutReady, INFINITE)` never returns.
+   Six thread samples of six separate stalls all showed that two-thread
+   starvation — host parked in `fexchange2` holding `csEXCH`, `flushChannel`
+   finished and back on `Sem_Flush`, worker idle on `Sem_BuffReady`. A
+   three-way lock cycle (`flushChannel` holding `csDSP` and blocking on the
+   `csEXCH` the parked host holds, worker then blocking on `csDSP`) is
+   reachable from the same window on a different interleaving; no sample caught
+   it, and it is not what the measurements above are evidence of.
+
+   The wait predicate is `exchange` clear **and** `flushflag` set, which names
+   the completed-ramp case and only it: a pending ramp leaves `exchange` set;
+   case 0's dmode-1 timeout force-clears both; `pre_main_build` clears
+   `flushflag`, so `OpenChannel`'s start never waits; and every in-tree restore
+   call (`SetDSPBuffsize`, `SetDSPSamplerate`, `RXASetNC`, `TXASetNC`) reaches
+   case 1 only after its own `SetChannelState(0, 1)`, which leaves `flushflag`
+   clear on both exits. The only caller that can reach the wait is a host that
+   stopped with dmode 0 and clocked the ramp out.
+
+   **Outside `csEXCH`, and that is load-bearing.** `flushChannel` needs
+   `csEXCH` to finish and clear `flushflag`, so waiting while holding it would
+   guarantee the timeout instead of the flush. The waiting thread holds no
+   channel lock at all, and the host cannot be inside `fexchange*` on it —
+   `WdspChannel::setRunning()` and `open()` both take the control fence, which
+   refuses while a `processIq()` callback is in flight — so the wait cannot
+   join the cycle above. Nothing that must run to satisfy it can be blocked by
+   it either: `csDSP` is never held across an unbounded wait (`dexchange` only
+   memcpys and releases), and `flush_iobuffs`'s `Sem_BuffReady` drain is a 1 ms
+   -timeout poll.
+
+   **Bounded** by case 0's existing `count`/`timeout`, for the same reason
+   patch 4 bounds its handshake: a flush thread that never runs must not hang a
+   start forever, and falling through after the cap is exactly today's
+   behaviour, no worse. Cost, over 132 starts across spacings 0-10:
+   `setRunning(true)` mean 251 us, max 3.1 ms, against mean 0.83 us / max
+   3.1 us with the patch reverted. The owner-side stops in `Hl2RxDsp` and
+   `AnanRxDsp` are `setRunning(false)` — case 0 — and take no new wait at all.
+
+   Found by K5PTB in review of #5628, on the shape he suggested.
+   `runRestartDuringRampTest`'s scenario table now straddles the ramp:
+   spacings 0 and 1 inside it, 3, 4 and 5 at and past its completion, restarted
+   with no gap. With this patch reverted it goes red on one of those three rows
+   in 5 of 5 runs — which row varies, so all three earn their place. The
+   post-restart clocking runs on its own thread under a 20 s deadline, because
+   the blocking failure is a hang, and inline it would be a ctest timeout
+   rather than a message anyone can read.
+
+   NOT MEASURED ON HARDWARE. The probe is synthetic; no radio has run any of
+   this.
+
 Without these lines, opening and closing one RX channel leaks one `notchdb`
 object and two NURBS objects, while one TX channel leaks one transition table.
 `wdsp_channel_test` detects both paths deterministically.
 Without the fourth, every channel close is a use-after-free race on the
 worker thread; `wdsp_channel_test` and the HL2 backend tests show it under
 ThreadSanitizer.
-Without the fifth, a stop immediately followed by a start silently and
-permanently disables the channel; `wdsp_channel_test` shows it
-deterministically.
+Without the fifth, a stop immediately followed by a start — before the host has
+clocked the down-ramp out — silently and permanently disables the channel;
+`wdsp_channel_test` shows it deterministically.
+Without the sixth, a start taken just *after* that ramp completes does the same
+thing by a different route, and in the blocking form hangs the host outright;
+`wdsp_channel_test` shows it, and the probe behind the patch measures it.
 
-**Marking convention.** Patches 4 and 5 carry `// AetherSDR patch N:` comments
+**Marking convention.** Patches 4, 5 and 6 carry `// AetherSDR patch N:` comments
 at every edited site, so `grep -rn "AetherSDR patch" third_party/wdsp/` finds
 them all. Patches 1-3 predate that convention: each is a single added
 `_aligned_free` line with no marker, findable only from this file. New patches
