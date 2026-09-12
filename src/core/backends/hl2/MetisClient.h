@@ -12,6 +12,7 @@
 #include <deque>
 #include <vector>
 
+#include "core/backends/hl2/Hl2ControlRequest.h"
 #include "core/backends/hl2/MetisProtocol.h"
 
 class QUdpSocket;
@@ -191,6 +192,55 @@ public:
     // on the next EP2 frame, ahead of the round robin.
     Q_INVOKABLE void requestPipelineReset();
 
+    // ---- RQST/ACK (docs/HERMES.md §13 item 13, oracle §5) ----
+    //
+    // Ask the radio to acknowledge one C&C register write. Read
+    // Hl2ControlRequest's header before using this: it is NOT a read, NOT an
+    // RPC, and it can be refused for four separate reasons, all of which a
+    // caller has to be prepared for.
+    //
+    // Returns FALSE, having sent nothing, when:
+    //   - the stream is not running or no EP6 has arrived. Response slots exist
+    //     only inside the EP6 frame the radio emits while `run` is set, so an
+    //     idle radio would never answer and reporting a timeout for that would
+    //     be a lie about the hardware;
+    //   - a request is already outstanding (single outstanding, no queue);
+    //   - a previous request timed out and its quarantine has not elapsed;
+    //   - the address is not on the ALLOW-LIST in the .cpp. Not a deny-list:
+    //     the set of RQST-able addresses is enumerated, so an address nobody
+    //     considered is refused by default rather than permitted by default.
+    //
+    // TODAY THAT LIST IS 0x0a (AD9866 RX LNA gain), 0x0e (ADC assign / TX LNA
+    // gain) and 0x3b (AD9866 SPI, the subsystem read path). The reason for each,
+    // and the reason for the ones deliberately left off — 0x01 the TX NCO,
+    // 0x09 TX drive/PA, 0x39 sync/reset, 0x3c/0x3d the two I2C buses — is
+    // written at the list itself. Read it before adding one.
+    //
+    // WHAT IS GUARANTEED, exactly. This method cannot key a transmitter:
+    // ccRegister() leaves C0[0] clear, the RQST bit is C0[7], and withRespRqst()
+    // touches nothing else, so the transmit gate is untouched whatever the
+    // address. That is a NARROWER claim than "the dangerous registers are
+    // handled", and the narrow one is the true one — what keeps this method away
+    // from the companion-board I2C bus (amplifiers, antenna relays,
+    // transverters) is the allow-list and nothing else. Widening the list
+    // widens the blast radius; widening it is not a refactor.
+    //
+    // `subsystemRead` selects Hl2ControlRequest::Echo::SubsystemRead, whose
+    // reply carries the value READ instead of an echo of what was written. Of
+    // the allow-listed addresses only 0x3b is of that shape; the two I2C
+    // commands (0x3c/0x3d) are as well, and are not reachable from here.
+    // Wrong on an ordinary register it would throw away the data half of the
+    // echo match, leaving a six-bit address as the whole correspondence.
+    Q_INVOKABLE bool requestRegister(int addr, quint32 data, bool subsystemRead = false);
+
+    // I/O-THREAD ONLY, like linkCounters(). Returned by reference because the
+    // machine holds no implicitly-shared members; GUI-thread consumers read the
+    // controlReply* signals instead.
+    [[nodiscard]] const Hl2ControlRequest& controlRequest() const noexcept
+    {
+        return m_ccRequest;
+    }
+
     // Receivers this client can both RUN and TUNE: the RX1..RX7 NCO registers
     // are one contiguous run (0x02..0x08) and RX8..RX12 are not. See ccRxFreq().
     static constexpr int kMaxTunableRx = 7;
@@ -309,6 +359,18 @@ signals:
     // unreachable, or already streaming to a different client.
     void connectFailed(const QString& reason);
 
+    // A RQST issued through requestRegister() was acknowledged. `addr` is the
+    // address ASKED FOR, not the one in the ACK, so a caller never has to
+    // reason about the 0x3F refusal encoding; `data` is the register's echo,
+    // or the read value for a subsystem read.
+    void controlReplyReady(int addr, quint32 data);
+    // A RQST did not come back. `refused` distinguishes the radio saying no (a
+    // subsystem was not ready) from the radio saying nothing at all. Both are
+    // ordinary outcomes on this protocol, not errors — and after a timeout the
+    // machine is in quarantine, so the next requestRegister() will refuse for
+    // a while. Consumers must not retry immediately in this handler.
+    void controlRequestFailed(int addr, bool refused);
+
 private slots:
     void onReadyRead();
     void onEp2PacerTick();
@@ -331,6 +393,29 @@ private:
     // real C&C frame; a stream started before any C&C has landed emits ADC-idle
     // samples (Q pinned to zero) until one does.
     void sendPrimingBurst(int countPerBank);
+    // Offer one decoded EP6 C&C response to the RQST/ACK machine and publish
+    // whatever verdict that produces. Separated from the datagram loop so a
+    // test can drive the reply path with a synthetic Ep6Response and no socket
+    // — see MetisClientTestAccess.
+    void ingestControlResponse(const Ep6Response& resp);
+    // Advance the RQST/ACK deadline by one EP6 frame and publish any verdict
+    // that falls out — a timeout has no ACK to carry it.
+    void tickControlRequest();
+    // Emit whatever verdict the machine has settled, if any.
+    void publishControlVerdict();
+    // Confirm that the packet buildNextControlPacket() just produced reached the
+    // socket, and start the RQST deadline if it carried the request bank. Takes
+    // the socket's return value, so a write the kernel refused leaves the
+    // request Queued for the next frame instead of burning it — which is what
+    // makes Hl2ControlRequest::onRequestSent()'s "handed to the socket" true
+    // rather than aspirational. Exposed to MetisClientTestAccess so the
+    // socket-free tests drive the same two-step seam the transport does.
+    void onControlPacketSent(qint64 bytesWritten) noexcept;
+    // Give up the outstanding request because the stream it belonged to is
+    // gone: publish anything already settled, tell a caller that is still
+    // waiting, then reset. Used by stop() and by the silence watchdog's
+    // link-down, which must behave the same way.
+    void dropControlRequest();
 
     // EP2 cadence follows the frame geometry, not the EP6 arrival rate: the
     // radio consumes one EP2 frame per kTxSamplesPerPacket samples, so at 48 kHz
@@ -405,6 +490,16 @@ private:
     // rotation to come back around.
     friend struct MetisClientTestAccess; // socket-free transport-state injection
     std::deque<Cc> m_oneShot;           // which register pair to send next
+    // The single RQST slot. Drained AFTER m_oneShot, never before: a one-shot is
+    // a write the operator asked for, and letting a read-back overtake it would
+    // answer with the value from before the change.
+    Hl2ControlRequest m_ccRequest;
+    // Whether the packet buildNextControlPacket() last produced carries the RQST
+    // bank. Lives here rather than being inferred from m_ccRequest's state
+    // because the state is what the confirmation CHANGES: by the time
+    // onControlPacketSent() runs, "is it still Queued" cannot distinguish a
+    // request that went out from one that never did.
+    bool m_requestOnBuiltPacket = false;
     // Last transmit frequency handed to the IO board, and whether one ever was.
     // A separate flag rather than a 0 sentinel: 0 Hz is not a plausible tuned
     // frequency, but "never sent" still has to survive a radio that legitimately

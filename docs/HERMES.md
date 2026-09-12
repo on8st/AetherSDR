@@ -183,6 +183,125 @@ statistics (RMS, peak, non-zero fraction), never only on packet counts.
 The p99/max figures are the real input for sizing the SPSC queue between the
 UDP thread and DSP: it needs ≥3 packets of slack to absorb observed jitter.
 
+### RQST/ACK, read off the gateware rather than the oracle
+
+Building §13 item 13 meant reading `control.v`, `ds.v` and `usopenhpsdr1.v`
+instead of inferring. Six things came out that were either absent from our
+sources or wrong in them.
+
+**C0 splits three ways host->radio, not two.** `dsopenhpsdr1.v` decodes it in
+one state (`CMDCTRL`): `ds_cmd_resprqst_next = eth_data[7];`,
+`ds_cmd_addr_next = eth_data[6:1];`, `ds_cmd_ptt_next = eth_data[0];`. So the
+register address is **six bits, not seven**, and
+bit 7 is the response request. `MetisProtocol.h` described C0 as an address
+shifted left with MOX in bit 0 and said nothing about bit 7 — true as far as it
+went, and safe only because nothing had ever set it.
+
+**Bit 7 is not a read bit, and there is no read-only command.** `RESP_START`
+latches `cmd_data` and the write happens regardless; the reply is an **echo** of
+what was written. The only replies that are not echoes are the AD9866 SPI
+(`0x3b`) and I2C (`0x3c`) commands, which carry a read opcode inside the data
+and come back with the read value (`RESP_READ`). Every RQST is a write that asks
+to be acknowledged, and any caller of `MetisClient::requestRegister` has to read
+it that way.
+
+**The free-running RADDR is TWO bits on this hardware, not four, and the cycle
+is 0..3 — not 0..4.** `control.v` declares `logic [1:0] resp_addr` and composes
+C0 as `{3'b000, resp_addr, ext_cwkey, 1'b0, ptt_resp}`, so C0[6:5] are hardwired
+zero. `parseEp6Response` reads four bits at C0[6:3] and therefore gets the right
+number anyway — but the note beside it, that hpsdrsim's `0, 8, 16, 24, 32`
+sequence proves RADDR 0..4, describes the **fixture** and not the radio. Slot 3
+is `debug` and carries nothing; there is no slot 4.
+
+**`0x3F` in an ACK means "refused", not a register.** When a subsystem is not
+ready, `RESP_ACK` substitutes `6'h3f` for the command address. It is unambiguous
+only because nothing ever *requests* `0x3F` — which is also the extended-address
+escape — so `Hl2ControlRequest::isRequestableAddress` refuses it by construction.
+
+**"Queue size is 1" is the gateware's own comment, and losing is silent — but
+only a *flagged* command can do the losing.** A second command arriving while
+the response FSM sits in `RESP_ACK`/`RESP_READ` gets no reply at all; one
+arriving in `RESP_WAIT` **overwrites** the saved address and data of the request
+still waiting for a slot. A pipelined pair does not give two answers late — it
+gives one answer and one silence, with nothing reporting an error. That, not
+politeness, is why the host enforces one outstanding.
+
+The qualifier matters more than the rule, because without it the rule would not
+work at all: this client emits two C&C banks per EP2 packet at ~381 packets/s
+and never stops, so if any command could clobber a pending reply, one would be
+clobbered within ~1.3 ms and an ACK could essentially never survive to be
+emitted. **Both entries are gated on the RQST bit.** `control.v`, verbatim:
+
+```verilog
+    RESP_START: begin
+      if (cmd_rqst & cmd_requires_resp & ~cmd_is_alt) begin
+```
+
+```verilog
+    RESP_WAIT: begin
+      cmd_resp_rqst = 1'b1;
+      if (resp_rqst & ~resp_cnt) begin // Only every other resp_rqst
+        if (cmd_rqst & cmd_requires_resp) begin
+```
+
+`cmd_requires_resp` is C0[7]. `hermeslite_core.v` wires it as
+`.cmd_requires_resp (cmd_resprqst)` and `assign cmd_resprqst = ds_cmd_resprqst;`,
+and `dsopenhpsdr1.v` latches that in `CMDCTRL` as
+`ds_cmd_resprqst_next = eth_data[7];`. The round robin
+never sets that bit (`Hl2ControlRequest::wireBank()` is non-empty only in
+`Queued`, and `withRespRqst` is applied nowhere else), so **unflagged traffic
+cannot displace a pending reply however fast it runs.** Only another RQST can,
+and one party issues those.
+
+**Command response slots open on ALTERNATE frames, so the minimum turnaround is
+two frames, not one.** `resp_cnt` toggles on every `resp_rqst`, and the machine
+acts only when it is clear — its own comment is *"Only every other
+resp_rqst"* — in **both** places: the `RESP_WAIT` exit quoted above, and the
+write of the command reply into the output register:
+
+```verilog
+  if (resp_rqst) begin
+    resp_cnt <= ~resp_cnt; // Count every other response
+    ...
+    if (cmd_resp_rqst & ~resp_cnt) begin // Only every other resp_rqst
+      // Command response
+      iresp <= {1'b1,resp_cmd_addr,ptt_resp, resp_cmd_data}; // Queue size is 1
+```
+
+So a reply waits one frame at best and two at worst, depending on the phase
+`resp_cnt` is in when it reaches `RESP_WAIT`; the free-running telemetry slots
+are the other half of the alternation. `Hl2ControlRequest`'s 32-frame deadline
+is therefore **sixteen** response opportunities, not thirty-two — which is still
+ample (~42 ms at 48 kHz with one receiver) and the constant is unchanged. The
+header had this right where it sizes the deadline; this paragraph is where the
+reasoning now lives.
+
+**The response clock is EP6 frames, and only while streaming.** `resp_rqst`
+toggles once in `usopenhpsdr1.v`'s `SYNC_RESP`, which runs once per 512-byte
+frame (so twice per EP6 packet), and the whole emit path is gated on `run`.
+Command responses go out only on alternate slots (`cmd_resp_rqst & ~resp_cnt`),
+so an ACK **displaces one free-running telemetry slot** — the oracle's warning
+about saturating with requests starving the classic responses is literally true,
+one slot per request. It also means a wall-clock timeout is the wrong
+instrument: `Hl2ControlRequest` counts the radio's own slots instead.
+
+**No radio has ever answered this code.** Every test behind item 13 is synthetic
+— a hand-built `Ep6Response` fed straight to `ingestControlResponse`. That is
+the right layer for the state machine's own laws (a refusal and a non-event have
+no datagram to observe), and it is *by construction* incapable of distinguishing
+"the radio answers" from "we believe it would". The RTL above says a correctly
+flagged request will be answered; nothing here is evidence that one was. First
+hardware run: arm a read-back at `0x0a` on a streaming radio and watch
+`staleAcks()` stay at zero while `answered()` moves. Until then, treat the
+`Answered` path as unexercised on real hardware and say so in anything built on
+it.
+
+**Bonus, for §13 item 14.** `clip_cnt` is a 2-bit saturating counter cleared on
+**every** `resp_rqst`, and the ADC-overload bit in RADDR 0 is `(&clip_cnt)` —
+both bits set. So that bit does not mean "a sample clipped"; it means **at least
+three clip events inside one EP6 frame**, re-armed every frame. Anything that
+servos gain off it is servoing off a coarse per-frame threshold, not a count.
+
 ### Ordering
 
 A stream started before any C&C frame has landed emits ADC-idle samples. Prime
@@ -1202,7 +1321,7 @@ Audited against this branch's merge base, `6f46eea7`.
 
 | # | Item | Source | Why it matters | Effort |
 |---|---|---|---|---|
-| 13 | RQST/ACK state machine | O §5 | Gate for everything below. Single outstanding request, echo-matched, no transaction id. **Do not model as RPC** | M |
+| ~~13~~ | ~~RQST/ACK state machine~~ **DONE** | O §5 | `Hl2ControlRequest` + `MetisClient::requestRegister`. One outstanding, echo-matched, deadline counted in EP6 frames; a blown deadline **quarantines** rather than freeing the slot, so the abandoned request's late echo has nowhere to land. Requestable addresses are an **allow-list** (0x0a, 0x0e, 0x3b today) and not a deny-list, so items 14-23 add one deliberately rather than inherit it. The wire facts it was built from are in §4 — three of them contradict what we had, and no radio has yet answered the code | — |
 | 14 | ADC overload bit + clip counter | O §6, A2 §A3 | The *correct* driver for gain decisions — audio level in one slice says nothing about what saturates a converter seeing 0–38.4 MHz. **The overload bit is already decoded** (`Hl2Telemetry::apply`, response address 0 bit 24, free-running cycle — no RQST/ACK) and surfaced as the rate-limited warning in §15.7; what is missing is the gain servo on top of it. **It does need a running EP6 stream** (§11.4): the clip counter's only clear is the EP6 response, so an idle discovery poll returns a latch. Servo on the EP6 bit, not the discovery counter: the bit is `(&clip_cnt)`, so the counter is its own input and carries no more information | S |
 | 15 | Discovery-reply telemetry (temp, power, PTT) | O §1 | Pollable **without a stream** — cheapest first increment, and a diagnostic when the stream is broken. **The clip field is excluded**: at idle it is a latched rail, not a level (§11.4) | S |
 | ~~16~~ | ~~Pair WDSP `RXA_ADC_PK` with the hardware clip indicator~~ **DONE** | A3 §7 | The Converter health section now carries both: the pre-DDC overload flag (RADDR `0x00` bit 24) and, per slice, WDSP's post-DDC `RXA_ADC_PK` with an age on it — plus a sentence naming which of the four ways they can stand relative to each other is happening (`Hl2AdcPairing.h`). It only READS, which is why it did not have to wait for 13. The sentence is **gated on the age**: the slice side freezes for the length of every transmission while the pre-DDC flag keeps moving, so a stale slice reading pairs to "not reported" rather than to a causal claim (`kSliceStaleMs`). Note also what bit 24 is — `(&clip_cnt)`, the AND-reduction of the gateware clip counter, so it asserts on a SATURATED counter and not on one clip; the counter as a count is still row 14. **Display only**, and **both sides are uncalibrated** and not even on a common scale: what survives is the relationship, never either number on its own | — |
