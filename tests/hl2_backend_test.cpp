@@ -333,6 +333,33 @@ int main(int argc, char** argv)
     check(errSpy.count() == 1, "awaited invokeExtension -> one extensionError");
     check(errSpy.first().at(0).toULongLong() == 42u, "extensionError carries the requestId");
 
+    // ---- the wideband converter view is declared BY A CONNECTED radio ----
+    //
+    // The half of the declaration that needs a live link, and therefore the
+    // only part of it that belongs in this fixture. The record's CONTENT and
+    // the existence of the verb it names are asserted socket-free in
+    // wideband_converter_view_test, which runs; this file does not.
+    {
+        const RadioCapabilities live = backend.capabilities();
+        check(live.widebandConverterView.has_value(),
+              "a connected HL2 declares a wideband converter view");
+        const WidebandConverterView& wide = *live.widebandConverterView;
+        // The converter's numbers, not a display choice: 76.8 MHz is
+        // hermeslite_core.v's CLK_FREQ and 2048 is the capture FIFO's depth.
+        check(wide.sampleRateHz == AetherSDR::hl2::kAdcSampleRateHz,
+              "and reports the converter's own sample rate — a DC..38.4 MHz span");
+        check(wide.blockSamples == AetherSDR::hl2::kEp4BlockSamples,
+              "and the record length the gateware actually delivers");
+        // The record names its own verb so the consumer never has to know which
+        // family answered. If these two drifted from the string invokeExtension
+        // matches, the capability would advertise a verb that errors.
+        check(wide.frameNamespace == QStringLiteral("hl2")
+                  && wide.frameVerb == QStringLiteral("bandscope.frame"),
+              "and names the verb that delivers one record");
+        check(live.extensionNamespaces.contains(wide.frameNamespace),
+              "...in a namespace this backend declares it answers");
+    }
+
     // ---- EP6 silence watchdog: the fake radio stopped at kCap, so once the
     // silence window elapses the link must be reported down instead of sitting
     // in a permanently "connected" state. ----
