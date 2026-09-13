@@ -3471,34 +3471,109 @@ void Hl2Backend::setKeying(bool key)
     // nothing to say so. An unkey-time "raise mic gain" line is the right
     // instrument for that, and an earlier revision of this PR carried one.
     //
-    // IT CANNOT BE AIMED FROM THIS BRANCH. The advice must not fire for audio
-    // the operator's microphone did not produce: WSPR, AX.25 and RADE reach
-    // submitTxAudio() with `clientLeveled` false, exactly like the microphone,
-    // and a beacon at its -20 dBFS default sits about 18.6 dB under the target
-    // — well past any sensible margin. Every beacon unkey would advise raising
-    // a mic gain that has nothing to do with the level (K5PTB, #5646 review).
-    //
-    // The information needed to aim it does not exist here. This branch's seam
-    // is `submitTxAudio(..., bool clientLeveled)` — two states, and engine
-    // audio is not one of them. Distinguishing it means the three-state
-    // TxAudioSource, which is #5647's substance and reaches four files above
-    // the HL2 backend. Importing that here would move #5647 into #5646 rather
-    // than fix #5646, and would take this change's localization from one hit
-    // to four.
-    //
-    // So: no advice rather than misaimed advice, and #5647 reintroduces it
-    // gated on `!m_txAudioEngineGenerated`. The measurement it needs is kept —
-    // `m_txMicPeakMaxDbfs` still tracks and still reaches the health snapshot,
-    // so an operator can see the number even while nothing volunteers it.
-    //
-    // MERGE ORDER MATTERS ONE WAY ONLY. #5647 carries the advice with its
-    // gate; this removal must not be applied over it. If #5647 lands first,
-    // this hunk is the one to drop.
+    // At unkey, once per transmission, on the main thread: the DSP worker must
+    // not log per block, and a per-block test would fire on every normal
+    // transmission because the pauses between words sit far below the target.
+    if (m_keyed && !key) {
+        // HOW FAR BELOW THE TARGET COUNTS AS QUIET. Upper bound MEASURED;
+        // the value inside it CHOSEN. Both halves are stated because they have
+        // different standing.
+        //
+        // The old -45 dBFS was a property of the hold — a real threshold in the
+        // DSP that an over either cleared or did not. Nothing in the DSP
+        // replaces it, so this is a judgement about the air, informed by a
+        // measurement rather than derived from one.
+        //
+        // MEASURED (d81b-speech-pauses-alc, four legs, twelve speech bursts,
+        // two mic gains 20 dB apart, on this build — against hpsdrsim on a
+        // loopback approval, NOT on the air, and nothing radiated):
+        //
+        //   speech crest factor            18.87 dB, sd 0.80
+        //   burst-to-burst level spread    <= 0.91 dB
+        //   mic slider 50 (unity)          peak 19.56-19.67 dB BELOW
+        //                                  alcTargetPeak
+        //
+        // The unity figure is read off d81b's own result.json rather than off a
+        // summary of it: speech_output_dbfs is -21.08 dBFS on the fault leg and
+        // -20.97 dBFS on the control leg, both at mic_level 50, against
+        // 20*log10(0.85) = -1.4116 dBFS.
+        //
+        // THE UPPER BOUND IS ~19.56 dB AND IT IS HARD. Unity is where an operator
+        // who has never moved the slider sits, and on this build that is about
+        // 19.6 dB short of the target — precisely the operator this diagnostic
+        // exists to reach. A margin at or above 19.56 would stay SILENT on them.
+        // The earlier placeholder here was 20.0 dB, so it was outside its own
+        // bound and would have failed in the one case it was written for. That
+        // is why a guess with a name is still a guess.
+        //
+        // CHOSEN, 12.0 dB: it fires on unity with 7.6 dB to spare, it does not
+        // fire until a station is two S-units down — weak on the air, not merely
+        // conservatively set — and it clears the measured noise (0.91 dB of
+        // burst variation, 0.80 dB of crest scatter) by an order of magnitude.
+        //
+        // WHAT WOULD MAKE THIS MEASURED RATHER THAN BOUNDED. d81b bounds the
+        // correct setting from ONE side only. There is no bracket: d81b's
+        // slider-100 legs run a DIFFERENT stimulus (sp-53.wav) from the unity
+        // legs (sp-38.wav, sp-50.wav), and the record's own op_leg_caveat says
+        // they are not comparable leg-to-leg, so their 8.68 dB of applied ALC
+        // reduction is not the other half of a bracket around unity. One
+        // further leg at slider ~74 — where 0.8 dB per step puts the peak on
+        // the target — would measure the healthy case directly and give this
+        // constant data on both sides.
+        constexpr double kQuietMarginBelowTargetDb = 12.0;
+        const double targetDbfs =
+            20.0 * std::log10(std::max(1e-9, m_alcTargetPeak));
+        const double quietBelowDbfs = targetDbfs - kQuietMarginBelowTargetDb;
+        // Not for client-leveled transmissions. The reason is no longer that the
+        // ALC is bypassed there — the mic and client paths are identical now
+        // that the ceiling is unity on both. It is that the ADVICE is wrong: a
+        // TCI/DAX client's transmit level is set in the client (WSJT-X's Pwr
+        // slider and the rest), and "raise mic gain" would send an operator to a
+        // control that is not the one holding their level down.
+        if (!m_txAudioClientLeveled && !m_txAudioEngineGenerated
+            && m_txMicPeakMaxDbfs > -139.0f
+            && m_txMicPeakMaxDbfs < static_cast<float>(quietBelowDbfs)) {
+            // WHETHER "RAISE MIC GAIN" IS EVEN THE RIGHT ADVICE depends on
+            // whether the slider can still close the gap. Speech near -32 dBFS
+            // against a target near -1.4 dBFS is a ~30 dB shortfall, and the
+            // slider spans +40 dB from 50, so at the top of its travel there
+            // may be nothing left to raise — that state is reachable for the
+            // first time under a unity ceiling, and telling such an operator to
+            // raise a control that is already at maximum is worse than saying
+            // nothing. Derived from the mapping rather than from a threshold:
+            // remaining travel versus the shortfall, so it stays true if either
+            // moves.
+            const double shortfallDb = targetDbfs - m_txMicPeakMaxDbfs;
+            const double travelLeftDb =
+                micSliderToGainDb(100) - micSliderToGainDb(m_micLevel);
+            if (travelLeftDb >= shortfallDb) {
+                qCInfo(lcHl2) << "HL2 TX: microphone peaked at" << m_txMicPeakMaxDbfs
+                              << "dBFS for the whole transmission, about"
+                              << shortfallDb
+                              << "dB under the ALC target of" << targetDbfs
+                              << "dBFS — the ALC only reduces, so that audio went"
+                                 " out quiet. Raise mic gain (currently"
+                              << m_micLevel << "of 100).";
+            } else {
+                qCInfo(lcHl2) << "HL2 TX: microphone peaked at" << m_txMicPeakMaxDbfs
+                              << "dBFS for the whole transmission, about"
+                              << shortfallDb
+                              << "dB under the ALC target of" << targetDbfs
+                              << "dBFS, and mic gain is at" << m_micLevel
+                              << "of 100 with only" << travelLeftDb
+                              << "dB of travel left — the slider cannot close"
+                                 " this. Raise the microphone's own level"
+                                 " (AetherVoice input gain, or the mic's own"
+                                 " control) instead.";
+            }
+        }
+    }
     if (key) {
         m_txMicPeakMaxDbfs = -140.0f;
         // A new transmission decides afresh whether it is client-leveled; the
         // first submitTxAudio() block of the over re-marks it.
         m_txAudioClientLeveled = false;
+        m_txAudioEngineGenerated = false;
         // Start each transmission's peak hold from nothing, rather than trusting
         // the unkeyed branch in publishTelemetry() to have already walked it
         // down. Telemetry is 10 Hz, so a key inside 100 ms of the previous unkey
@@ -3830,7 +3905,7 @@ void Hl2Backend::applyFreqCalPpb(int ppb, bool persist)
 }
 
 void Hl2Backend::submitTxAudio(const QByteArray& int16Stereo, int sampleRateHz,
-                               bool clientLeveled)
+                               TxAudioSource source)
 {
     // Only modulate while actually keyed. Feeding the modulator unkeyed would
     // fill the transmit queue with audio that goes out the instant MOX asserts —
@@ -3850,7 +3925,13 @@ void Hl2Backend::submitTxAudio(const QByteArray& int16Stereo, int sampleRateHz,
     // process m_inBuffer residue under the newest block's flag — no crash,
     // just a level that depends on block alignment. Whoever touches the
     // mic-capture gate owns re-checking this.
-    m_txAudioClientLeveled = m_txAudioClientLeveled || clientLeveled;
+    m_txAudioClientLeveled =
+        m_txAudioClientLeveled || (source == TxAudioSource::ClientLeveled);
+    // The unkey diagnostic must not tell a WSPR beacon to raise its mic gain.
+    // Engine-generated audio has no mic slider in its path at all now, so
+    // "raise mic gain" would point at a control that cannot move it.
+    m_txAudioEngineGenerated =
+        m_txAudioEngineGenerated || (source == TxAudioSource::EngineGenerated);
     if (sampleRateHz != 24000) {
         // Stated rather than silently resampled: the modulator's upsampler
         // assumes this rate, and a mismatch transmits at the wrong pitch.
@@ -3874,8 +3955,8 @@ void Hl2Backend::submitTxAudio(const QByteArray& int16Stereo, int sampleRateHz,
         mono[static_cast<std::size_t>(n)] = 0.5f * (l + r);
     }
     QMetaObject::invokeMethod(m_txDsp,
-                              [this, mono = std::move(mono), clientLeveled] {
-        m_txDsp->processAudioBlock(mono, clientLeveled);
+                              [this, mono = std::move(mono), source] {
+        m_txDsp->processAudioBlock(mono, source);
     }, Qt::QueuedConnection);
 }
 
