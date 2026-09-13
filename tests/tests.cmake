@@ -1243,6 +1243,17 @@ target_link_libraries(nr2_settings_model_test PRIVATE Qt6::Core Qt6::Test)
 set_target_properties(nr2_settings_model_test PROPERTIES AUTOMOC ON)
 add_test(NAME nr2_settings_model_test COMMAND nr2_settings_model_test)
 
+# #3821: a focused replacement for the retired spectral_nr_test coverage.
+# The pure DSP rows prove a warm reset retains the converged noise estimate,
+# flushes stale overlap-add audio, and bounds a post-TX AGC level step. The
+# AudioEngine row drives the production raw-interlock edge and verifies through
+# bridge-visible diagnostics that it performs only the warm reset. Socket-free:
+# no audio device, radio transport, listener, peer process, or transmission.
+add_executable(nr2_tx_rx_reset_test tests/nr2_tx_rx_reset_test.cpp)
+target_include_directories(nr2_tx_rx_reset_test PRIVATE src tests)
+target_link_libraries(nr2_tx_rx_reset_test PRIVATE aethercore Qt6::Core)
+add_test(NAME nr2_tx_rx_reset_test COMMAND nr2_tx_rx_reset_test)
+
 add_executable(rn2_settings_model_test
     tests/rn2_settings_model_test.cpp
     src/models/Rn2SettingsModel.cpp
@@ -3507,6 +3518,20 @@ endif()
 set_target_properties(meter_model_test PROPERTIES AUTOMOC ON)
 add_test(NAME meter_model_test COMMAND meter_model_test)
 
+# The meter join: kMeterSurfaces against kMeterTable, and the HL2 wiring that
+# has to exist for a surface row to be true. Header-only on the consumer side
+# and text on the producer side, so it links neither RadioCertification nor the
+# backend — see the file's own header for why that is the only way the two
+# tables can be compared at all.
+add_executable(meter_surfaces_test
+    tests/meter_surfaces_test.cpp
+)
+target_include_directories(meter_surfaces_test PRIVATE src)
+target_compile_definitions(meter_surfaces_test PRIVATE
+    AETHER_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(meter_surfaces_test PRIVATE Qt6::Core)
+add_test(NAME meter_surfaces_test COMMAND meter_surfaces_test)
+
 add_executable(health_applet_test
     tests/health_applet_test.cpp
     src/gui/HealthApplet.cpp
@@ -4733,6 +4758,58 @@ add_executable(hl2_band_memory_test
 )
 target_include_directories(hl2_band_memory_test PRIVATE src)
 add_test(NAME hl2_band_memory_test COMMAND hl2_band_memory_test)
+# HL2 stream-free telemetry poll cadence -- pure header policy, no Qt, no socket.
+# The rule is the only part of the poller with a judgement in it; see
+# docs/architecture/hl2-stream-free-telemetry.md section 3 for the derivation.
+add_executable(hl2_telemetry_cadence_test
+    tests/hl2_telemetry_cadence_test.cpp
+)
+target_include_directories(hl2_telemetry_cadence_test PRIVATE src)
+add_test(NAME hl2_telemetry_cadence_test COMMAND hl2_telemetry_cadence_test)
+
+# The tick/mirror ALIASING the cadence rule cannot catch on its own: a counter
+# mirrored at 1 Hz, sampled by a 1 Hz tick, reports a healthy stream as stalled.
+# Pure, no Qt -- it replays a publish/tick trace, and keeps the OLD predicate as
+# a negative control so the trace is proved to discriminate rather than assumed
+# to.
+add_executable(hl2_link_state_alias_test
+    tests/hl2_link_state_alias_test.cpp
+)
+target_include_directories(hl2_link_state_alias_test PRIVATE src)
+add_test(NAME hl2_link_state_alias_test COMMAND hl2_link_state_alias_test)
+
+# telemetrySource policy + the health-snapshot merge, as pure functions both
+# call sites use. Truth table rather than a scenario: the row exists to tell two
+# states apart, so a test seeing only one answer proves nothing.
+add_executable(hl2_telemetry_source_test tests/hl2_telemetry_source_test.cpp)
+target_include_directories(hl2_telemetry_source_test PRIVATE src)
+target_link_libraries(hl2_telemetry_source_test PRIVATE Qt6::Core)
+add_test(NAME hl2_telemetry_source_test COMMAND hl2_telemetry_source_test)
+
+# The WIRE between the cadence rule and the backend that must ask it. Links
+# aethercore because it constructs a real Hl2Backend -- the point is that the
+# BACKEND drives the service, which no service-level test can check.
+add_executable(hl2_telemetry_wire_test tests/hl2_telemetry_wire_test.cpp)
+target_include_directories(hl2_telemetry_wire_test PRIVATE src tests)
+target_link_libraries(hl2_telemetry_wire_test PRIVATE aethercore Qt6::Core Qt6::Network Qt6::Test)
+add_test(NAME hl2_telemetry_wire_test COMMAND hl2_telemetry_wire_test)
+
+# HL2 stream-free telemetry SERVICE -- must answer with no backend and no
+# connection, which is the state the whole feature exists for. Needs Qt (timer)
+# but no aethercore and no radio.
+#
+# SOCKET-FREE, and by construction rather than by care: it never gives the
+# service a target, and with no target and the broadcast fallback off the
+# poller sends nothing. Nothing is bound, nothing is sent, and no peer exists.
+add_executable(hl2_telemetry_service_test
+    tests/hl2_telemetry_service_test.cpp
+    src/core/backends/hl2/Hl2TelemetryService.cpp
+    src/core/backends/hl2/Hl2TelemetryPoller.cpp
+    src/core/backends/hl2/MetisProtocol.cpp
+)
+target_include_directories(hl2_telemetry_service_test PRIVATE src)
+target_link_libraries(hl2_telemetry_service_test PRIVATE Qt6::Core Qt6::Network)
+add_test(NAME hl2_telemetry_service_test COMMAND hl2_telemetry_service_test)
 add_executable(slice_link_policy_test
     tests/slice_link_policy_test.cpp
 )
@@ -5158,6 +5235,7 @@ set(AETHER_SETTINGS_CONSUMERS
     panadapter_message_overlay_test
     app_settings_safety_test
     nr2_settings_model_test
+    nr2_tx_rx_reset_test
     rn2_settings_model_test
     panadapter_model_rx_antenna_test
     qso_recorder_slice_lifetime_test

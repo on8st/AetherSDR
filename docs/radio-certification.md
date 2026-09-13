@@ -40,6 +40,7 @@ Hermes-Lite 2 can physically produce it.
 | `TX:FWDPWR` | dBm | yes | rises with drive | raise the drive **one nibble** → rises | see the note below on halving |
 | `TX:REFPWR` | dBm | yes | ≪ forward into a load | key into a dummy load | ≥15 dB below forward |
 | `TX:ALC` | dBFS | **host-side** | post-ALC transmit peak | sweep the input 20 dB → reading does **not** move | **±1 dB across the sweep** |
+| `TX:ALCGAIN` | dB | **host-side** | gain the ALC is applying | sweep the MIC input 20 dB, between `alcHoldBelowDbfs` and the makeup ceiling → reading moves 20 dB the other way | **±1 dB inside that window only** — the gain is frozen below the hold threshold (`Hl2TxDsp.cpp`, `processAudioBlock`) and capped at unity for `clientLeveled` audio, so a TCI/DAX sweep moves it 0 dB by construction and a whole-range criterion would report a healthy meter as out of tolerance |
 | `TX:COMPPEAK` | dB | host-side | compression applied | PROC on → rises above 0 | reads 0 with PROC off |
 | `TX:MIC` | dBFS | host-side | pre-gain mic level | — | not yet wired |
 | `TX:HWALC` | dBFS | **no** | — | Flex RCA jack; no HL2 equivalent | — |
@@ -246,7 +247,7 @@ from Tune Power, not RF Power.
 | Signal | HL2 source | Why it matters |
 |---|---|---|
 | ADC overload | `0x00[24]` | clipping the converter; invisible in any audio meter |
-| ADC clip count | discovery `0x1B[1:0]` | saturating counter — "did we clip at all recently" |
+| ADC clip count | discovery `0x1B[1:0]` | **not "recently" at idle.** Its only clear is the EP6 response, so with no stream running it saturates and stays there — an idle poll returns a latch, not a level. While streaming, it is a 2-bit count cleared at each EP6 response (~1.3 ms at 48 kHz, one receiver). The row above is its saturated predicate, not the same value: response address 0 bit 24 is `(&clip_cnt)`, true only at count 3. `docs/HERMES.md` §11.4 derives both |
 | TX IQ FIFO status | RADDR `0x00`, `DATA[15:8]` | recovery flag + coarse fill (top 7 bits), **not a depth** — see `MetisProtocol.cpp`. Not servo-ready |
 | TX inhibit | `0x00[25]`, **active low** | the radio refusing to key, distinct from us not asking |
 

@@ -1134,11 +1134,71 @@ receiver, and **backend teardown**, which waits out an in-flight DSP build.
 | Missing | Why it matters |
 |---|---|
 | RQST/ACK state machine (§5) | Gate for everything below it. Single outstanding request, no transaction id, echo-matched. Do NOT model as RPC |
-| ADC overload bit + clip counter (§6) | Addendum 2 §A3: the CORRECT driver for any gain decision. Audio level in one slice says nothing about what saturates a converter seeing 0–38.4 MHz |
-| Discovery telemetry (§1) | Temperature, power, clip count, PTT are pollable WITHOUT a stream — cheapest possible first increment, and a diagnostic when the stream itself is broken |
+| Clip counter + a gain servo (§6) — **the overload bit is already read** | Addendum 2 §A3: the CORRECT driver for any gain decision. Audio level in one slice says nothing about what saturates a converter seeing 0–38.4 MHz. The bit itself is decoded and surfaced today — `Hl2Telemetry::apply`, response address 0 bit 24, on the free-running response cycle, reaching the rate-limited warning in §15.7 and Radio Health — so what is absent here is the **servo** on top of it, plus the 2-bit counter. Both require a running stream for fresh readings; at idle the counter is an uncleared latch (correction below the table) |
+| Discovery telemetry (§1) | Temperature, power and PTT are pollable WITHOUT a stream — cheapest possible first increment, and a diagnostic when the stream itself is broken. **The clip count is not**, and the correction below says why |
 | ~~Receiver count at discovery `0x13`~~ | **DONE — §19.** Read and clamped against; skimmer variants 9–12 with NO transmit are still untested |
 | TX FIFO status (§6) | The oracle calls a FIFO depth "the most important number in the protocol", but **this radio does not send one**: `dsiq_status` is a recovery flag plus the top 7 bits of the fill level (`fifos.v:100-110` at `883a338`). Useful as coarse occupancy and a pacing-fault flag; **not servo-ready** until one unit of that field is measured in samples |
 | Wideband bandscope (§7) | Unimplemented by piHPSDR (dead code) and declined by SDR Console. A differentiation opportunity, with the 4-vs-32 packets-per-block trap already documented |
+
+**Correction — the clip count is not one of the idle-pollable fields.** The
+discovery-telemetry row above used to list it among them, on the reading that
+everything in the discovery reply refreshes without a stream. Re-derived from
+the Hermes-Lite 2 gateware at `883a338` — the build this station's radio reports
+in its discovery string, `20231230_74p2_883a338` — three things follow, none of
+which needs a radio to check:
+
+- **The counter's only clear is the EP6 response, and that needs a stream.** In
+  `control.v`, `clip_cnt` moves in exactly two places inside one clocked block:
+  it is cleared **only** under `if (resp_rqst)`, and its increment carries **no
+  `run` gate at all**. In `usopenhpsdr1.v`, `resp_rqst` is toggled only in
+  `SYNC_RESP`, which is entered only from the EP6 IQ-datagram path — whose
+  `START` guard includes `& run` — and from the `RXDATA` states inside that same
+  datagram. The discovery and bandscope paths never reach it. So with nothing
+  streaming the counter free-runs to its rail and nothing clears it: **a
+  discovery poll returns a latch, not a measurement.** That is the mechanism
+  behind the field reading 3 in 100 % of samples with this radio idle, reported
+  in aethersdr/AetherSDR#5354. Confirmed on the hardware since, not only
+  derived: with no stream running, dropping the LNA by 31 dB left the counter at
+  3 across 2400 of 2400 polls over 120 s — and that non-response is
+  attributable rather than a dead instrument, because the same write path had
+  moved the same counter 0 → 3 ninety seconds earlier.
+
+- **Temperature, power and PTT are idle-pollable by a different mechanism, one
+  the clip count is excluded from.** `control.v` selects the slow-ADC trigger as
+  `run ? (resp_rqst & resp_cnt) : (~led_count[5] & led_count_next[5])`, so with
+  no stream the conversions are driven off the LED counter instead — which is
+  why temperature, forward/reverse power and PA bias do refresh at idle.
+  `slow_adc_sample` does not feed `clip_cnt`, and `clip_cnt` has no equivalent
+  idle path. PTT (`ptt_resp`) is combinational and needs no conversion at all.
+
+- **The counter and overload flag are related, but not equivalent.** The EP6
+  overload bit in `control.v`'s response address 0 is `(&clip_cnt)` — the
+  reduction AND of the 2-bit counter, true only when the count has saturated at
+  3. `clip_cnt` increments once per control-clock tick while the synchronised
+  `rxclip` reads high. `ad9866.v` latches any rail sample until the next
+  `rxclrstatus` window, about 400 ns, so one or two isolated clipping windows
+  leave the counter at 1 or 2 until the next EP6 response while the overload bit
+  remains clear. Continuous clipping saturates the counter within roughly
+  1.2 µs; the clear interval is one EP6 response — about 1.3 ms at 48 kHz with
+  one receiver. The counter therefore preserves more states than the bit while
+  streaming. This correction does not establish which is the better input for
+  a gain controller.
+
+**What this changes for §13 row 14.** The feature is still wanted and still the
+right driver for a gain decision. What is wrong is its stated input, and half of
+its stated cost: it is not a discovery poll and it is not free of the stream.
+It does **not** need row 13 — the overload bit rides the free-running response
+cycle, `parseEp6Response` takes it on the non-ACK branch and
+`Hl2Telemetry::apply` decodes it under response address 0, with no RQST ever
+issued. That half is shipped; what row 14 is still missing is the **gain
+servo**. What it does need is a running EP6 stream for either input to be fresh.
+The bit reports whether the counter saturated; the discovery field exposes the
+counter's 0–3 state. This correction does not choose between them. A gain servo
+that polled the counter *between* streams would read a latched rail and walk the
+gain to its floor on a radio with nothing connected.
+
+**Not verified here:** whether the Hermes-Lite 2 project's own documentation
+makes the same claim. That is a separate question and was not looked at.
 
 ### 11.5 Smaller corrections
 
@@ -1354,8 +1414,8 @@ Audited against this branch's merge base, `6f46eea7`.
 | # | Item | Source | Why it matters | Effort |
 |---|---|---|---|---|
 | ~~13~~ | ~~RQST/ACK state machine~~ **DONE** | O §5 | `Hl2ControlRequest` + `MetisClient::requestRegister`. One outstanding, echo-matched; the deadline is counted in EP6 frames **and** floored on a wall clock, because a frame is 42 ms at 48 kHz with one receiver and 2.08 ms at 384 kHz with three. A blown deadline **quarantines** rather than freeing the slot, which makes a late echo landing on a fresh request improbable — not impossible; an identical re-issue is indistinguishable and §4 says so. Requestable addresses are an **allow-list** (0x0a, 0x0e) and not a deny-list, so items 14-23 add one deliberately rather than inherit it; 0x3b came off it once the RTL showed it is a converter **write** reaching the TX gain register, not a read path. The wire facts it was built from are in §4, and **no radio has yet answered the code** | — |
-| 14 | ADC overload bit + clip counter | O §6, A2 §A3 | The *correct* driver for gain decisions — audio level in one slice says nothing about what saturates a converter seeing 0–38.4 MHz | S |
-| 15 | Discovery-reply telemetry (temp, power, PTT, clip) | O §1 | Pollable **without a stream** — cheapest first increment, and a diagnostic when the stream is broken | S |
+| 14 | ADC overload bit + clip counter | O §6, A2 §A3 | The *correct* driver for gain decisions — audio level in one slice says nothing about what saturates a converter seeing 0–38.4 MHz. **The overload bit is already decoded** (`Hl2Telemetry::apply`, response address 0 bit 24, free-running cycle — no RQST/ACK) and surfaced as the rate-limited warning in §15.7; what is missing is the gain servo on top of it. **It does need a running EP6 stream** (§11.4): the clip counter's only clear is the EP6 response, so an idle discovery poll returns a latch. While streaming, the bit reports saturation at count 3 and the discovery field exposes the counter's 0–3 state; this correction does not choose the servo input | S |
+| 15 | Discovery-reply telemetry (temp, power, PTT) | O §1 | Pollable **without a stream** — cheapest first increment, and a diagnostic when the stream is broken. **The clip field is excluded**: at idle it is a latched rail, not a level (§11.4) | S |
 | 16 | Pair WDSP `RXA_ADC_PK` with the hardware clip indicator | A3 §7 | Post-DDC slice vs pre-DDC full spectrum. They disagree by design; A3 calls this the most useful diagnostic pairing on the HL2 | S |
 | 17 | TX IQ FIFO servo | O §6, A1 §B3 | The oracle wants pacing servoed against a FIFO depth rather than a host timer. **The wire carries no depth** — `dsiq_status` is a recovery flag plus the top 7 bits of the fill level. So this item first has to establish what one unit of that field is worth in samples; until then there is nothing to servo against | M |
 | 18 | Wideband bandscope (endpoint `0x04`) | O §7, A1 §A1 | Unimplemented by piHPSDR (dead code) and declined by SDR Console — a differentiation opportunity. **4 packets/block on HL2, not 32** | M |
