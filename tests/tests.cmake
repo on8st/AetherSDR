@@ -79,6 +79,26 @@ target_link_libraries(pcm_compatibility_test PRIVATE aethercore Qt6::Core)
 add_test(NAME pcm_compatibility_test COMMAND pcm_compatibility_test)
 set_tests_properties(pcm_compatibility_test PROPERTIES TIMEOUT 60)
 
+# Socket/device-free production RX queue, processing-domain and output checks.
+add_executable(audio_engine_rates_test tests/audio_engine_rates_test.cpp)
+target_link_libraries(audio_engine_rates_test PRIVATE aethercore Qt6::Core)
+add_test(NAME audio_engine_rates_test COMMAND audio_engine_rates_test)
+set_tests_properties(audio_engine_rates_test PROPERTIES TIMEOUT 120)
+
+# Production auxiliary ingress/retirement versus DSP initialization; no sockets/devices.
+add_executable(audio_engine_pcm_lifetime_test tests/audio_engine_pcm_lifetime_test.cpp)
+target_link_libraries(audio_engine_pcm_lifetime_test PRIVATE aethercore Qt6::Core)
+add_test(NAME audio_engine_pcm_lifetime_test COMMAND audio_engine_pcm_lifetime_test)
+set_tests_properties(audio_engine_pcm_lifetime_test PROPERTIES TIMEOUT 120)
+
+add_executable(rx_client_effects_test tests/rx_client_effects_test.cpp
+    src/core/RxClientEffects.cpp src/core/ClientEq.cpp src/core/ClientGate.cpp
+    src/core/ClientComp.cpp src/core/ClientDeEss.cpp src/core/ClientTube.cpp
+    src/core/ClientPudu.cpp src/core/ClientPhaseRotator.cpp)
+target_include_directories(rx_client_effects_test PRIVATE src)
+add_test(NAME rx_client_effects_test COMMAND rx_client_effects_test)
+set_tests_properties(rx_client_effects_test PROPERTIES TIMEOUT 30)
+
 # Pure shared-capture geometry policy: no sockets, settings, DSP or hardware.
 add_executable(shared_capture_policy_test
     tests/shared_capture_policy_test.cpp
@@ -1222,6 +1242,17 @@ target_include_directories(nr2_settings_model_test PRIVATE src tests)
 target_link_libraries(nr2_settings_model_test PRIVATE Qt6::Core Qt6::Test)
 set_target_properties(nr2_settings_model_test PROPERTIES AUTOMOC ON)
 add_test(NAME nr2_settings_model_test COMMAND nr2_settings_model_test)
+
+# #3821: a focused replacement for the retired spectral_nr_test coverage.
+# The pure DSP rows prove a warm reset retains the converged noise estimate,
+# flushes stale overlap-add audio, and bounds a post-TX AGC level step. The
+# AudioEngine row drives the production raw-interlock edge and verifies through
+# bridge-visible diagnostics that it performs only the warm reset. Socket-free:
+# no audio device, radio transport, listener, peer process, or transmission.
+add_executable(nr2_tx_rx_reset_test tests/nr2_tx_rx_reset_test.cpp)
+target_include_directories(nr2_tx_rx_reset_test PRIVATE src tests)
+target_link_libraries(nr2_tx_rx_reset_test PRIVATE aethercore Qt6::Core)
+add_test(NAME nr2_tx_rx_reset_test COMMAND nr2_tx_rx_reset_test)
 
 add_executable(rn2_settings_model_test
     tests/rn2_settings_model_test.cpp
@@ -5104,6 +5135,8 @@ target_link_libraries(CAT_Flex_test PRIVATE Qt6::Core Qt6::Network)
 # directly (rather than linking aethercore) needs the vendored SQLite engine.
 # Conditional targets are guarded with if(TARGET ...).
 set(AETHER_SETTINGS_CONSUMERS
+    audio_engine_rates_test
+    audio_engine_pcm_lifetime_test
     pcm_compatibility_test
     firmware_close_dialog_test
     atu_seam_gate_test
@@ -5134,6 +5167,7 @@ set(AETHER_SETTINGS_CONSUMERS
     panadapter_message_overlay_test
     app_settings_safety_test
     nr2_settings_model_test
+    nr2_tx_rx_reset_test
     rn2_settings_model_test
     panadapter_model_rx_antenna_test
     qso_recorder_slice_lifetime_test
