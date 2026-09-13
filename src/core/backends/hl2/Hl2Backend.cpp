@@ -5199,7 +5199,8 @@ void Hl2Backend::pushInitialState()
     }
 
     // THIS RADIO'S REMEMBERED MIC LEVEL — the operator's slider position from
-    // the last session on this same HL2, staged by applyRestoredState().
+    // the last session on this same HL2, staged by applyRestoredState() for one
+    // connect-time application.
     //
     // HERE rather than in applyRestoredState() because m_txDsp is only built by
     // connectRadio(), and here rather than above the seam because this is the
@@ -5222,11 +5223,16 @@ void Hl2Backend::pushInitialState()
     // the band-memory drive push uses above — so this needs no new wiring and
     // creates no second source of truth.
     if (m_restoredMicLevel >= 0) {
-        setMicGain(m_restoredMicLevel);
+        // Consume before publishing anything. MetisClient may emit linkUp again
+        // after transient EP6 silence without a new connectRadio(); replaying
+        // this disk value then would overwrite the operator's newer live move.
+        const int restoredMicLevel = m_restoredMicLevel;
+        m_restoredMicLevel = -1;
+        setMicGain(restoredMicLevel);
         TransmitDelta delta;
-        delta.micLevel = m_restoredMicLevel;
+        delta.micLevel = restoredMicLevel;
         emit transmitChanged(delta);
-        qCInfo(lcHl2) << "HL2: restored mic level" << m_restoredMicLevel;
+        qCInfo(lcHl2) << "HL2: restored mic level" << restoredMicLevel;
     }
     // How far this pan may be zoomed, which on this radio is simply the range of
     // DDC rates it can run. Pushed here for the same reason everything else in

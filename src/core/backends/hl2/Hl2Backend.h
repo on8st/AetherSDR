@@ -931,7 +931,8 @@ private:
     int m_micLevel = 50;
 
     // The mic level applyRestoredState() accepted from THIS radio's document,
-    // held until pushInitialState() can apply it. -1 = nothing stored.
+    // held until pushInitialState() can apply it once. -1 = nothing stored or
+    // the connect-time seed has already been consumed.
     //
     // STAGED RATHER THAN APPLIED ON THE SPOT, for the same reason the frequency
     // and passband beside it are staged: applyRestoredState() runs before
