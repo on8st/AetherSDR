@@ -280,8 +280,9 @@ void MeterModel::removeMeter(int index)
     }
     m_alcGainIdxByTxSource.removeIf(matchesIndex);
     m_alcGainIdxBySlice.removeIf(matchesIndex);
-    if (index == activeAlcGainIdx && clearAlcGainState())
+    if (index == activeAlcGainIdx && clearAlcGainState()) {
         emit alcGainChanged(m_alcGainDb);
+    }
     // A level must never outlive the meter it describes.
     // Resolve the ACTIVE indices BEFORE erasing: once the entry is gone the
     // resolver returns -1 and the has-a-sample flag would never be cleared.
@@ -481,15 +482,17 @@ void MeterModel::setActiveTxSlice(int sliceIndex)
     logCompressionSummary("active-slice-change", true);
     emit micMetersChanged(m_micLevel, m_compLevel, m_micPeak, m_compPeak);
     emit swAlcChanged(m_swAlc);
-    if (alcGainCleared)
+    if (alcGainCleared) {
         emit alcGainChanged(m_alcGainDb);
+    }
     emit alcValueChanged(alcValue(), alcUnit());
 }
 
 bool MeterModel::clearAlcGainState()
 {
-    if (m_alcGainDb == 0.0f && !m_hasAlcGainValue)
+    if (m_alcGainDb == 0.0f && !m_hasAlcGainValue) {
         return false;
+    }
     m_alcGainDb = 0.0f;
     m_hasAlcGainValue = false;
     return true;
@@ -1023,8 +1026,9 @@ void MeterModel::applyValues(const QVector<quint16>& ids, const QVector<Value>& 
         emit this->swAlcChanged(m_swAlc);
         emit alcValueChanged(alcValue(), alcUnit());
     }
-    if (alcGainChangedFlag)
+    if (alcGainChangedFlag) {
         emit this->alcGainChanged(m_alcGainDb);
+    }
     if (txFilterLevelsChangedFlag)
         emit txFilterLevelsChanged(m_scFilt1, m_scFilt2);
     if (hwChanged)

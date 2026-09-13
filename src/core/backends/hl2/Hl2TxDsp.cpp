@@ -294,8 +294,8 @@ void Hl2TxDsp::processAudioBlock(const std::vector<float>& mono, bool clientLeve
         // A post-ALC meter sits pinned near the target by definition and tells
         // the operator nothing — it reports the ALC's success, not their input
         // level. What a mic-gain control acts on is this, and how hard the ALC
-        // is working is reported separately as alcGain(), which reaches the
-        // operator as TX:ALCGAIN.
+        // is working is reported separately as alcGain(), which is published
+        // to the model and diagnostic surfaces as TX:ALCGAIN.
         const float preAlc = static_cast<float>(m_inBuffer[s] * m_micGain);
         peak = std::max(peak, std::fabs(preAlc));
 

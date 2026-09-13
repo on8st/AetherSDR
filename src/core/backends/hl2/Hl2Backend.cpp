@@ -548,16 +548,16 @@ Hl2Backend::Hl2Backend(QObject* parent) : IRadioBackend(parent)
     // reason given there, and the two move in opposite directions.
     //
     // This is the number that answers "is the ALC holding, and by how much".
-    // It was mirrored into m_alcGainDb for healthSnapshot() and the bridge and
-    // rendered NOWHERE, so a chain quietly refusing to lift a quiet mic could
-    // be diagnosed from a JSON snapshot or from the source and not from the
-    // panel in front of the operator — while the gauge labelled ALC sat pinned
-    // near the target by construction. TX:ALCGAIN is that gauge's feed.
+    // It was mirrored into m_alcGainDb for healthSnapshot() and the bridge but
+    // did not enter MeterModel, so neither radiocert nor a future UI consumer
+    // could use it. TX:ALCGAIN publishes that producer-side feed; the proposed
+    // operator-facing gauge is deliberately a separate change (#5636).
     //
-    // Both consumers stay: the mirror is a plain read on this thread for the
-    // snapshot, and the meter is the operator-visible surface. Publishing one
-    // does not make the other redundant, and dropping the mirror would put
-    // healthSnapshot() back to re-deriving a value it is already handed.
+    // Both paths stay: the mirror is a plain read on this thread for the
+    // snapshot, and the meter is the normalized model/certification feed.
+    // Publishing one does not make the other redundant, and dropping the
+    // mirror would put healthSnapshot() back to re-deriving a value it is
+    // already handed.
     connect(m_txDsp, &Hl2TxDsp::alcGain, this, [this](float db) {
         m_alcGainDb = db;
         emit meterUpdate(QStringLiteral("TX:ALCGAIN"), db);

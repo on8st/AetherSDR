@@ -119,7 +119,7 @@ constexpr MeterSpec kMeterTable[] = {
     // divergence, but after the merge rather than before it.
     {"TX",  "ALCGAIN",  true,  true,  false, "gain the host ALC is applying, in dB; "
                                              "MeterModel::alcGainDb() consumes it and "
-                                             "the Phone/CW ALC Gain gauge renders it"},
+                                             "no GUI surface renders it yet (#5636)"},
     {"TX",  "COMPPEAK", true,  true,  false, "host speech processor, polled onto the "
                                              "meter at 20 Hz; reads 0 with PROC off, "
                                              "which is a value and not a silence"},
