@@ -3528,6 +3528,11 @@ void Hl2Backend::setKeying(bool key)
     // measurement turns it on. Applied to every receiver for the same reason the
     // mute is: whichever one the capture is taken from must not be silenced.
     const bool muteWhileKeyed = key && !m_txMonitor;
+    // Record the moment sampling is asked to RESUME, at the same site that asks
+    // for it. The unmute below is queued, so at key-up `!muteWhileKeyed` is true
+    // a block before Hl2RxDsp has unmuted; SliceSamplingGate turns that request
+    // into an answer taken from the stamp on the reading.
+    m_sliceSampling.setRequested(!muteWhileKeyed, hl2::steadyNowNs());
     for (Receiver& r : m_rx) {
         if (r.dsp)
             QMetaObject::invokeMethod(r.dsp, "setAudioMuted", Qt::QueuedConnection,
@@ -3885,6 +3890,10 @@ void Hl2Backend::setTxAudioMonitor(bool on)
     // output, so whichever receiver contributes to it must not be silenced. The
     // mixer's own keyed-drop honours m_txMonitor as well — see mixReceiverAudio(),
     // which is the site that actually gates audioFrameReady().
+    // Enabling the monitor mid-transmission is the second way sampling resumes,
+    // and the one where the held peak is most likely still fresh by age — the
+    // key-down that froze it may be only milliseconds old. Same gate, same site.
+    m_sliceSampling.setRequested(!(m_keyed && !on), hl2::steadyNowNs());
     for (Receiver& r : m_rx) {
         if (r.dsp)
             QMetaObject::invokeMethod(r.dsp, "setAudioMuted", Qt::QueuedConnection,
@@ -4549,10 +4558,19 @@ IRadioBackend::HealthSnapshot Hl2Backend::healthSnapshot() const
         // the age gate shuts — 129-150 ms of inverted verdict on every
         // key-down, and this dialog refreshes every 500 ms. But THIS function's
         // own object queued that mute (setKeying, `muteWhileKeyed`), so it
-        // knows synchronously that Hl2RxDsp has stopped sampling. The condition
-        // below mirrors `muteWhileKeyed` exactly rather than merely reading
-        // `m_keyed`: with the TX audio monitor on the chain is not muted, the
-        // slice reading keeps moving, and the pairing must keep pairing.
+        // knows synchronously that Hl2RxDsp is about to stop sampling.
+        //
+        // KNOWING IT STOPPED IS NOT KNOWING IT RESTARTED, which is why this
+        // reads the gate rather than mirroring `muteWhileKeyed` here. The flags
+        // are cleared synchronously and the unmute is queued, so a mirror turns
+        // true a block early; on a short key-down the held peak is still inside
+        // kSliceStaleMs and the verdict would be asserted from a value nothing
+        // is sampling. SliceSamplingGate answers from the stamp on the reading:
+        // Hl2RxDsp writes that stamp only while unmuted, so a peak newer than
+        // the resume request is proof the chain is sampling again. The TX audio
+        // monitor is still honoured — it is what makes the request true — the
+        // chain keeps sampling through the transmission, and the pairing keeps
+        // pairing.
         //
         // The age gate STAYS. It is the general one — a stalled IQ stream, a
         // starved DSP thread, a chain between rebuilds — and none of those
@@ -4565,7 +4583,8 @@ IRadioBackend::HealthSnapshot Hl2Backend::healthSnapshot() const
             hl2::adcPairing(realPeak,
                             realPeak ? *peak : std::numeric_limits<double>::quiet_NaN(),
                             ago && *ago <= hl2::kSliceStaleMs,
-                            !(m_keyed && !m_txMonitor),
+                            m_sliceSampling.applied(
+                                r->dsp ? r->dsp->adcPeakObservedAtNs() : 0),
                             t.adcOverload.has_value(),
                             t.adcOverload.value_or(false));
         const QString headroom =
@@ -5534,6 +5553,10 @@ void Hl2Backend::pushInitialState()
         QMetaObject::invokeMethod(r.dsp, "setAgc", Qt::QueuedConnection,
             Q_ARG(int, wdspAgcMode(r.agcMode)),
             Q_ARG(double, m_dbRef.agcCeilingDb(r.agcThresholdDb)));
+        // Unmute, and stamp the gate for the same reason the two setters do:
+        // this is a third site that asks a muted chain to start sampling again.
+        // Harmless when nothing was muted — only the false->true edge moves it.
+        m_sliceSampling.setRequested(true, hl2::steadyNowNs());
         QMetaObject::invokeMethod(r.dsp, "setAudioMuted", Qt::QueuedConnection,
             Q_ARG(bool, false));
         // The notch axis, which is measured from the NCO and defaults to ZERO.

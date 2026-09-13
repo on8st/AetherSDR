@@ -14,6 +14,7 @@
 #include <optional>
 #include <vector>
 
+#include "core/backends/hl2/Hl2AdcPairing.h"
 #include "core/backends/hl2/Hl2Spectrum.h"
 #include "core/dsp/WdspChannel.h"
 
@@ -210,6 +211,19 @@ public:
     // a held slice peak with a live overload flag; see kSliceStaleMs. The
     // value and this stamp are stored together or not at all, so an age here
     // is always the age of the value adcPeakDbfs() returns.
+    // The same stamp, unreduced, for the one caller that must COMPARE it
+    // rather than display it. SliceSamplingGate holds the moment sampling was
+    // asked to resume and asks whether this reading is newer than that moment;
+    // an age in milliseconds cannot answer that, because the gate's own moment
+    // is not the same as "now". 0 means no block has ever been processed.
+    //
+    // Stored ONLY on the !m_audioMuted path in processBlock(), which is what
+    // makes the comparison a proof: a stamp later than the resume request can
+    // only have been written after the DSP thread applied the unmute.
+    [[nodiscard]] std::int64_t adcPeakObservedAtNs() const noexcept
+    {
+        return m_adcPeakAtNs.load(std::memory_order_relaxed);
+    }
     [[nodiscard]] std::optional<std::int64_t> adcPeakObservedAgoMs() const
     {
         const std::int64_t at = m_adcPeakAtNs.load(std::memory_order_relaxed);
@@ -390,12 +404,6 @@ private:
     // actually completes, since a frame spans several EP6 blocks.
     bool spectrumFrameDue();
 
-    [[nodiscard]] static std::int64_t steadyNowNs() noexcept
-    {
-        return std::chrono::duration_cast<std::chrono::nanoseconds>(
-                   std::chrono::steady_clock::now().time_since_epoch())
-            .count();
-    }
 
     std::unique_ptr<WdspChannel> m_channel;
     std::unique_ptr<Hl2Spectrum> m_spectrum;

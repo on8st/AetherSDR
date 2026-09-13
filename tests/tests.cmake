@@ -4714,6 +4714,19 @@ add_executable(hl2_adc_pairing_test
 )
 target_include_directories(hl2_adc_pairing_test PRIVATE src)
 add_test(NAME hl2_adc_pairing_test COMMAND hl2_adc_pairing_test)
+
+# The same pairing, at the seam rather than as a table. adcPairing() is pure and
+# hl2_adc_pairing_test covers it exhaustively; what that cannot cover is WHEN
+# Hl2Backend's sampling argument changes relative to when Hl2RxDsp actually
+# stops and starts sampling, because the flags are set synchronously and the
+# mute they imply rides a queued connection. This drives a real Hl2RxDsp across
+# that window, so it needs the core library and an event loop.
+add_executable(hl2_adc_sampling_seam_test
+    tests/hl2_adc_sampling_seam_test.cpp
+)
+target_include_directories(hl2_adc_sampling_seam_test PRIVATE src)
+target_link_libraries(hl2_adc_sampling_seam_test PRIVATE aethercore Qt6::Core Qt6::Test)
+add_test(NAME hl2_adc_sampling_seam_test COMMAND hl2_adc_sampling_seam_test)
 add_executable(hl2_dsp_setup_policy_test
     tests/hl2_dsp_setup_policy_test.cpp
 )

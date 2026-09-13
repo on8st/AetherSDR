@@ -60,6 +60,7 @@
 // second for its leading 129-150 ms. The seam has now paid for itself twice, and
 // each time the case that caught it was a case this file could express.
 
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 
@@ -140,6 +141,75 @@ inline constexpr double kSliceHotHeadroomDb = 3.0;
 // stream, a chain between rebuilds, a starved DSP thread. Transmit was only
 // the common way in, and it is now the one way in that is known in advance.
 inline constexpr std::int64_t kSliceStaleMs = 150;
+
+// The monotonic clock every timestamp in this family is taken from. One
+// definition, because the gate below compares a stamp taken here against a
+// stamp taken by Hl2RxDsp on the DSP thread, and two clocks that merely happen
+// to agree today are not a comparison.
+[[nodiscard]] inline std::int64_t steadyNowNs() noexcept
+{
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+// Turns "sampling was ASKED to resume" into "sampling HAS resumed".
+//
+// The synchronous input below (`sliceSideSampling`) is the backend's own
+// knowledge of the mute it queues, and at key-DOWN that is exactly right:
+// m_keyed is set before Hl2RxDsp stops sampling, so the gate shuts at or
+// before sampling does. Early is the safe direction for an input whose whole
+// job is to withhold an assertion.
+//
+// KEY-UP IS NOT SYMMETRIC, and the asymmetry is a defect this class closes.
+// setKeying(false) clears m_keyed synchronously and setTxAudioMonitor(true)
+// sets m_txMonitor synchronously, while BOTH deliver setAudioMuted(false) to
+// the DSP thread over a QUEUED connection. The predicted answer therefore turns
+// true before Hl2RxDsp has unmuted or produced a single new peak. If the held
+// peak is still inside kSliceStaleMs — a short key-down, or the monitor
+// switched on mid-transmission — the age gate is open too, and the verdict is
+// asserted from a value that nothing is sampling: the same failure class the
+// synchronous input was added to prevent, arriving through the other door.
+//
+// The proof that sampling HAS resumed is the stamp on the reading itself.
+// Hl2RxDsp stores m_adcPeakAtNs only on the `!m_audioMuted` path, so a peak
+// stamped after the resume was requested is necessarily a post-unmute sample.
+// Nothing here predicts anything; it compares two timestamps.
+//
+// It costs a block or two of Unknown at key-up — one WDSP output block, ~21 ms
+// at 48 kHz — before the first post-unmute peak lands. That is the safe
+// direction again: an omission where there was an assertion.
+class SliceSamplingGate {
+public:
+    // `requested` is the caller's `!(keyed && !txMonitor)`, passed from the
+    // same site that queues setAudioMuted, so the two can never disagree.
+    //
+    // ONLY THE false->true EDGE MOVES THE BAR. Re-asserting a state that
+    // already holds must not push it forward, or a setTxAudioMonitor(true)
+    // repeated while already unmuted would keep invalidating live samples.
+    void setRequested(bool requested, std::int64_t nowNs) noexcept
+    {
+        if (requested && !m_requested) {
+            m_resumedAtNs = nowNs;
+        }
+        m_requested = requested;
+    }
+
+    // `peakAtNs` is Hl2RxDsp::adcPeakObservedAtNs(); 0 means never sampled,
+    // which is "not reported" and not "not sampling" — but neither is a
+    // reading to pair, and adcPairing() returns Unknown for both.
+    [[nodiscard]] bool applied(std::int64_t peakAtNs) const noexcept
+    {
+        return m_requested && peakAtNs != 0 && peakAtNs > m_resumedAtNs;
+    }
+
+private:
+    // Sampling is requested from construction. A backend that has never keyed
+    // must not wait for an edge that never comes, and the zero bar then admits
+    // any real reading — which is what "never interrupted" means.
+    bool m_requested = true;
+    std::int64_t m_resumedAtNs = 0;
+};
 
 // Is this WDSP meter value a measurement, or a sentinel?
 inline bool adcMeterReadingIsReal(double dbfs) noexcept
