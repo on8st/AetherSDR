@@ -17,13 +17,15 @@
 //     AND-reduction over its clip counter; the slot layout is transcribed
 //     from control.v at 883a338 beside the decode in MetisProtocol.cpp — so
 //     it asserts only once that counter is SATURATED, every bit set, not when
-//     a level is crossed. `clip_cnt` is two bits wide, which makes saturation
-//     AT LEAST THREE CLIP EVENTS inside one reporting interval. That width
-//     comes from control.v itself, which this tree does NOT carry — it is
-//     transcribed here, not re-derived, and the counter's reset cadence has
-//     not been established at all. Two things follow that the labels must
-//     respect: a signal that clips occasionally sets nothing, so a clear bit
-//     is NOT "the converter is comfortable"; and the bit is not the counter.
+//     a level is crossed. `clip_cnt` is two bits wide and increments once per
+//     control-clock tick while the synchronised sticky `rxclip` level is high,
+//     so continuous clipping saturates it in roughly 1.2 us. The counter is
+//     cleared by the next EP6 response (about 1.3 ms at 48 kHz with one
+//     receiver); without a running stream it is an uncleared latch. Those
+//     timings and the reset path are derived in HERMES.md section 11.4 from
+//     gateware 883a338. Two things follow that the labels must respect: an
+//     isolated clipping window can leave the bit clear, so a clear bit is NOT
+//     "the converter is comfortable"; and the bit is not the counter.
 //     HERMES.md §12.5 keeps "the HL2's clip counter and overload bit" as two
 //     things, and §13 row 14 — still open — is where the count as a count
 //     belongs.
