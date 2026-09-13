@@ -16,6 +16,26 @@ constexpr qint64 kDemandWindowMs = 5000;
 // deliberately not borrowed from anything that stops when a connection does —
 // that mistake is why this class exists at all, one level down.
 constexpr int kStateIntervalMs = 1000;
+
+// THIS FAMILY DECLARES ITSELF. The only place the string "hl2" appears in the
+// stream-free telemetry feature outside src/core/backends/hl2/ is nowhere --
+// shared code asks OfflineHealthRegistry whether the selected family declared
+// anything, and this is the declaration.
+//
+// LINKAGE, because a self-registering translation unit that nothing references
+// can be dropped from a static archive with no error anywhere and the feature
+// then simply does not exist. This TU is reached: Hl2Backend.cpp names
+// Hl2TelemetryService in setOfflineHealthSource()'s dynamic_cast, and
+// RadioModel::makeBackend names hl2::Hl2Backend. offline_health_registry_test
+// asserts the declaration is actually present rather than trusting that chain.
+[[maybe_unused]] const bool kRegisteredWithOfflineHealthRegistry = [] {
+    OfflineHealthRegistry::declare(
+        QStringLiteral("hl2"),
+        [](QObject* parent) -> std::unique_ptr<IOfflineHealthSource> {
+            return std::make_unique<Hl2TelemetryService>(parent);
+        });
+    return true;
+}();
 }  // namespace
 
 struct Hl2TelemetryService::Impl {
@@ -98,6 +118,31 @@ int Hl2TelemetryService::linkStateUpdateCount() const noexcept
 void Hl2TelemetryService::setLinkState(Hl2LinkState state)
 {
     ++d->linkStateUpdates;
+    // A REPLY FROM A SESSION WE HAVE LEFT IS OUR OWN VOICE COMING BACK.
+    //
+    // While connected and stalled the poller still runs, and the `run` bit in
+    // the reply it caches is set BY US — so `reply->streaming` is true and the
+    // reply describes our own session. setTarget() drops the cache only when
+    // the target CHANGES, and a plain disconnect leaves the address alone. The
+    // next `health` read then sees `!connected && reply && reply->streaming`
+    // and reports HeldByOther, rendering `radioInUse: true` for a radio nobody
+    // is using. It self-corrects on the next reply, but HeldByOther is
+    // demand-gated, so "the next reply" may be after the operator has already
+    // read the wrong answer (aethersdr-agent, #5642 review).
+    //
+    // Leaving Streaming or StreamStalled is exactly the transition that ends
+    // the session the cached reply belongs to, so that is where it is dropped.
+    // The age clock goes with it: an age that outlives its reading would say a
+    // stale figure is fresh.
+    const bool leftOurOwnSession =
+        (d->state == Hl2LinkState::Streaming
+         || d->state == Hl2LinkState::StreamStalled)
+        && state != Hl2LinkState::Streaming
+        && state != Hl2LinkState::StreamStalled;
+    if (leftOurOwnSession) {
+        d->reply.reset();
+        d->at.invalidate();
+    }
     d->state = state;
     d->poller->setLinkState(state);
 }
@@ -116,6 +161,14 @@ void Hl2TelemetryService::noteDemand()
 std::optional<DiscoveryReply> Hl2TelemetryService::lastReply() const
 {
     return d->reply;
+}
+
+bool Hl2TelemetryService::hasOfflineTarget() const
+{
+    // The MIRRORED target, not the poller's destination: the poller can also
+    // choose a broadcast address when the fallback is opted in, and "somebody
+    // named a radio" is a different claim from "something would be sent".
+    return !d->target.isNull();
 }
 
 IRadioBackend::HealthSnapshot Hl2TelemetryService::healthRows() const
