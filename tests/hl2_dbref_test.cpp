@@ -28,18 +28,54 @@ int main()
 {
     Hl2DbReference ref;
 
-    // Uncalibrated by default: reports dBFS unchanged, exactly as this backend
-    // did before the type existed. No silent recalibration.
-    check(!ref.isCalibrated(), "defaults to uncalibrated");
-    check(near(ref.toDbm(-73.0), -73.0),
-          "uncalibrated pass-through at the default gain is identity");
-    check(near(ref.offsetDb(), 0.0), "uncalibrated offset at the default gain is zero");
+    // CALIBRATED BY DEFAULT NOW, and the four assertions this replaces were a
+    // deliberate tripwire rather than stale expectations. They said: this axis
+    // is dBFS wearing a dBm label, we know it, and nothing may quietly change
+    // that. One of them guarded the exact regression that caused the absolute
+    // form to be REVERTED once -- "default gain leaves the displayed floor
+    // exactly where it was".
+    //
+    // The tripwire is crossed on purpose, and what makes that legitimate is the
+    // thing the revert was missing: kFullScaleDbmAtZeroGain is DERIVED (AD9866
+    // datasheet, and DL1YCF's -34 dBm at +33 dB independently) rather than a
+    // second arbitrary number. The floor still moves. It now moves to a figure
+    // that can be checked.
+    //
+    // If this block ever fails again, the question to ask is not "has the
+    // arithmetic drifted" but "has the DERIVATION been falsified" -- and the
+    // answer belongs beside kFullScaleDbmAtZeroGain, not here.
+    check(ref.isCalibrated(), "calibrated by default: full scale is a real figure");
+    check(near(Hl2DbReference::kFullScaleDbmAtZeroGain, -1.0),
+          "full scale at 0 dB LNA gain is the derived -1 dBm");
 
-    // The regression this guards: subtracting the gain ABSOLUTELY rather than
-    // relative to the reference moved the whole displayed floor by 20 dB.
+    // P(dBm) = dBFS + fullScale - Glna, absolutely. At the class's own default
+    // gain of 20 dB that is dBFS - 21.
     ref.setLnaGainDb(Hl2DbReference::kDefaultLnaGainDb);
-    check(near(ref.toDbm(-120.0), -120.0),
-          "default gain leaves the displayed floor exactly where it was");
+    check(near(ref.offsetDb(), -21.0),
+          "offset at the default gain is fullScale - gain");
+    check(near(ref.toDbm(-73.0), -94.0),
+          "-73 dBFS at 20 dB of gain reads -94 dBm");
+    check(near(ref.toDbm(-120.0), -141.0),
+          "the displayed floor MOVES, to a derived figure rather than an arbitrary one");
+
+    // AND AT 0 dB THE CONSTANT IS THE WHOLE OFFSET, which is what makes it
+    // checkable against a signal generator without arithmetic.
+    ref.setLnaGainDb(0.0);
+    check(near(ref.toDbm(0.0), -1.0),
+          "full scale at 0 dB gain reads exactly the derived -1 dBm");
+
+    // The trim: bounded, and the bound is a feature. An operator who needs more
+    // than 3 dB has found a fault in the derivation, not a setting.
+    ref.setTrimDb(2.0);
+    check(near(ref.toDbm(0.0), 1.0), "a +2 dB trim moves the reading by 2 dB");
+    ref.setTrimDb(99.0);
+    check(near(ref.trimDb(), Hl2DbReference::kTrimLimitDb),
+          "a trim beyond the limit clamps rather than being accepted");
+    ref.setTrimDb(-99.0);
+    check(near(ref.trimDb(), -Hl2DbReference::kTrimLimitDb),
+          "and clamps symmetrically below");
+    ref.setTrimDb(0.0);
+    ref.setLnaGainDb(Hl2DbReference::kDefaultLnaGainDb);
 
     // A fixed antenna signal. Raising the LNA by 20 dB raises the digitised
     // level by 20 dB -- and must NOT change the reported strength.
@@ -141,7 +177,13 @@ int main()
     agc.setFullScaleDbm(-60.0);
     check(near(agc.agcCeilingDb(kDefaultThresholdUnits), beforeCalibration),
           "calibrating the display does not move the AGC ceiling");
-    check(near(agc.offsetDb(), -60.0),
+    // -80, not -60: the display offset is now ABSOLUTE (fullScale - gain), so
+    // at the default 20 dB of gain a -60 dBm full scale reads -80. The
+    // assertion above is the one carrying the meaning here -- that calibrating
+    // the display leaves the AGC ceiling untouched -- and it still passes, which
+    // is the point: the two terms remain separate even though one of them
+    // changed form.
+    check(near(agc.offsetDb(), -80.0),
           "...while it does move the display offset");
 
     if (g_failures == 0)
