@@ -4218,6 +4218,21 @@ target_include_directories(dbm_range_plausibility_test PRIVATE src)
 target_link_libraries(dbm_range_plausibility_test PRIVATE Qt6::Core)
 add_test(NAME dbm_range_plausibility_test COMMAND dbm_range_plausibility_test)
 
+# The auto-floor gate: its truth table, plus each family's declaration read off
+# a real backend instance. Links aethercore for the backends; the RTL row is
+# compiled only when AETHER_BACKEND_RTL is defined, same condition as the
+# backend itself. Qt6::Network because RtlSdrBackend's discovery path needs it.
+add_executable(noise_floor_auto_adjust_gate_test
+    tests/noise_floor_auto_adjust_gate_test.cpp)
+# PRIVATE src tests: the target needs tests/ for TestSettingsProfile.h, which
+# keeps the backends' construction-time AppSettings reads off the operator's
+# live store (aethersdr-agent, #5726).
+target_include_directories(noise_floor_auto_adjust_gate_test PRIVATE src tests)
+target_link_libraries(noise_floor_auto_adjust_gate_test PRIVATE
+    aethercore Qt6::Core Qt6::Network Qt6::Test)
+add_test(NAME noise_floor_auto_adjust_gate_test
+         COMMAND noise_floor_auto_adjust_gate_test)
+
 add_executable(radiomodel_pan_range_null_test tests/radiomodel_pan_range_null_test.cpp)
 target_include_directories(radiomodel_pan_range_null_test PRIVATE src)
 target_link_libraries(radiomodel_pan_range_null_test PRIVATE aethercore Qt6::Core Qt6::Test)
@@ -5690,6 +5705,7 @@ target_link_libraries(CAT_Flex_test PRIVATE Qt6::Core Qt6::Network)
 # directly (rather than linking aethercore) needs the vendored SQLite engine.
 # Conditional targets are guarded with if(TARGET ...).
 set(AETHER_SETTINGS_CONSUMERS
+    noise_floor_auto_adjust_gate_test
     vfo_display_defaults_test
     audio_engine_rates_test
     audio_engine_pcm_lifetime_test
