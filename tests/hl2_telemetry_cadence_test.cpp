@@ -29,6 +29,13 @@
 
 #include "core/backends/hl2/Hl2TelemetryCadence.h"
 
+// Included here rather than leaned on through the header under test: a test
+// that gets its types transitively breaks when the header tidies its own
+// includes, and reports that as a failure of the thing under test.
+#include <array>
+#include <cstdint>
+#include <optional>
+
 #include <cstdio>
 #include <initializer_list>
 

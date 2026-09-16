@@ -1,5 +1,12 @@
 #pragma once
 
+// <cstdint> for std::uint8_t, and it is NOT redundant. libc++ pulls it in
+// transitively through <array>/<optional>, so this header compiled on macOS
+// while the Linux build job went red -- and the body's "0 errors, 439/441"
+// was measured before the commit that introduced the omission AND only on
+// the platform where it is invisible. Reported by ten9876 on #5642.
+#include <cstdint>
+
 #include <array>
 
 #include <optional>
