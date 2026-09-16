@@ -40,6 +40,20 @@ class Hl2TxDsp;
 // the moment an operator opens the window. Exposed here, that drift is a
 // socket-free assertion instead.
 [[nodiscard]] AetherSDR::WidebandConverterView widebandConverterViewRecord() noexcept;
+// The IQ rates the HL2's DDC can be told to run, ascending. ONE list, because
+// this is simultaneously the capability advertisement (RadioCapabilities::
+// sampleRatesHz), the panadapter's zoom limits (panBandwidthLimitsChanged) and
+// the set a zoom request snaps to (nearestIqSampleRateHz) — and on this radio
+// those are the same fact. The pan span IS the sample rate
+// (Hl2Backend::emitPanState), so a second list would be a way for the
+// advertised span and the deliverable span to drift apart.
+//
+// It lives in the HEADER, not in the .cpp's anonymous namespace, for the same
+// reason it is one list: the capability test asserts against THIS array rather
+// than against a re-typed copy of it. A test that carries its own copy of the
+// truth cannot detect the declaration and the hardware diverging, which is the
+// specific way a capability rots.
+inline constexpr int kIqSampleRatesHz[] = {48000, 96000, 192000, 384000};
 
 // IRadioBackend implementation for the Hermes-Lite 2 (HPSDR Protocol 1, raw IQ).
 // Owns a MetisClient (UDP wire) and an Hl2RxDsp (demod + panadapter) and maps the

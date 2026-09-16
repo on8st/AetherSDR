@@ -5220,6 +5220,20 @@ add_executable(hl2_gain_restore_test tests/hl2_gain_restore_test.cpp)
 target_include_directories(hl2_gain_restore_test PRIVATE src tests)
 target_link_libraries(hl2_gain_restore_test PRIVATE aethercore Qt6::Core)
 add_test(NAME hl2_gain_restore_test COMMAND hl2_gain_restore_test)
+# Socket-free HL2 panadapter-limit DECLARATIONS: the span shape, the four
+# discrete rates and the dBm axis. NOT radioOwnsDbmScale -- the HL2 deliberately
+# leaves that undeclared and this target asserts only its DEFAULT, which is a
+# different fact. An earlier version of this line claimed otherwise. The span
+# floor and rate set, the shared span, and the uncalibrated dBm axis — each
+# asserted against the constant or predicate production reads, never a copy.
+# Constructs a backend and reads capabilities(); binds nothing and connects
+# nothing. It is a separate target from the rest because the fixture the HL2
+# seam contract used to live in is retired (see the commented block above) and
+# a declaration must not be pinned only inside something that does not build.
+add_executable(hl2_pan_limits_declaration_test tests/hl2_pan_limits_declaration_test.cpp)
+target_include_directories(hl2_pan_limits_declaration_test PRIVATE src tests)
+target_link_libraries(hl2_pan_limits_declaration_test PRIVATE aethercore Qt6::Core)
+add_test(NAME hl2_pan_limits_declaration_test COMMAND hl2_pan_limits_declaration_test)
 add_executable(hl2_band_memory_test
     tests/hl2_band_memory_test.cpp
 )
@@ -5700,6 +5714,7 @@ set(AETHER_SETTINGS_CONSUMERS
     rtl_slice_settings_test
     weather_radar_loading_test
     hl2_gain_restore_test
+    hl2_pan_limits_declaration_test
     icom_identity_test
     icom_control_profile_test
     control_resource_service_test
