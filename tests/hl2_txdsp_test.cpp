@@ -29,6 +29,7 @@
 #include <complex>
 #include <cstddef>
 #include <cstdio>
+#include <algorithm>
 #include <numeric>
 #include <random>
 #include <string>
