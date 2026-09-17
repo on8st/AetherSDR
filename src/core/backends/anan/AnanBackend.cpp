@@ -452,6 +452,7 @@ RadioCapabilities AnanBackend::capabilities() const
     c.hasAudioPeakingFilter = false; // no firmware APF verb on this path
     c.radioOwnsDbmScale = false;   // client computes it from raw IQ
     c.hasDdcPanEdgeRolloff = true; // see RadioCapabilities.h's own comment
+    c.hasRadioBandSegmentZoom = false;  // openHPSDR P2 has no display command plane
     c.persistsMemories = false;    // default; stated explicitly
     c.clientSettingsDomains = {};  // no applyRestoredState()/currentOperatingState() yet
     c.hostDroopCalibration = true; // AnanDroopCorrection.h -- real DDC0 CIC droop,

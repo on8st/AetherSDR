@@ -403,10 +403,14 @@ public:
 
     // Enable/disable the "S"/"B" (segment/band zoom) buttons and explain why
     // when disabled. Both send FlexLib wire text (band_zoom=/segment_zoom=,
-    // see togglePanZoomModeForPan()) that only a Flex radio's command plane
-    // ever answers -- on every other backend the click was a silent no-op,
-    // with nothing on screen saying so. Called per-radio model, same as
-    // setBandwidthLimits() above.
+    // see togglePanZoomModeForPan()) that engages a mode the RADIO owns, which
+    // only a Flex has today -- on every other backend the click was a silent
+    // no-op, with nothing on screen saying so. Called per-radio model, same as
+    // setBandwidthLimits() above. The caller's predicate is
+    // bandSegmentZoomAvailable() in PanZoomModePolicy.h, which the SEND paths
+    // now share: disabling the buttons here was never the whole gate, because
+    // the shortcut, MIDI, bridge, FlexControl and RC28 routes do not go through
+    // a button at all (lab FIND-52).
     void setBandSegmentZoomAvailable(bool available)
     {
         const QString tip = available

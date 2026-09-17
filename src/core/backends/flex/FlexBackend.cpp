@@ -215,6 +215,10 @@ RadioCapabilities FlexBackend::capabilities() const
     caps.hasManualNotch = false;
     caps.hasTransmitFrequencyCheck = false;
     caps.hasDdcPanEdgeRolloff = false;  // superhet/direct-sampling, no DDC decimation edge
+    // The one radio in this app that owns a band/segment zoom: it computes
+    // the geometry from its own band plan and broadcasts band_zoom/segment_zoom
+    // back in pan status, which is what PanadapterModel decodes.
+    caps.hasRadioBandSegmentZoom = true;
     // A Flex blanks impulses in its OWN DDC, so NB is already the radio's under
     // hasRadioSideDsp above and the host has nothing to add. This flag says
     // where the blanker runs, not whether the radio has one.

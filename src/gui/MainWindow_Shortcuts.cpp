@@ -22,6 +22,7 @@
 #include <QKeyEvent>
 
 #include "MainWindowHelpers.h"
+#include "PanZoomModePolicy.h"  // bandSegmentZoomAvailable() — the buttons' own gate, shared
 #include "VoiceModeGate.h"   // isCwMode() — one CW-mode list, not thirteen
 #include "AppletPanel.h"
 #include "BandStackPanel.h"
@@ -1539,6 +1540,31 @@ void MainWindow::togglePanZoomModeForPan(const QString& panId, bool segmentZoom)
     if (panId.isEmpty()) {
         return;
     }
+    // THE SAME GATE THE BUTTONS HONOUR, asked here because this is where the
+    // command is emitted and the right-click entries are not the only way in.
+    // MainWindow's two connect seams disable the menu items through
+    // SpectrumWidget::setBandSegmentZoomAvailable, but the ShortcutManager
+    // actions, their MIDI bindings, the automation bridge's `shortcut` verb,
+    // FlexControl and RC28 all arrive HERE having checked only isConnected().
+    // On a radio that declares no band/segment zoom the wire text below is
+    // dropped at RadioModel::sendCmd and the press does nothing at all — lab
+    // FIND-52, measured dropping three of three. Refusing where the buttons
+    // refuse is what makes the two paths one control. (Nothing is latched
+    // client-side here, so this is closing a DEAD control, not a corrupt-state
+    // bug — see the note below on #4057.)
+    if (!bandSegmentZoomAvailable(m_radioModel.isConnected(), m_radioModel.backendCapabilities())) {
+        // The notice is for "this radio cannot do that", not for "no radio".
+        // Disconnected already returns silently from every caller that checks
+        // (togglePanZoomMode, setPanZoomMode); keep that, so a press before
+        // connecting does not raise a capability complaint.
+        if (m_radioModel.isConnected()) {
+            qCWarning(lcDevices)
+                << (segmentZoom ? "segment_zoom" : "band_zoom")
+                << "ignored: this radio declares no band/segment zoom";
+            showUnsupportedControlNotice();
+        }
+        return;
+    }
     auto* pan = m_radioModel.panadapter(panId);
     if (!pan) {
         return;
@@ -1591,7 +1617,17 @@ void MainWindow::zoomActivePanadapter(double factor)
 
 void MainWindow::setPanZoomMode(bool segmentZoom, bool enable)
 {
-    if (!m_radioModel.isConnected()) {
+    // The explicit-state form of the same command, reached from the rotary
+    // handlers. Same gate, same reason — see togglePanZoomModeForPan(). This
+    // one does NOT route through that function, so it needs its own check
+    // rather than inheriting one.
+    if (!bandSegmentZoomAvailable(m_radioModel.isConnected(), m_radioModel.backendCapabilities())) {
+        if (m_radioModel.isConnected()) {
+            qCWarning(lcDevices)
+                << (segmentZoom ? "segment_zoom" : "band_zoom")
+                << "ignored: this radio declares no band/segment zoom";
+            showUnsupportedControlNotice();
+        }
         return;
     }
     auto* s = activeSlice();

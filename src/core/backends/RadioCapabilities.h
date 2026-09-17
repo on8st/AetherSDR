@@ -939,6 +939,31 @@ struct RadioCapabilities {
     // its own family added to a hardcoded list.
     bool hasDdcPanEdgeRolloff = false;
 
+    // The RADIO owns a band / segment zoom for a panadapter: it computes the
+    // center and span itself from the band plan and broadcasts the result, and
+    // it holds the engaged flag. `display pan set <pan> band_zoom=1` /
+    // `segment_zoom=1` is the Flex command that engages it, and a Flex is the
+    // only radio in this app that has one. This is NOT "the client can zoom to
+    // a band" — every backend can be handed a center and a width; it is
+    // specifically the radio-side mode whose state PanadapterModel decodes from
+    // pan status.
+    //
+    // A CAPABILITY AND NOT A FAMILY CHECK, for the reason stated beside
+    // hasDdcPanEdgeRolloff above and for one more that bit here. The gate used
+    // to be RadioModel::usesFlexCommandPlane() written out at the two places
+    // that DISABLE the buttons, which meant the two places that SEND the
+    // command had no gate at all: every shortcut, MIDI binding, automation
+    // `shortcut` verb, FlexControl and RC28 route reached
+    // MainWindow::togglePanZoomModeForPan / setPanZoomMode having checked only
+    // isConnected(), and the wire text was then dropped at RadioModel::sendCmd
+    // with nothing shown to the operator. A gate that has to be re-typed at
+    // each call site is a gate that will be missed at one of them.
+    //
+    // FALSE IS THE HONEST DEFAULT: a backend nobody has read on the question
+    // does not get to claim a radio-side zoom mode. Set explicitly in every
+    // backend, per the ADDING A FIELD rule above.
+    bool hasRadioBandSegmentZoom = false;
+
     // NO hasTrackingNotchFilters HERE, deliberately. TNF looks like it belongs
     // beside the three below — TnfModel's whole surface is `tnf create/remove/
     // set` and `sub tnf all`, so it passes the "does the control only emit a

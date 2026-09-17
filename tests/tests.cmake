@@ -5442,6 +5442,32 @@ add_executable(hl2_pan_limits_declaration_test tests/hl2_pan_limits_declaration_
 target_include_directories(hl2_pan_limits_declaration_test PRIVATE src tests)
 target_link_libraries(hl2_pan_limits_declaration_test PRIVATE aethercore Qt6::Core)
 add_test(NAME hl2_pan_limits_declaration_test COMMAND hl2_pan_limits_declaration_test)
+# Socket-free HL2 FM-control DECLARATIONS: the repeater duplex offset it does
+# not have (hasFmRepeaterOffset was INHERITED true, and the two backend verbs
+# behind it are no-op virtuals this backend never overrides) and the CTCSS
+# encode it cannot perform (fmTonePresentation was declared Legacy, the value
+# that OFFERS ctcss_tx, on a radio that declares FM receive-only). Asserted
+# against receiveOnlyModes and legacyFmToneModes() -- production, not a copy.
+# Separate target for the same reason as the line above: the fixture that would
+# have carried an HL2 seam assertion is retired, and a declaration must not be
+# pinned only inside something that does not build.
+add_executable(hl2_fm_controls_declaration_test tests/hl2_fm_controls_declaration_test.cpp)
+target_include_directories(hl2_fm_controls_declaration_test PRIVATE src tests)
+target_link_libraries(hl2_fm_controls_declaration_test PRIVATE aethercore Qt6::Core)
+add_test(NAME hl2_fm_controls_declaration_test COMMAND hl2_fm_controls_declaration_test)
+# Band/segment zoom availability as ONE predicate, asserted against each
+# production backend's own declared RadioCapabilities::hasRadioBandSegmentZoom
+# -- the CAPABILITY, never caps.family (HERMES.md 19.10). The buttons were gated
+# and the send path was not, so every shortcut/MIDI/bridge/FlexControl route
+# into `display pan set <pan> band_zoom=` bypassed the gate (lab FIND-52).
+# Constructors only: no connect, no discovery, no DSP, no socket. It pins the
+# predicate's shape and the six declarations; that MainWindow's four call sites
+# use it is a coupling no test here can reach, because nothing in this tree
+# constructs a MainWindow.
+add_executable(pan_zoom_mode_policy_test tests/pan_zoom_mode_policy_test.cpp)
+target_include_directories(pan_zoom_mode_policy_test PRIVATE src tests)
+target_link_libraries(pan_zoom_mode_policy_test PRIVATE aethercore Qt6::Core)
+add_test(NAME pan_zoom_mode_policy_test COMMAND pan_zoom_mode_policy_test)
 add_executable(hl2_band_memory_test
     tests/hl2_band_memory_test.cpp
 )
@@ -5931,6 +5957,8 @@ set(AETHER_SETTINGS_CONSUMERS
     hl2_gain_restore_test
     hl2_tx_gate_test
     hl2_pan_limits_declaration_test
+    hl2_fm_controls_declaration_test
+    pan_zoom_mode_policy_test
     icom_identity_test
     icom_control_profile_test
     control_resource_service_test

@@ -131,6 +131,9 @@ RadioCapabilities RtlSdrBackend::capabilities() const
     amplitude.binsAbsolute = true;
     c.panAmplitude = amplitude;
     c.family = QStringLiteral("rtl");
+    // A USB dongle with no control protocol of its own: there is no radio-side
+    // band/segment zoom to engage, and nothing to broadcast an engaged flag.
+    c.hasRadioBandSegmentZoom = false;
     c.model  = m_modelName;
     c.manufacturer = m_vendor.isEmpty() ? QStringLiteral("Realtek") : m_vendor;
 

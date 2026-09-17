@@ -1681,7 +1681,36 @@ RadioCapabilities Hl2Backend::capabilities() const
     c.twoToneGenerator = std::nullopt;
     c.manufacturer = QStringLiteral("Hermes-Lite");
     c.model = QStringLiteral("Hermes-Lite 2");
-    c.fmTonePresentation = FmTonePresentation::Legacy;
+    // NO REPEATER DUPLEX AND NO TONE ENCODE, because this radio cannot key FM
+    // at all — receiveOnlyModes below says so, and these two controls are the
+    // surface that still implied otherwise.
+    //
+    // hasFmRepeaterOffset was never DECLARED here; it was INHERITED. The struct
+    // defaults it true, so a radio that omits it claims a duplex offset, and
+    // the HL2 omitted it. There is nothing behind that claim:
+    // IRadioBackend::setSliceRepeaterOffsetDir and setSliceFmRepeaterOffset are
+    // virtuals with empty bodies and this backend overrides neither, so the
+    // offset spin and the ±/simplex buttons — enabled from this flag in BOTH
+    // VfoWidget::configureFmToneControls and RxApplet::configureFmToneControls —
+    // moved a number that reached nothing. A dead control that looks live is
+    // the failure this field exists to prevent (its own comment: "model-profile
+    // backends explicitly decline this when their protocol has no repeater
+    // duplex verb"). The HL2 has no such verb; it has no command plane at all.
+    //
+    // fmTonePresentation WAS declared, as Legacy, and Legacy is the value that
+    // fills the tone-mode combo from legacyFmToneModes() — {off, ctcss_tx} —
+    // i.e. it OFFERS CTCSS ENCODE. There is no CTCSS encoder on this path. The
+    // transmit chain is Hl2TxDsp, a hand-written phasing SSB modulator, and
+    // FM/NFM are on receiveOnlyModes below precisely because it cannot emit
+    // them. Hidden is the honest value and is the one both widgets read to hide
+    // the container outright rather than show a control that does nothing.
+    //
+    // WHAT THIS DOES NOT TOUCH: receive. FM and NFM demodulate exactly as
+    // before — WDSP's FM demodulator is unaffected by either field. What is
+    // withdrawn is a set of TRANSMIT-side controls for a mode this backend
+    // already refuses to key in.
+    c.hasFmRepeaterOffset = false;
+    c.fmTonePresentation = FmTonePresentation::Hidden;
     c.fmDtcsCodes = {};
     // The CEILING, not the running count. A capability answers "what can this
     // radio do", and receivers are now added on demand — so reporting the
@@ -1810,9 +1839,42 @@ RadioCapabilities Hl2Backend::capabilities() const
     c.tuningMaxHz = 38'400'000.0;
     c.sliceFrequencyControl = {SliceFrequencyControl::Authority::Engine,
                                100'000, 38'400'000};
+    // THE MODES THE HEADLESS RECEIVE PATH MAY BE ASKED FOR, and it is an ACCEPT
+    // list rather than a menu — ModelReceiveControlTarget reads it twice.
+    //
+    //   * setMode() refuses a REQUESTED mode that is not in it
+    //     ("mode is not supported by this receive path"), and
+    //   * availability() refuses the Mode operation entirely when the slice's
+    //     currently OBSERVED mode is not in it.
+    //
+    // The second reading is why the omissions bit harder than a missing menu
+    // entry would. DSB and CWL are modes this backend genuinely demodulates —
+    // modeFromString() maps both onto their own WdspChannel::Mode, and
+    // defaultPassbandForMode() carries a distinct entry for each — so a slice
+    // could legitimately BE in DSB or CWL, and a control client would then find
+    // mode control unavailable on that slice rather than merely unable to reach
+    // those two.
+    //
+    // CWU is added for the same second reading, not to offer a third CW button.
+    // "CW" and "CWU" are one mode under two spellings (modeFromString maps both
+    // to Mode::Cwu) and only "CW" was listed, so a slice restored as "CWU" — a
+    // spelling the restore boundary's isKnownModeString ACCEPTS — parked mode
+    // control in the unavailable branch. A list that admits both spellings is
+    // what "does this receive path support the mode this slice is in" actually
+    // asks. This is deliberately NOT the same question as which strings a mode
+    // MENU should offer, where listing an alias twice would be wrong.
+    //
+    // FM, NFM, WBFM, WFM and DRM stay off, and that is a separate judgement this
+    // change does not take: FM and WBFM demodulate, but they are also on
+    // receiveOnlyModes and carry no receiveFilterControl entry, and DRM has no
+    // decoder here at all (#5580). Declaring them is a question about what the
+    // receive control plane should offer for a mode that cannot be keyed, and
+    // it wants its own reasoning rather than riding in on this one.
     c.receiveModeControl = ReceiveModeControl{SliceFrequencyControl::Authority::Engine,
-        {QStringLiteral("USB"), QStringLiteral("LSB"), QStringLiteral("DIGU"),
-         QStringLiteral("DIGL"), QStringLiteral("AM"), QStringLiteral("SAM"), QStringLiteral("CW")}};
+        {QStringLiteral("USB"), QStringLiteral("LSB"), QStringLiteral("DSB"),
+         QStringLiteral("DIGU"), QStringLiteral("DIGL"), QStringLiteral("AM"),
+         QStringLiteral("SAM"), QStringLiteral("CW"), QStringLiteral("CWU"),
+         QStringLiteral("CWL")}};
     // Conservative carrier-relative subdomains of the existing WDSP passband.
     c.receiveFilterControl = ReceiveFilterControl{SliceFrequencyControl::Authority::Engine, {
         {QStringLiteral("USB"), 0, 11990, 10, 12000, 10, 12000},
@@ -1939,6 +2001,10 @@ RadioCapabilities Hl2Backend::capabilities() const
     c.hasManualNotch = false;
     c.hasTransmitFrequencyCheck = false;
     c.hasDdcPanEdgeRolloff = false;
+    // No command plane at all, so no radio-side zoom mode to engage. The
+    // band/segment zoom controls were dead here and, until the gate moved to
+    // this flag, only the BUTTONS knew it (lab FIND-52).
+    c.hasRadioBandSegmentZoom = false;
     // The one member of the noise family that is NOT moot here. WDSP's ANB runs
     // on this host, on the raw IQ, ahead of the demodulator — the same
     // arrangement as the manual notch and for the same reason (oracle addendum

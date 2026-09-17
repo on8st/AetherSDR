@@ -319,6 +319,9 @@ RadioCapabilities SimBackend::capabilities() const
     caps.hasManualNotch = false;
     caps.hasTransmitFrequencyCheck = false;
     caps.hasDdcPanEdgeRolloff = false;   // synthetic scene, no real receive chain
+    // Demo mode owns a RadioConnection and is still not a Flex -- the exact
+    // case that makes "some command plane exists" the wrong question here.
+    caps.hasRadioBandSegmentZoom = false;
     // The synthesised stream has no impulse noise in it, and the demo has no IQ
     // path this host demodulates — there is nothing to blank.
     caps.hasHostNoiseBlanker = false;
