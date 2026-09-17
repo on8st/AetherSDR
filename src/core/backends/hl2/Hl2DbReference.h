@@ -124,8 +124,20 @@ namespace AetherSDR::hl2 {
 // difference rather than by a sentence.
 class Hl2DbReference {
 public:
-    // Matches Hl2Backend/MetisClient's default LNA setting.
-    static constexpr double kDefaultLnaGainDb = 20.0;
+    // Matches Hl2Backend/MetisClient's default LNA setting, and MUST: it seeds
+    // both m_lnaGainDb and m_referenceLnaGainDb, so a divergence from the
+    // backend's own default puts a non-zero lnaOffsetDb() on every fresh
+    // connect and moves the AGC ceiling for operators who changed nothing.
+    //
+    // It was 20.0 and the backend's default was 20. #5752 moved the backend to
+    // 0 -- because the old +20 was really being applied as -12 by the AD9866's
+    // `code & 0x1F` fold -- and this line did not follow, which left
+    // lnaOffsetDb() = 20 - 0 = +20 and agcCeilingDb(65) at 59 dB instead of the
+    // 39 dB measured clean on hardware. Caught by aethersdr-agent on #5753.
+    // hl2_dbref_test could not see it: every AGC assertion there is built on
+    // this same constant, so the test and the class agreed with each other
+    // while production disagreed with both.
+    static constexpr double kDefaultLnaGainDb = 0.0;
 
     // Operator AGC-T units (0..100) -> WDSP maximum-gain ceiling in dB. 0.6
     // spans 0..60 dB, which puts the default of 65 at 39 dB -- measured clean
@@ -143,15 +155,33 @@ public:
     //   referred to 0 dB -- 48 dB is x251.2              2.01 Vpp differential
     //   as RMS                                           0.707 Vrms
     //   into the 400 ohm secondary, V^2/R = 0.5/400      1.25 mW
-    //   in dBm                                           +0.97 dBm
+    //   in dBm, AT THE CONVERTER                         +0.97 dBm
     //   the 50->400 ohm input transformer (5:14) preserves power
-    //   transformer + N2ADR filter board insertion loss  about -2 dB
+    //   transformer + N2ADR filter board insertion loss  about 2 dB
+    //   ...which sits BETWEEN the antenna and the converter,
+    //   so the antenna must deliver that much MORE        +2 dB
     //   -------------------------------------------------------------
-    //   full scale at the antenna, 0 dB LNA gain         about -1 dBm
+    //   full scale at the antenna, 0 dB LNA gain         about +3 dBm
     //
-    // INDEPENDENTLY CONFIRMED by a route sharing none of those assumptions:
-    // DL1YCF measured -34 dBm clipping at +33 dB of gain. -34 + 33 = -1 dBm,
-    // to the digit.
+    // THE SIGN OF THE LAST TERM WAS WRONG IN THE FIRST DRAFT, which subtracted
+    // the insertion loss and arrived at -1 dBm. Loss ahead of the converter
+    // makes the antenna-referred full-scale point HIGHER, not lower: P_adc =
+    // P_ant - 2 dB, so P_ant = P_adc + 2 dB. The old figure read every signal
+    // 4 dB weak. Caught by aethersdr-agent on #5753.
+    //
+    // NO INDEPENDENT CONFIRMATION, and the one this file used to cite is
+    // WITHDRAWN. DL1YCF's "-34 dBm clipping at +33 dB of gain" arithmetically
+    // gives -1 dBm and was quoted here as agreeing "to the digit" -- with a
+    // figure now known to be 4 dB out, which is the tell. It also assumes +33
+    // dB was DELIVERED; on this radio a commanded +33 is code 45, and the
+    // gateware's `code & 0x1F` makes that code 13, i.e. +1 dB applied (#5752).
+    // On that reading the same measurement gives -33 dBm. Commanded or applied
+    // cannot be established from the published figure, so it confirms nothing
+    // in either direction and is recorded here only so nobody re-derives it.
+    //
+    // WHAT WOULD SETTLE IT is a bench measurement on this radio: a known level
+    // into the antenna port at a known APPLIED gain, read against the ADC clip
+    // counter. That is receive-only and wants a calibrated source.
     //
     // NOT THE openHPSDR FIGURE. piHPSDR and deskHPSDR carry +14 dB, and their
     // own notes describe it as "average, varies per unit". This is not that,
@@ -163,7 +193,7 @@ public:
     // band-dependent residual sits on top of the ~1 dB this buys. A per-band
     // table could take that later; it is not a reason to leave the reference at
     // zero, which is what "uncalibrated" actually meant here.
-    static constexpr double kFullScaleDbmAtZeroGain = -1.0;
+    static constexpr double kFullScaleDbmAtZeroGain = 3.0;
 
     static constexpr double kAgcCeilingDbPerUnit = 0.6;
 

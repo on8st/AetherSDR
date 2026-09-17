@@ -36,38 +36,52 @@ int main()
     // exactly where it was".
     //
     // The tripwire is crossed on purpose, and what makes that legitimate is the
-    // thing the revert was missing: kFullScaleDbmAtZeroGain is DERIVED (AD9866
-    // datasheet, and DL1YCF's -34 dBm at +33 dB independently) rather than a
+    // thing the revert was missing: kFullScaleDbmAtZeroGain is DERIVED from the
+    // AD9866 datasheet and the HL2's own input network, rather than being a
     // second arbitrary number. The floor still moves. It now moves to a figure
     // that can be checked.
+    //
+    // IT HAS ALREADY BEEN WRONG ONCE, by 4 dB, and the way it was wrong is the
+    // reason this comment does not cite a confirmation any more. The first
+    // draft SUBTRACTED the 2 dB of transformer and filter-board insertion loss
+    // instead of adding it, and then quoted DL1YCF's "-34 dBm clipping at
+    // +33 dB" as agreeing with the result to the digit. The agreement was the
+    // tell, not the evidence: that figure also assumes +33 dB was delivered,
+    // and on this radio a commanded +33 folds to +1 applied (#5752).
     //
     // If this block ever fails again, the question to ask is not "has the
     // arithmetic drifted" but "has the DERIVATION been falsified" -- and the
     // answer belongs beside kFullScaleDbmAtZeroGain, not here.
     check(ref.isCalibrated(), "calibrated by default: full scale is a real figure");
-    check(near(Hl2DbReference::kFullScaleDbmAtZeroGain, -1.0),
-          "full scale at 0 dB LNA gain is the derived -1 dBm");
+    check(near(Hl2DbReference::kFullScaleDbmAtZeroGain, 3.0),
+          "full scale at 0 dB LNA gain is the derived +3 dBm");
+
+    // THE REFERENCE DEFAULT TRACKS THE BACKEND'S. They seed each other, so a
+    // divergence is a non-zero lnaOffsetDb() on a fresh connect and an AGC
+    // ceiling that moved for operators who changed nothing (#5753 review).
+    check(near(Hl2DbReference::kDefaultLnaGainDb, 0.0),
+          "the reference default matches Hl2Backend's own default LNA gain");
 
     // P(dBm) = dBFS + fullScale - Glna, absolutely. At the class's own default
-    // gain of 20 dB that is dBFS - 21.
+    // gain of 0 dB that is dBFS + 3.
     ref.setLnaGainDb(Hl2DbReference::kDefaultLnaGainDb);
-    check(near(ref.offsetDb(), -21.0),
+    check(near(ref.offsetDb(), 3.0),
           "offset at the default gain is fullScale - gain");
-    check(near(ref.toDbm(-73.0), -94.0),
-          "-73 dBFS at 20 dB of gain reads -94 dBm");
-    check(near(ref.toDbm(-120.0), -141.0),
+    check(near(ref.toDbm(-73.0), -70.0),
+          "-73 dBFS at the default 0 dB of gain reads -70 dBm");
+    check(near(ref.toDbm(-120.0), -117.0),
           "the displayed floor MOVES, to a derived figure rather than an arbitrary one");
 
     // AND AT 0 dB THE CONSTANT IS THE WHOLE OFFSET, which is what makes it
     // checkable against a signal generator without arithmetic.
     ref.setLnaGainDb(0.0);
-    check(near(ref.toDbm(0.0), -1.0),
-          "full scale at 0 dB gain reads exactly the derived -1 dBm");
+    check(near(ref.toDbm(0.0), 3.0),
+          "full scale at 0 dB gain reads exactly the derived +3 dBm");
 
     // The trim: bounded, and the bound is a feature. An operator who needs more
     // than 3 dB has found a fault in the derivation, not a setting.
     ref.setTrimDb(2.0);
-    check(near(ref.toDbm(0.0), 1.0), "a +2 dB trim moves the reading by 2 dB");
+    check(near(ref.toDbm(0.0), 5.0), "a +2 dB trim moves the reading by 2 dB");
     ref.setTrimDb(99.0);
     check(near(ref.trimDb(), Hl2DbReference::kTrimLimitDb),
           "a trim beyond the limit clamps rather than being accepted");
@@ -164,8 +178,8 @@ int main()
     // overrun: an operator 12 dB down on the LNA needs 12 dB more AGC gain to
     // hear the same signal at the same level.
     agc.setLnaGainDb(-12.0);                            // the AD9866 floor, real
-    check(near(agc.agcCeilingDb(100), 60.0 + 32.0),
-          "a 32 dB LNA cut refers AGC-T 100 above the slider's nominal top");
+    check(near(agc.agcCeilingDb(100), 60.0 + 12.0),
+          "a 12 dB LNA cut refers AGC-T 100 above the slider's nominal top");
     check(agc.agcCeilingDb(100) <= Hl2DbReference::kAgcCeilingDbMax,
           "the referred ceiling stays inside WDSP's own maximum");
 
@@ -177,13 +191,13 @@ int main()
     agc.setFullScaleDbm(-60.0);
     check(near(agc.agcCeilingDb(kDefaultThresholdUnits), beforeCalibration),
           "calibrating the display does not move the AGC ceiling");
-    // -80, not -60: the display offset is now ABSOLUTE (fullScale - gain), so
-    // at the default 20 dB of gain a -60 dBm full scale reads -80. The
-    // assertion above is the one carrying the meaning here -- that calibrating
-    // the display leaves the AGC ceiling untouched -- and it still passes, which
-    // is the point: the two terms remain separate even though one of them
-    // changed form.
-    check(near(agc.offsetDb(), -80.0),
+    // The display offset is ABSOLUTE (fullScale - gain + trim), so at the
+    // default 0 dB of gain a -60 dBm full scale is simply -60. The assertion
+    // above is the one carrying the meaning here -- that calibrating the
+    // display leaves the AGC ceiling untouched -- and it still passes, which is
+    // the point: the two terms remain separate even though one of them changed
+    // form.
+    check(near(agc.offsetDb(), -60.0),
           "...while it does move the display offset");
 
     if (g_failures == 0)
