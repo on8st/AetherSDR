@@ -169,10 +169,14 @@ AetherialAudioStrip::AetherialAudioStrip(AudioEngine* engine, QWidget* parent)
         maxBtn->setFixedSize(16, 16);
         maxBtn->setCursor(Qt::ArrowCursor);
         maxBtn->setStyleSheet(btnStyle);
-        maxBtn->setToolTip("Maximize");
-        connect(maxBtn, &QPushButton::clicked, this, [this]() {
-            if (isMaximized()) showNormal(); else showMaximized();
-        });
+        // FULL SCREEN, not maximize. showMaximized() keeps the menu bar, the
+        // dock and this window's own frame; an operator enlarging the audio
+        // strip is trying to read it across the room, and the furniture is what
+        // they are trying to be rid of.
+        maxBtn->setAccessibleName(QStringLiteral("Full screen"));
+        maxBtn->setToolTip("Enter full screen");
+        connect(maxBtn, &QPushButton::clicked, this,
+                &AetherialAudioStrip::toggleFullScreen);
         row->addWidget(maxBtn);
 
         auto* closeBtn = new QPushButton(QString::fromUtf8("\xc3\x97"), m_titleBar); // ×
@@ -792,9 +796,28 @@ void AetherialAudioStrip::refreshChainPaint()
     if (m_chainRx) m_chainRx->update();
 }
 
+void AetherialAudioStrip::toggleFullScreen()
+{
+    if (isFullScreen()) {
+        showNormal();
+    } else {
+        showFullScreen();
+    }
+}
+
 void AetherialAudioStrip::saveGeometryToSettings()
 {
     if (m_restoring) return;
+    // FULL SCREEN IS NOT PERSISTED, and maximize's recoverability is why.
+    // saveGeometry() encodes the maximized/fullscreen bits --
+    // window_geometry_restore_test pins that they survive the round trip -- so
+    // quitting while full screen used to reopen full screen. Maximize was
+    // recoverable from the state it restored into: frame, menu bar and dock all
+    // present. Full screen has none of them, and with FramelessWindow off the
+    // custom title bar is hidden too, so the window reopens with no visible
+    // control at all. Skipping the save leaves the last NORMAL geometry as the
+    // one restored, which is the recoverable state.
+    if (isFullScreen()) return;
     auto& s = AppSettings::instance();
     s.setValue("AetherialStripGeometry", saveGeometry().toBase64());
     s.save();
@@ -867,8 +890,12 @@ bool AetherialAudioStrip::eventFilter(QObject* obj, QEvent* ev)
         return FramelessMoveHelper::start(m_titleBar, me);
     }
     if (obj == m_titleBar && ev->type() == QEvent::MouseButtonDblClick) {
-        if (isMaximized()) showNormal();
-        else               showMaximized();
+        // THE SAME VERB AS THE BUTTON TWO PIXELS AWAY. They used to disagree:
+        // the button toggled full screen while this toggled maximize, so a
+        // double-click taken from full screen read isMaximized() == false and
+        // called showMaximized() -- dropping the window out of full screen into
+        // maximized and desyncing the button's toggle from outside itself.
+        toggleFullScreen();
         ev->accept();
         return true;
     }
