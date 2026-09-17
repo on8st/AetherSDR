@@ -641,6 +641,14 @@ add_test(NAME wdsp_channel_test COMMAND wdsp_channel_test)
 add_executable(wdsp_group_delay_test tests/wdsp_group_delay_test.cpp)
 target_link_libraries(wdsp_group_delay_test PRIVATE aethercore)
 
+# d109's follow-on to the above: what minimum phase costs across the passband
+# (group delay vs frequency, and the CW keying envelope), and which
+# configuration variables move the constant residue d107 could not name. Also a
+# measurement harness rather than a gate, and also not wired into ctest -- it
+# opens about fifty WDSP channels one after another and takes minutes.
+add_executable(wdsp_phase_distortion_test tests/wdsp_phase_distortion_test.cpp)
+target_link_libraries(wdsp_phase_distortion_test PRIVATE aethercore)
+
 # Socket-free shared-pool admission and injected receiver lifetime tests. These
 # foundations are compiled/tested even when the optional RTL USB driver is off.
 add_executable(wdsp_channel_reservation_test tests/wdsp_channel_reservation_test.cpp)
