@@ -633,6 +633,14 @@ add_executable(wdsp_channel_test tests/wdsp_channel_test.cpp)
 target_link_libraries(wdsp_channel_test PRIVATE aethercore)
 add_test(NAME wdsp_channel_test COMMAND wdsp_channel_test)
 
+# Measures RX group delay against bandpass FIR length, and what minimum phase
+# costs in notch depth. A measurement harness, not a gate: it prints figures
+# and fails only if a measurement could not be taken. Not wired into ctest --
+# it opens nine WDSP channels and is run by hand when the latency question
+# comes up again.
+add_executable(wdsp_group_delay_test tests/wdsp_group_delay_test.cpp)
+target_link_libraries(wdsp_group_delay_test PRIVATE aethercore)
+
 # Socket-free shared-pool admission and injected receiver lifetime tests. These
 # foundations are compiled/tested even when the optional RTL USB driver is off.
 add_executable(wdsp_channel_reservation_test tests/wdsp_channel_reservation_test.cpp)
