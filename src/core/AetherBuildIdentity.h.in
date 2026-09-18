@@ -1,0 +1,19 @@
+// GENERATED — do not edit. Written by cmake/AetherBuildIdentity.cmake at BUILD
+// time, not configure time, so `cmake --build` after a new commit updates it
+// without re-running cmake. The old AETHER_GIT_SHA was a configure-time capture
+// and the About dialog's own tooltip admitted it went stale.
+#pragma once
+
+// `git describe --tags --always --dirty`, e.g. "v26.9.3-68-g7e841682" or, on a
+// release build, the bare tag "v26.9.3". Carries the release baseline AND the
+// hash in one token, which is the whole point.
+#define AETHER_BUILD_DESCRIBE           "@AETHER_BUILD_DESCRIBE@"
+#define AETHER_BUILD_SHA                "@AETHER_BUILD_SHA@"
+#define AETHER_BUILD_BASELINE           "@AETHER_BUILD_BASELINE@"
+#define AETHER_BUILD_COMMITS_SINCE_TAG  @AETHER_BUILD_COMMITS_SINCE_TAG@
+#define AETHER_BUILD_DIRTY              @AETHER_BUILD_DIRTY@
+
+// True only for a clean, tagged release. The status-bar indicator hides on
+// this, so it is silent for users and visible exactly when someone is running
+// something unofficial.
+#define AETHER_BUILD_IS_RELEASE         @AETHER_BUILD_IS_RELEASE@

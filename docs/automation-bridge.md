@@ -4475,7 +4475,7 @@ still a separate radiocert task.
 
 | Verb | Aliases | Description |
 |---|---|---|
-| `ping` | — | liveness check → app + version + whether a token is required |
+| `ping` | — | liveness check → app + version + build identity + whether a token is required |
 | `verbs` | — | list every bridge verb with aliases and help (this table) |
 | `dumpTree` | — | serialize the full widget tree as JSON |
 | `floors` | — | per-pan measured noise + display floor (dBm) |

@@ -2015,6 +2015,33 @@ if(Git_FOUND)
     endif()
 endif()
 target_compile_definitions(AetherSDR PRIVATE AETHER_GIT_SHA="${AETHER_GIT_SHA}")
+
+# ---- Build identity, captured at BUILD time -------------------------------
+# The AETHER_GIT_SHA above is a CONFIGURE-time capture, so `cmake --build`
+# after a new commit keeps the previous value -- a staleness the About
+# dialog's own tooltip already admits to. This target re-evaluates on every
+# build and writes a generated header. configure_file() only rewrites when
+# the content changes, so an unchanged HEAD costs nothing.
+#
+# `git describe --tags --always --dirty` carries the release baseline AND the
+# hash in one token ("v26.9.3-68-g7e841682"), which answers both halves of
+# "what am I running" at once.
+set(AETHER_BUILD_ID_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated/AetherBuildIdentity.h")
+add_custom_target(aether_build_identity ALL
+    BYPRODUCTS "${AETHER_BUILD_ID_HEADER}"
+    COMMAND ${CMAKE_COMMAND}
+        -DAETHER_SRC_DIR=${CMAKE_SOURCE_DIR}
+        -DAETHER_IN_FILE=${CMAKE_SOURCE_DIR}/src/core/AetherBuildIdentity.h.in
+        -DAETHER_OUT_FILE=${AETHER_BUILD_ID_HEADER}
+        -P ${CMAKE_SOURCE_DIR}/cmake/AetherBuildIdentity.cmake
+    COMMENT "Capturing build identity (git describe)"
+    VERBATIM)
+add_dependencies(AetherSDR aether_build_identity)
+target_include_directories(AetherSDR PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
+if(TARGET aethercore)
+    add_dependencies(aethercore aether_build_identity)
+    target_include_directories(aethercore PUBLIC "${CMAKE_CURRENT_BINARY_DIR}/generated")
+endif()
 if(Git_FOUND AND _aether_git_sha_rv EQUAL 0 AND NOT "${_aether_git_sha_out}" STREQUAL "")
     message(STATUS "Build SHA: ${AETHER_GIT_SHA}")
 else()

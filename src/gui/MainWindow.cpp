@@ -8,6 +8,7 @@
 //     guide: docs/architecture/mainwindow-decomposition.md
 // ─────────────────────────────────────────────────────────────────────────────
 
+#include "AetherBuildIdentity.h"   // generated at build time
 #include "MainWindow.h"
 
 #include "MainWindowHelpers.h"
@@ -6070,6 +6071,36 @@ void MainWindow::buildUI()
     hbox->addWidget(timeStack);
 
     statusBar()->addWidget(m_statusBarContainer, 1);
+
+#if !AETHER_BUILD_IS_RELEASE
+    // Build identity, permanent and right-aligned. SILENT ON A RELEASE BUILD --
+    // AETHER_BUILD_IS_RELEASE is true only for a clean, tagged checkout, so an
+    // end user never sees this and anyone running something unofficial always
+    // does. That is the case where "which build is this?" actually gets asked:
+    // a local integration branch and origin/main both report version 26.9.3
+    // while differing materially in behaviour.
+    //
+    // Added as a permanent widget in its own right, NOT into m_statusBarContainer:
+    // that container's contents move in and out of permanent status as temporary
+    // messages come and go (see MainWindow_Wiring.cpp), and this must not join
+    // that dance.
+    {
+        auto* buildLbl = new QLabel(QStringLiteral(AETHER_BUILD_DESCRIBE));
+        buildLbl->setObjectName(QStringLiteral("buildIdentityLabel"));
+        // ThemeManager, not setStyleSheet directly -- the theme ratchet.
+        AetherSDR::ThemeManager::instance().applyStyleSheet(
+            buildLbl, QStringLiteral("QLabel { color: #6a8090; font-size: 10px; }"));
+        buildLbl->setToolTip(
+            QStringLiteral("Build %1\nBaseline %2 + %3 commit(s)%4\n"
+                           "Captured at build time, so it cannot go stale.")
+                .arg(QStringLiteral(AETHER_BUILD_SHA),
+                     QStringLiteral(AETHER_BUILD_BASELINE),
+                     QString::number(AETHER_BUILD_COMMITS_SINCE_TAG),
+                     AETHER_BUILD_DIRTY ? QStringLiteral(", uncommitted changes")
+                                        : QString()));
+        statusBar()->addPermanentWidget(buildLbl);
+    }
+#endif
     wireStatusBarMessages();
     updateStatusBarMinimumWidth();
     updateBandStackIndicator();

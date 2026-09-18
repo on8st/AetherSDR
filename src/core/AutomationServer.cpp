@@ -1,3 +1,4 @@
+#include "AetherBuildIdentity.h"   // generated at build time; see cmake/AetherBuildIdentity.cmake
 #include "core/DroopCalibration.h"
 #include "AutomationServer.h"
 #include "core/CtcssTones.h"
@@ -3038,13 +3039,27 @@ const std::vector<AutomationServer::VerbSpec>& AutomationServer::verbRegistry()
                          std::move(parse), std::move(dispatch)});
         };
 
-        add("ping", {}, "liveness check → app + version + whether a token is required",
+        add("ping", {}, "liveness check → app + version + build identity + whether a token is required",
             parseNothing,
             [](AutomationServer& self, A&, QLocalSocket*) {
+                // `version` alone cannot distinguish two builds that matter:
+                // origin/main and a local integration branch both answer
+                // "26.9.3" while differing by ~19 dB in their HL2 dBm
+                // conversion. A harness that pre-registers the build it
+                // measured through needs more than a release string.
+                const QJsonObject build{
+                    {QStringLiteral("describe"), QStringLiteral(AETHER_BUILD_DESCRIBE)},
+                    {QStringLiteral("sha"), QStringLiteral(AETHER_BUILD_SHA)},
+                    {QStringLiteral("baseline"), QStringLiteral(AETHER_BUILD_BASELINE)},
+                    {QStringLiteral("commitsSinceTag"), AETHER_BUILD_COMMITS_SINCE_TAG},
+                    {QStringLiteral("dirty"), AETHER_BUILD_DIRTY},
+                    {QStringLiteral("isRelease"), AETHER_BUILD_IS_RELEASE},
+                };
                 return QJsonObject{
                     {QStringLiteral("ok"), true},
                     {QStringLiteral("app"), QStringLiteral("AetherSDR")},
                     {QStringLiteral("version"), QCoreApplication::applicationVersion()},
+                    {QStringLiteral("build"), build},
                     {QStringLiteral("authRequired"), !self.m_authToken.isEmpty()},
                     {QStringLiteral("readOnly"), self.m_readOnly},
                 };
