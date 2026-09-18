@@ -178,8 +178,9 @@ public:
     // and pairs the two; this is only the reading.
     //
     // NOT CALIBRATED. dBFS here is referred to the wire's full scale, not to
-    // anything at the antenna — see Hl2DbReference, whose fullScaleDbm is 0.0
-    // with isCalibrated() false.
+    // anything at the antenna — see Hl2DbReference, whose fullScaleDbm is
+    // DERIVED from the AD9866 datasheet rather than measured, which is why
+    // isCalibrated() is still false.
     //
     // SAMPLED ON THE DSP THREAD, at the one instant the value means something:
     // immediately after a block has been processed, in the same place the

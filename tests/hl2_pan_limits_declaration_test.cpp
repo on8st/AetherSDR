@@ -144,9 +144,9 @@ int main(int argc, char** argv)
     // day a per-unit fullScaleDbm is populated the declaration follows it and
     // this assertion keeps holding". It does not, and aethersdr-agent showed
     // why on #5726: production reads the BACKEND's m_dbRef, while the
-    // right-hand side here is a default-constructed Hl2DbReference{} whose
-    // m_fullScaleDbm is 0.0 by definition. On the day a measurement lands the
-    // two sides diverge and this FAILS.
+    // right-hand side here is a default-constructed Hl2DbReference{}, which
+    // is unmeasured by definition. On the day a measurement lands on the
+    // backend's instance the two sides diverge and this FAILS.
     //
     // Reading the reference off the backend instance would make the original
     // claim true. m_dbRef is private with no accessor, and inventing a test
@@ -162,15 +162,17 @@ int main(int argc, char** argv)
     check(caps.dbmAxisIsCalibrated() == hl2::Hl2DbReference{}.isCalibrated(),
           "and the accessor reports the declared field, not its absent default");
     check(!caps.dbmAxisIsCalibrated(),
-          "and today that means UNCALIBRATED — no per-unit fullScaleDbm exists");
+          "and today that means UNCALIBRATED — fullScaleDbm is DERIVED from "
+          "the AD9866 datasheet, and a derivation is not a measurement");
 
     // WHAT THESE THREE CANNOT SEE, said plainly because this file's own thesis
     // is that a test carrying its own copy of the truth cannot detect the
     // declaration and the code diverging.
     //
-    // Hl2DbReference{}.isCalibrated() is `m_fullScaleDbm != 0.0` on a
-    // default-constructed reference, so it is unconditionally false. Comparing
-    // the declaration against it therefore compares false with false: replace
+    // Hl2DbReference{}.isCalibrated() reports whether setFullScaleDbm was
+    // called, so on a default-constructed reference it is unconditionally
+    // false. Comparing the declaration against it compares false with false:
+    // replace
     // `amplitude.calibratedDbm = m_dbRef.isCalibrated()` in
     // Hl2Backend::capabilities() with a literal `false` and every assertion
     // above still passes. So "the day a per-unit fullScaleDbm is populated the

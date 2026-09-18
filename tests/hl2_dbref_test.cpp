@@ -28,18 +28,100 @@ int main()
 {
     Hl2DbReference ref;
 
-    // Uncalibrated by default: reports dBFS unchanged, exactly as this backend
-    // did before the type existed. No silent recalibration.
-    check(!ref.isCalibrated(), "defaults to uncalibrated");
-    check(near(ref.toDbm(-73.0), -73.0),
-          "uncalibrated pass-through at the default gain is identity");
-    check(near(ref.offsetDb(), 0.0), "uncalibrated offset at the default gain is zero");
+    // ---------------------------------------------------------------
+    // THE ABSOLUTE ANCHOR
+    //
+    // The four assertions this block replaces were a deliberate tripwire, not
+    // stale expectations. They said: this axis is dBFS wearing a dBm label, we
+    // know it, and nothing may quietly change that. One of them guarded the
+    // exact regression that got the absolute form REVERTED once -- "default
+    // gain leaves the displayed floor exactly where it was".
+    //
+    // The tripwire is crossed ON PURPOSE, and what makes that legitimate is the
+    // thing the revert was missing: kFullScaleDbmAtZeroGain is DERIVED from the
+    // AD9866 datasheet and the HL2's own input network rather than being a
+    // second arbitrary number. The floor still moves. It now moves onto a
+    // figure that can be checked.
+    //
+    // If this block ever fails, the question is not "has the arithmetic
+    // drifted" but "has the DERIVATION been falsified" -- and the answer
+    // belongs beside kFullScaleDbmAtZeroGain, not here.
+    // ---------------------------------------------------------------
+    check(near(Hl2DbReference::kFullScaleDbmAtZeroGain, 0.97, 5e-3),
+          "full scale at 0 dB LNA gain is the derived +0.97 dBm -- 2.0 Vpp "
+          "differential into 400 ohm is 1.25 mW, and the matched input "
+          "transformer conserves power");
+    check(near(ref.fullScaleDbm(), Hl2DbReference::kFullScaleDbmAtZeroGain),
+          "a fresh reference carries the derived figure, not 0.0");
 
-    // The regression this guards: subtracting the gain ABSOLUTELY rather than
-    // relative to the reference moved the whole displayed floor by 20 dB.
+    // DERIVED IS NOT CALIBRATED, and this pair is what keeps the two apart.
+    // Moving the default off 0.0 while isCalibrated() was still
+    // `m_fullScaleDbm != 0.0` would flip the predicate TRUE for a radio nobody
+    // has ever measured -- and Hl2Backend::capabilities() publishes it as
+    // PanAmplitudeModel::calibratedDbm, which licenses comparing this radio's
+    // levels with another station's. The derivation does not license that; a
+    // measurement does. NOTHING WAS MEASURED FOR THIS CHANGE.
+    check(!ref.isCalibrated(),
+          "a derived default is NOT a calibration -- nothing has measured this "
+          "radio");
+
+    // ...and the setter is the only thing that changes the answer, which is
+    // what makes the predicate mean PROVENANCE rather than "a number is
+    // present". Both directions are pinned, because a value comparison gets
+    // each of them wrong in turn.
+    {
+        Hl2DbReference measured;
+        measured.setFullScaleDbm(Hl2DbReference::kFullScaleDbmAtZeroGain);
+        check(measured.isCalibrated(),
+              "applying a measurement calibrates it -- EVEN WHEN THE MEASURED "
+              "FIGURE EQUALS THE DERIVED ONE, which is why this is a flag and "
+              "not a comparison against the constant");
+
+        Hl2DbReference elsewhere;
+        elsewhere.setFullScaleDbm(0.0);
+        check(elsewhere.isCalibrated(),
+              "and a measurement of 0.0 dBm calibrates it too -- the old "
+              "`!= 0.0` predicate got this one wrong in the other direction");
+    }
+
+    // P(dBm) = dBFS + fullScale - Glna, ABSOLUTELY. The relative form -- which
+    // is what this replaces -- would give fullScale + (reference - live), i.e.
+    // +0.97 at the default gain, so these two assertions fail if offsetDb()
+    // goes back to it.
     ref.setLnaGainDb(Hl2DbReference::kDefaultLnaGainDb);
-    check(near(ref.toDbm(-120.0), -120.0),
-          "default gain leaves the displayed floor exactly where it was");
+    check(near(ref.offsetDb(),
+               Hl2DbReference::kFullScaleDbmAtZeroGain
+                   - Hl2DbReference::kDefaultLnaGainDb),
+          "offset at the default gain is fullScale - gain, not fullScale plus a "
+          "referral that cancels");
+    check(near(ref.toDbm(-100.0), -100.0 + 0.97 - 20.0, 5e-3),
+          "-100 dBFS at the default 20 dB of gain reads -119.03 dBm");
+
+    // THE STEP, ASSERTED SO IT CANNOT ARRIVE SILENTLY. Before this change
+    // toDbm() was the identity at the default gain; it is now 19.03 dB lower,
+    // and the shift is the same at EVERY gain because both forms subtract the
+    // live gain.
+    check(near(Hl2DbReference::kFullScaleDbmAtZeroGain
+                   - Hl2DbReference::kDefaultLnaGainDb,
+               -19.03, 5e-3),
+          "the displayed floor drops 19.03 dB from the old identity mapping");
+    for (const double gain : {-12.0, 0.0, 20.0, 48.0}) {
+        Hl2DbReference stepped;
+        stepped.setLnaGainDb(gain);
+        const double oldOffset = Hl2DbReference::kDefaultLnaGainDb - gain;  // the relative form
+        check(near(stepped.offsetDb() - oldOffset,
+                   Hl2DbReference::kFullScaleDbmAtZeroGain
+                       - Hl2DbReference::kDefaultLnaGainDb),
+              "the step from the old relative form is the SAME at every gain");
+    }
+
+    // AND AT 0 dB GAIN THE CONSTANT IS THE WHOLE OFFSET, which is what makes it
+    // checkable against a signal generator without any arithmetic.
+    ref.setLnaGainDb(0.0);
+    check(near(ref.toDbm(0.0), Hl2DbReference::kFullScaleDbmAtZeroGain),
+          "full scale at 0 dB gain reads exactly the derived figure");
+
+    ref.setLnaGainDb(Hl2DbReference::kDefaultLnaGainDb);
 
     // A fixed antenna signal. Raising the LNA by 20 dB raises the digitised
     // level by 20 dB -- and must NOT change the reported strength.
@@ -138,21 +220,45 @@ int main()
     agc.setFullScaleDbm(-60.0);
     check(near(agc.agcCeilingDb(kDefaultThresholdUnits), beforeCalibration),
           "calibrating the display does not move the AGC ceiling");
-    check(near(agc.offsetDb(), -60.0),
+    // ABSOLUTE, so at the default 20 dB of gain a -60 dBm full scale is -80,
+    // not -60. The assertion above is the one carrying the meaning -- that
+    // calibrating the display leaves the AGC ceiling untouched -- and it still
+    // passes, which is the point: the two terms stay separate even though one
+    // of them changed form.
+    check(near(agc.offsetDb(), -60.0 - Hl2DbReference::kDefaultLnaGainDb),
           "...while it does move the display offset");
 
-    // Compatibility: preserve the pre-change reference, offset and AGC
-    // ceiling for every documented stored gain, including values above +19.
+    // Compatibility, for every documented stored gain including values above
+    // +19. THE GAIN RANGE AND THE DEFAULT ARE UNCHANGED BY THIS PR -- this is
+    // the absolute anchor only, and kLnaGainMaxDb still publishes +48 exactly
+    // as #5752 left it.
     check(Hl2DbReference::kDefaultLnaGainDb == 20.0,
           "fresh profiles retain the existing +20 dB reference");
+    check(AetherSDR::hl2::kLnaGainMaxDb == 48,
+          "the documented six-bit range is untouched -- the single-unit fold "
+          "above code 31 is a SEPARATE question and #5752 deliberately kept "
+          "this at 48");
     for (int stored = -12; stored <= 48; ++stored) {
         Hl2DbReference after;
         const auto seed = AetherSDR::hl2::connectLna(
             true, true, stored, false, 0, AetherSDR::hl2::kLnaDefaultGainDb,
             AetherSDR::hl2::kLnaGainMinDb, AetherSDR::hl2::kLnaGainMaxDb);
         after.setLnaGainDb(seed.liveDb);
+
+        // THE DISPLAY MOVES, by the same constant step for every stored value.
+        // Nobody is singled out and nobody is left behind.
         const double oldOffset = 20.0 - stored;
-        check(near(after.offsetDb(), oldOffset), "stored gain preserves the old display reference");
+        check(near(after.offsetDb() - oldOffset,
+                   Hl2DbReference::kFullScaleDbmAtZeroGain
+                       - Hl2DbReference::kDefaultLnaGainDb),
+              "every stored gain's display reference moves by the same step");
+        check(near(after.offsetDb(),
+                   Hl2DbReference::kFullScaleDbmAtZeroGain - stored),
+              "and lands on fullScale - storedGain, absolutely");
+
+        // THE AGC DOES NOT MOVE AT ALL. lnaOffsetDb() stays relative and
+        // fullScaleDbm never enters the ceiling, so what the operator HEARS is
+        // bit-for-bit what it was before this PR, for every stored gain.
         check(near(after.agcCeilingDb(65), 39.0 + oldOffset),
               "stored gain preserves the old AGC ceiling at 65");
     }

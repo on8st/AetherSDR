@@ -984,10 +984,11 @@ bool Hl2Backend::openReceiverDsp(int ddc, std::string* error)
             [this, ui](const std::vector<float>& bins) {
         if (!m_ids.byUi(ui))
             return;
-        // dBFS -> dBm through the one object that owns the reference. With
-        // an uncalibrated fullScaleDbm this is a pure -lnaGain shift, which
-        // is the part that is exactly right: it holds the trace still across
-        // a gain change instead of letting the whole display jump.
+        // dBFS -> dBm through the one object that owns the reference. The
+        // shift is fullScaleDbm - lnaGain, absolutely: the gain term holds the
+        // trace still across a gain change, and the full-scale term is a
+        // DERIVED anchor (Hl2DbReference::kFullScaleDbmAtZeroGain), not a
+        // measurement -- isCalibrated() is false and says so.
         //
         // The reference is SHARED because the LNA it describes is shared —
         // one AD9866 behind every DDC — so a gain change moves all four
@@ -1747,16 +1748,18 @@ RadioCapabilities Hl2Backend::capabilities() const
     // THE Y AXIS IS dBFS WEARING A dBm LABEL, and this says so rather than
     // letting the label stand for a calibration that does not exist.
     //
-    // Not "the HL2 cannot be calibrated" — it is that nothing on this radio
-    // reports what 0 dBFS is worth at the antenna, and no HL2 oracle states a
-    // figure for it. It is a per-unit property of the board, the ADC reference
-    // and the front end, so it can only come from a measurement against a
-    // reference source that has never been made on this station. Until it is,
-    // Hl2DbReference::fullScaleDbm stays 0.0 and isCalibrated() is false.
+    // Not "the HL2 cannot be calibrated", and no longer "no figure exists"
+    // either. Hl2DbReference::fullScaleDbm now carries a DERIVED anchor from
+    // the AD9866 datasheet and the HL2's input network, so the dBm axis sits on
+    // something checkable rather than on zero. WHAT IS STILL MISSING IS THE
+    // MEASUREMENT: nothing on this station has read a known level into the
+    // antenna port at a known applied gain, and isCalibrated() reports exactly
+    // that — whether setFullScaleDbm was called, not whether a number is
+    // present. Nothing in src/ calls it, so this stays false.
     //
-    // Read from that object rather than hardcoded false: the day a per-unit
-    // fullScaleDbm is populated, the declaration follows it instead of having
-    // to be remembered. The numbers remain internally consistent — a 3 dB
+    // Read from that object rather than hardcoded false: the day a measurement
+    // is applied, the declaration follows it instead of having to be
+    // remembered. The numbers remain internally consistent — a 3 dB
     // stronger signal still reads 3 dB higher — so what this denies is
     // COMPARISON: a level from this radio must not be published as a spot, held
     // against another station's report, or used as an absolute threshold.
@@ -5190,8 +5193,8 @@ IRadioBackend::HealthSnapshot Hl2Backend::healthSnapshot() const
     // NEITHER IS CALIBRATED, and they do not even share a scale: the slice
     // figure is dB relative to WIRE full scale, the DDC between the two
     // measurement points carries an unquantified processing gain, and
-    // Hl2DbReference::fullScaleDbm is 0.0 with isCalibrated() false, so nothing
-    // here is antenna-referred. The labels say "uncalibrated" because that is
+    // Hl2DbReference::fullScaleDbm is DERIVED rather than measured with
+    // isCalibrated() false, so nothing here is antenna-referred. The labels say "uncalibrated" because that is
     // the whole of what can be claimed. What survives the missing calibration
     // is the PAIRING itself — the pairing row below states a relationship, and
     // a relationship needs no absolute reference.

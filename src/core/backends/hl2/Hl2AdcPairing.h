@@ -43,8 +43,9 @@
 // NOTHING HERE IS CALIBRATED, and the two sides are not even on a common
 // scale. The slice peak is dB relative to WIRE full scale; the DDC between the
 // two measurement points carries a processing gain nobody here has quantified;
-// and Hl2DbReference::fullScaleDbm defaults to 0.0 with isCalibrated() false,
-// so no reading in this file is antenna-referred. What survives the missing
+// and Hl2DbReference::fullScaleDbm now carries a DERIVED full-scale figure
+// with isCalibrated() still false -- derived is not measured -- so no reading
+// in this file is antenna-referred on any authority worth quoting. What survives the missing
 // calibration is the PAIRING: "the converter is overloading while this slice
 // sits 40 dB below full scale" is true, useful, and contains no absolute
 // reference at all. Labels must claim exactly that much and no more.
