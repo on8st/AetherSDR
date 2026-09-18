@@ -1822,6 +1822,22 @@ QVariantMap SpectrumWidget::traceDebugSnapshot()
     const auto vectorStats = [this](const QVector<float>& bins) {
         QVariantMap stats;
         stats[QStringLiteral("count")] = bins.size();
+        // LOCAL BENCH PATCH (hl2-lab). The four scalars below are a REDUCTION:
+        // 1024 bins in, min/max/floor out, and the array is discarded here so
+        // no client can ever see it. That is fine for comparing display sources
+        // -- what tracedebug was built for -- and useless for measurement: a
+        // full-band survey at 384 kHz spans delivers 0.4% of what was computed,
+        // and a 50 dB spur survives the reduction while a skirt or a broad hump
+        // does not. Filed upstream as #5806; carried locally meanwhile.
+        {
+            QVariantList vals;
+            vals.reserve(bins.size());
+            for (float v : bins) {
+                vals.append(std::isfinite(v) ? static_cast<double>(v)
+                                             : QVariant());
+            }
+            stats[QStringLiteral("values")] = vals;
+        }
         if (bins.isEmpty()) {
             stats[QStringLiteral("finiteCount")] = 0;
             stats[QStringLiteral("minDbm")] = -1000.0;
