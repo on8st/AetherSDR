@@ -17,6 +17,7 @@
 #include "core/TxKeyingMarker.h"
 #include "TxInputKeyEvent.h"
 #include "core/IambicKeyer.h"
+#include "models/PanZoomModeGate.h"
 
 #include <QApplication>
 #include <QKeyEvent>
@@ -1536,11 +1537,17 @@ void MainWindow::togglePanZoomModeForPan(const QString& panId, bool segmentZoom)
     // exclusion is likewise the radio's own (it clears the other flag and
     // broadcasts both), per-pan state is naturally per-pan, and a failed send
     // can't invert anything because nothing is latched client-side.
-    if (panId.isEmpty()) {
-        return;
-    }
-    auto* pan = m_radioModel.panadapter(panId);
-    if (!pan) {
+    // THE CAPABILITY GATE THE BUTTONS HONOUR, honoured here too. Reaching this
+    // function by keyboard shortcut, MIDI, FlexControl, RC28 or the automation
+    // bridge used to skip it entirely, because only SpectrumWidget's "B"/"S"
+    // buttons were ever disabled -- so a grayed-out button and a live keystroke
+    // did opposite things on a radio that answers neither. One predicate now
+    // decides both; see PanZoomModeGate.h, including why refusing this cannot
+    // withhold anything that transmits.
+    auto* pan = panId.isEmpty() ? nullptr : m_radioModel.panadapter(panId);
+    if (!panZoomModeWritable(m_radioModel.isConnected(),
+                             m_radioModel.usesFlexCommandPlane(),
+                             /*panKnown=*/pan != nullptr)) {
         return;
     }
     const bool on = segmentZoom ? !pan->segmentZoomOn() : !pan->bandZoomOn();
@@ -1591,9 +1598,6 @@ void MainWindow::zoomActivePanadapter(double factor)
 
 void MainWindow::setPanZoomMode(bool segmentZoom, bool enable)
 {
-    if (!m_radioModel.isConnected()) {
-        return;
-    }
     auto* s = activeSlice();
     if (!s) {
         return;
@@ -1601,11 +1605,14 @@ void MainWindow::setPanZoomMode(bool segmentZoom, bool enable)
     const QString panId = !s->panId().isEmpty()
         ? s->panId()
         : (m_panStack ? m_panStack->activePanId() : m_radioModel.panId());
-    if (panId.isEmpty()) {
-        return;
-    }
-    auto* pan = m_radioModel.panadapter(panId);
-    if (!pan) {
+    // Same gate as togglePanZoomModeForPan above, and it must be the same one:
+    // this is the explicit-state form of the identical wire text, reached from
+    // the FlexControl and RC28 wheel handlers. It checked isConnected() and a
+    // pan id and never the capability.
+    auto* pan = panId.isEmpty() ? nullptr : m_radioModel.panadapter(panId);
+    if (!panZoomModeWritable(m_radioModel.isConnected(),
+                             m_radioModel.usesFlexCommandPlane(),
+                             /*panKnown=*/pan != nullptr)) {
         return;
     }
     const bool current = segmentZoom ? pan->segmentZoomOn() : pan->bandZoomOn();
