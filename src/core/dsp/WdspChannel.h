@@ -431,8 +431,9 @@ public:
     static uint64_t outstandingAllocationsForTest() noexcept;
 
     // Shared FFTW-planner serialization guard. Anything outside this class
-    // that calls fftw_plan_*/fftw_destroy_plan directly (today: AnanSpectrum,
-    // off the real-time path) must hold this for the call, or it can race a
+    // that calls fftw_plan_*/fftw_destroy_plan directly (today: AnanSpectrum
+    // and Hl2Spectrum -- the latter since #5424, which this comment predates;
+    // both off the real-time path) must hold this for the call, or it can race a
     // concurrent WdspChannel::create()/reconfigure() on a DIFFERENT channel
     // and corrupt FFTW's process-global plan cache -- the same reason
     // open()/close() and every control call below already take it. Held only
