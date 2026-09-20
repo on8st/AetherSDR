@@ -400,12 +400,60 @@ void Hl2RxDsp::installChannel(RebuildResult result)
     // Hl2Backend), so without this a sample-rate change publishes the dive with
     // no mute anywhere near it.
     armMeterSettle();
+    // The group delay belongs to the channel that was just installed — a new
+    // rate changes how many input samples it is, and a mode carried across the
+    // swap can change how many filter cores are in series. Re-derived here, not
+    // carried over, for the same reason the meter settle is.
+    armPanadapterAlignment();
 }
 
 void Hl2RxDsp::armMeterSettle()
 {
     m_meterSettleBlocks = sMeterSettleBlocks(m_config.inputSampleRateHz,
                                              m_config.dspBlockSize);
+}
+
+void Hl2RxDsp::armPanadapterAlignment()
+{
+    std::size_t want = 0;
+    if (m_panAlignOn && m_channel && m_config.inputSampleRateHz > 0) {
+        // The group delay is quoted at WDSP's DSP rate; the delay line runs at
+        // the INPUT rate, which is what processIqBlock() is handed. Converted
+        // through seconds rather than a rate ratio so it stays right if the two
+        // ever stop dividing evenly.
+        const double seconds = m_channel->filterGroupDelaySeconds();
+        const double samples = seconds * static_cast<double>(m_config.inputSampleRateHz);
+        if (samples > 0.0)
+            want = static_cast<std::size_t>(std::llround(samples));
+    }
+    if (want == m_panDelaySamples && m_panDelayRing.size() == want)
+        return;   // nothing moved; keep the samples already in flight
+    m_panDelaySamples = want;
+    // ZEROES, not the old contents. A re-arm follows a geometry or mode change,
+    // and the samples held from before it were taken at a different rate or
+    // through a different chain; replaying them would draw a span of spectrum
+    // that never existed. The cost is one delay-length of empty display at the
+    // moment of a rebuild, which already tears the waterfall.
+    m_panDelayRing.assign(want, std::complex<float>{0.0f, 0.0f});
+    m_panDelayWrite = 0;
+}
+
+void Hl2RxDsp::setPanadapterAudioAlignment(bool on)
+{
+    if (m_panAlignOn == on)
+        return;
+    m_panAlignOn = on;
+    armPanadapterAlignment();
+}
+
+double Hl2RxDsp::panadapterAudioSkewMs() const noexcept
+{
+    if (!m_channel || m_config.inputSampleRateHz <= 0)
+        return 0.0;
+    const double filterSeconds = m_channel->filterGroupDelaySeconds();
+    const double heldSeconds = static_cast<double>(m_panDelaySamples)
+                               / static_cast<double>(m_config.inputSampleRateHz);
+    return (filterSeconds - heldSeconds) * 1000.0;
 }
 
 void Hl2RxDsp::setNoiseBlanker(bool on, int level)
@@ -438,6 +486,12 @@ void Hl2RxDsp::setMode(WdspChannel::Mode mode)
     // it at the swap.
     if (canPushToChannel())
         m_channel->setMode(mode);
+    // AFTER the push, and unconditionally. The mode decides how many nc-tap
+    // cores run in series — one in SSB, two in AM/SAM, three in FM — so the
+    // alignment is wrong the moment the mode moves. armPanadapterAlignment()
+    // reads the mode back OFF THE CHANNEL, so a refused push leaves the delay
+    // matching the chain that is really running rather than the one requested.
+    armPanadapterAlignment();
 }
 
 void Hl2RxDsp::setFilter(double lowHz, double highHz)
@@ -650,6 +704,29 @@ void Hl2RxDsp::processIqBlock(const std::vector<std::complex<float>>& iq)
     for (std::size_t n = 0; n < iq.size(); ++n)
         m_conjugated[n] = std::conj(iq[n]);
 
+    // LATENCY MATCHING, off by default — see setPanadapterAudioAlignment() for
+    // why the default is off and what the two loops want. When it is off
+    // m_panDelaySamples is 0 and the spectrum sees m_conjugated directly, so
+    // the shipped path is untouched, not merely equivalent.
+    //
+    // Read-then-write on a ring of exactly m_panDelaySamples entries delays by
+    // exactly that many samples, and it costs one pass over the block whichever
+    // branch below runs. Applied HERE, above the frame-due test, because BOTH
+    // branches consume it: delaying only the transformed frames would leave the
+    // accumulator holding undelayed samples that the next due frame would mix
+    // across the seam.
+    const std::vector<std::complex<float>>* panIq = &m_conjugated;
+    if (m_panDelaySamples > 0) {
+        m_panDelayed.resize(m_conjugated.size());
+        for (std::size_t n = 0; n < m_conjugated.size(); ++n) {
+            m_panDelayed[n] = m_panDelayRing[m_panDelayWrite];
+            m_panDelayRing[m_panDelayWrite] = m_conjugated[n];
+            if (++m_panDelayWrite == m_panDelaySamples)
+                m_panDelayWrite = 0;
+        }
+        panIq = &m_panDelayed;
+    }
+
     // Panadapter: conjugated into the analytic convention Hl2Spectrum's fftshift
     // assumes. Fed the raw wire it drew the spectrum MIRRORED about the pan
     // centre — on 40 m that put FT8, which lives at 7.074..7.077, on screen at
@@ -677,14 +754,14 @@ void Hl2RxDsp::processIqBlock(const std::vector<std::complex<float>>& iq)
         // "Due" STAYS true until a frame actually completes: one EP6 block is
         // 126 samples and a frame is 1024, so a frame boundary can be up to one
         // block away even with a full window behind it.
-        if (m_spectrum->process(m_conjugated, m_bins) > 0) {
+        if (m_spectrum->process(*panIq, m_bins) > 0) {
             emit spectrumReady(m_bins);
             m_lastSpectrumMs = m_spectrumClock.elapsed();
         }
     } else {
         // Keep the window fed without paying for a transform. This is the whole
         // saving at a wide span: the FFT is skipped, not merely its emit.
-        m_spectrum->accumulate(m_conjugated);
+        m_spectrum->accumulate(*panIq);
     }
 
     // Audio: the RAW wire. See the note in the block loop below.

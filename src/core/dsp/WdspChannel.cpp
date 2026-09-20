@@ -811,6 +811,54 @@ double WdspChannel::minimumNotchWidthHz() const noexcept
            * (static_cast<double>(m_config.dspSampleRate) / 48000.0);
 }
 
+int WdspChannel::seriesFilterCores(Mode mode) noexcept
+{
+    switch (mode) {
+    case Mode::Wbfm:
+        // SetRXAMode()'s RXA_WBFM arm is the ONE place nbp0.p->run is cleared;
+        // nothing else in the chain is nc-tap for this mode.
+        return 0;
+    case Mode::Am:
+    case Mode::Sam:
+        // amd.p->run = 1 makes RXAbp1Set() run bp1, in series after nbp0.
+        return 2;
+    case Mode::Fm:
+        // nbp0, plus fmd->pde and fmd->paud inside xfmd().
+        return 3;
+    default:
+        return 1;
+    }
+}
+
+double WdspChannel::filterGroupDelaySamples() const noexcept
+{
+    if (m_config.direction != Direction::Receive || m_config.filterTaps <= 0) {
+        return 0.0;
+    }
+    const int cores = seriesFilterCores(m_config.mode);
+    if (cores <= 0) {
+        return 0.0;
+    }
+    return static_cast<double>(cores)
+           * (static_cast<double>(m_config.filterTaps) - 1.0) / 2.0;
+}
+
+double WdspChannel::filterGroupDelaySeconds() const noexcept
+{
+    if (m_config.dspSampleRate <= 0) {
+        return 0.0;
+    }
+    return filterGroupDelaySamples() / static_cast<double>(m_config.dspSampleRate);
+}
+
+std::size_t WdspChannel::filterTransformLength() const noexcept
+{
+    if (m_config.direction != Direction::Receive) {
+        return 0;
+    }
+    return 2 * m_config.dspBlockSize;
+}
+
 double WdspChannel::meter(Meter which) const noexcept
 {
     if (m_config.direction != Direction::Receive)

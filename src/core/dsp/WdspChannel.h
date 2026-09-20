@@ -403,6 +403,83 @@ public:
     // a function of filter length — 200 Hz at 2048 taps, 50 Hz at 8192 — so it
     // moves when Config::filterTaps does.
     [[nodiscard]] double minimumNotchWidthHz() const noexcept;
+
+    // ── Two derived geometries the chain is actually costed in ────────────
+    //
+    // Both are functions of the Config this channel was OPENED with, read back
+    // rather than mirrored, so they follow a reconfigure(). A caller that
+    // CACHES either one has to re-read it after anything that changes the tap
+    // count or the block size — see the note on filterGroupDelaySamples().
+
+    // How many `nc`-tap LINEAR-PHASE FIR cores this mode runs IN SERIES on the
+    // receive path, and therefore how many times the group delay below is paid.
+    //
+    // RXASetNC() (RXA.c) fans one `nc` out to six cores; the question here is
+    // how many of those xrxa() executes one after another:
+    //
+    //   * nbp0 — the receive passband filter, created `run, always runs`.
+    //     SetRXAMode() sets nbp0.p->run = 1 for every mode and clears it for
+    //     RXA_WBFM alone.
+    //   * bp1 — a SECOND nc-tap bandpass. RXAbp1Set() runs it when amd, snba,
+    //     emnr, anf or anr run, and SetRXAMode() sets amd.p->run for RXA_AM
+    //     and RXA_SAM. xrxa() calls xbandpass(bp1) after xnbp(nbp0), so the
+    //     two are in series.
+    //   * fmd->pde (de-emphasis) and fmd->paud (audio cutoff) — both
+    //     xfircore()'d inside xfmd(), and both given `nc` by RXASetNC().
+    //
+    // So 1 for SSB/CW/DSB/DIGU/DRM/SPEC, 2 for AM and SAM, 3 for FM, and 0 for
+    // WBFM, which runs none of them.
+    //
+    // Static because it is a property of the MODE, not of an open channel: a
+    // caller that wants to know what a mode will cost BEFORE switching to it
+    // needs this without a channel in hand.
+    [[nodiscard]] static int seriesFilterCores(Mode mode) noexcept;
+
+    // The chain's filter group delay, in samples at dspSampleRate.
+    //
+    // fir_bandpass() (fir.c) builds a linear-phase FIR centred at
+    // m = 0.5 * (N - 1), so one nc-tap core delays by exactly (nc - 1) / 2
+    // samples; seriesFilterCores() says how many run in series.
+    //
+    // WHAT IT IS FOR, and why it is on this class rather than derived at a call
+    // site: the panadapter does not pass through WDSP at all —
+    // Hl2RxDsp::processIqBlock() feeds Hl2Spectrum from its conjugated copy of
+    // the wire BEFORE the audio blocks reach this channel — so this is the
+    // amount by which what an operator HEARS lags what they SEE. Nothing
+    // compensates for it by default; Hl2RxDsp::setPanadapterAudioAlignment()
+    // is the mechanism that can, and it reads this.
+    //
+    // NOT the whole ear-latency budget. Transport jitter, the caller's own
+    // input-block buffering, WDSP's i/o buffering and the audio sink all sit
+    // outside it. It is the term that MOVES when Config::filterTaps or
+    // Config::mode does, which is the term a matching mechanism has to track.
+    //
+    // 0.0 on a transmit channel, on WBFM, and when the config carries no taps.
+    [[nodiscard]] double filterGroupDelaySamples() const noexcept;
+    [[nodiscard]] double filterGroupDelaySeconds() const noexcept;
+
+    // The FFTW transform length WDSP plans for EVERY partitioned-convolution
+    // filter core on this channel.
+    //
+    // firmin.c's create_fircore()/plan_fircore() plan with
+    // `fftw_plan_dft_1d(2 * a->size, ...)` under FFTW_PATIENT, and RXA.c builds
+    // every one of those cores with `size = ch[channel].dsp_size` — which is
+    // the third argument open() hands OpenChannel(), i.e. Config::dspBlockSize.
+    // Nothing else on the channel moves it: `nc` (Config::filterTaps) sets only
+    // how MANY plans are made, nfor = nc / size.
+    //
+    // WHY IT IS WORTH READING BACK RATHER THAN ASSUMING. FFTW wisdom is keyed
+    // on the transform, so two channels share their planning cost only when
+    // this number matches. A caller that scales dspBlockSize with the input
+    // rate gives every rate its own plan set and pays a first-ever measurement
+    // once per rate; one that holds dspBlockSize fixed pays it once. Which of
+    // those a caller does is invisible from its Config without this.
+    // tests/hl2_rxdsp_rate_test.cpp counts the distinct values.
+    //
+    // 0 on a transmit channel — TXA builds its cores on the same dsp_size, but
+    // this class has no transmit consumer for the number and an accessor that
+    // answered for a path nobody had checked would be a claim, not a readback.
+    [[nodiscard]] std::size_t filterTransformLength() const noexcept;
     // WDSP meter readout in dBFS-relative units. Meter is the RXA meter type
     // (0 = S peak, 1 = S average, 2 = ADC peak, 3 = ADC average, 4 = AGC gain).
     // Read-only and cheap — safe to call from a timer. Returns a large negative

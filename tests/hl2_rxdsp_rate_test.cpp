@@ -21,6 +21,9 @@
 #include <cmath>
 #include <complex>
 #include <cstdio>
+#include <iterator>
+#include <set>
+#include <string>
 #include <vector>
 
 using namespace AetherSDR::hl2;
@@ -95,6 +98,75 @@ static float demodPeakAt(int rateHz, std::size_t* outBlockSamples,
     return peak;
 }
 
+// ── How many FFTW transform lengths the four rates plan ─────────────────
+//
+// Every partitioned-convolution filter core WDSP builds on an RX channel is
+// planned at 2 * ch[].dsp_size under FFTW_PATIENT (firmin.c's plan_fircore,
+// through RXA.c which passes ch[].dsp_size as every core's `size`), and
+// ch[].dsp_size is the third argument WdspChannel::open() hands OpenChannel()
+// — i.e. WdspChannel::Config::dspBlockSize. FFTW wisdom is keyed on the
+// transform, so two channels share their planning cost only when that length
+// matches.
+//
+// Hl2RxDsp::buildChannel() holds the INPUT block at 1024 and scales the DSP
+// block DOWN with the rate, which gives each of the four rates its own
+// transform length and therefore its own first-ever planning cost. Holding the
+// DSP block and scaling the INPUT block UP instead — the same wall-clock span
+// per DSP pass either way — would give all four ONE length.
+//
+// COUNTED, NEVER TIMED. Wall-clock planning figures are machine- and
+// load-dependent (docs/HERMES.md §22.3's are 5-19x out against this lab's own
+// bench, upstream #5456), so a seconds assertion measures the machine. The
+// number of distinct transform lengths is a property of the geometry and is
+// the same on every host.
+namespace {
+
+// The geometry Hl2RxDsp::buildChannel() actually builds, read back off the
+// channel it opened rather than recomputed here.
+std::size_t shippedTransformLengthAt(int rateHz, std::string* err)
+{
+    Hl2RxDsp::Config cfg;
+    cfg.inputSampleRateHz = rateHz;
+    cfg.audioSampleRateHz = 24000;
+    cfg.dspBlockSize = 1024;
+    cfg.fftSize = 1024;
+    cfg.mode = WdspChannel::Mode::Usb;
+    cfg.blockForOutput = true;
+    Hl2RxDsp::RebuildResult r = Hl2RxDsp::buildChannel(cfg, false, 50);
+    if (!r.channel) {
+        if (err) *err = r.error;
+        return 0;
+    }
+    return r.channel->filterTransformLength();
+}
+
+// The inversion: dspBlockSize held at 1024 for every rate, inputBlockSize
+// scaled up so one DSP pass still consumes exactly one input block.
+//     dsp_insize = dsp_size * in_rate / dsp_rate   [WDSP channel.c]
+// which is 1024 * rate/48000 — so in_size must be the same, and the wall-clock
+// span per pass stays 21.3 ms as it is today.
+WdspChannel::Config invertedConfigAt(int rateHz)
+{
+    WdspChannel::Config wc;
+    wc.direction = WdspChannel::Direction::Receive;
+    wc.dspBlockSize = 1024;
+    wc.inputBlockSize = static_cast<std::size_t>(1024) *
+                        static_cast<std::size_t>(rateHz) / 48000u;
+    wc.inputSampleRate = rateHz;
+    wc.dspSampleRate = Hl2RxDsp::kWdspDspSampleRateHz;
+    wc.outputSampleRate = 24000;
+    wc.mode = WdspChannel::Mode::Usb;
+    wc.filterLowHz = 150.0;
+    wc.filterHighHz = 3000.0;
+    wc.agcMode = 3;
+    wc.maximumAgcGainDb = 39.0;
+    wc.filterTaps = Hl2RxDsp::kRxFilterTaps;
+    wc.blockForOutput = true;
+    return wc;
+}
+
+}  // namespace
+
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
@@ -142,6 +214,78 @@ int main(int argc, char** argv)
         const double spreadDb = 20.0 * std::log10(hi / lo);
         std::fprintf(stderr, "level spread across rates: %.1f dB\n", spreadDb);
         check(spreadDb < 6.0, "audio level is consistent across every IQ rate");
+    }
+
+    // ---- 5.4: one plan set per rate, or one plan set full stop ----
+    {
+        std::set<std::size_t> shipped;
+        for (const auto& r : rows) {
+            std::string err;
+            const std::size_t len = shippedTransformLengthAt(r.rateHz, &err);
+            if (len == 0) {
+                std::fprintf(stderr, "FAIL: %d Hz did not build: %s\n",
+                             r.rateHz, err.c_str());
+                ++g_failures;
+                continue;
+            }
+            std::fprintf(stderr, "%6d Hz in -> WDSP filter transform length %zu\n",
+                         r.rateHz, len);
+            shipped.insert(len);
+        }
+        // THE DEFECT: nothing is shared. Stated as "one per rate" rather than
+        // as the literal 4, so it still says the right thing if the rate list
+        // ever changes.
+        check(shipped.size() == std::size(rows),
+              "shipped geometry plans a DISTINCT transform length for every rate");
+
+        // And the inversion. Opened for real, not reasoned about: if WDSP's
+        // half-band input resampler could not take an 8192-sample input block
+        // against a 1024-sample DSP block, this is where it would say so.
+        std::set<std::size_t> inverted;
+        for (const auto& r : rows) {
+            std::string err;
+            auto ch = WdspChannel::create(invertedConfigAt(r.rateHz), &err);
+            if (!ch) {
+                std::fprintf(stderr, "FAIL: %d Hz inverted geometry: %s\n",
+                             r.rateHz, err.c_str());
+                ++g_failures;
+                continue;
+            }
+            // It must also DEMODULATE, or "one plan set" is bookkeeping about a
+            // chain that does not work. Same tone, same wire order, same
+            // threshold as the rate grid above.
+            const std::size_t inN = ch->config().inputBlockSize;
+            const std::size_t outN = ch->outputBlockSize();
+            std::vector<float> bi(inN), bq(inN), bl(outN), br(outN);
+            float peak = 0.0f;
+            const int blocks = r.rateHz / static_cast<int>(inN) / 2;   // ~0.5 s
+            long n = 0;
+            for (int b = 0; b < blocks; ++b) {
+                for (std::size_t k = 0; k < inN; ++k, ++n) {
+                    const double ph = 2.0 * kPi * 1000.0 * static_cast<double>(n)
+                                      / r.rateHz;
+                    bi[k] = 0.3f * static_cast<float>(std::cos(ph));
+                    bq[k] = 0.3f * static_cast<float>(-std::sin(ph));
+                }
+                if (ch->processIq(bi, bq, bl, br) != WdspChannel::ProcessResult::Ok)
+                    continue;
+                for (const float v : bl)
+                    peak = std::max(peak, std::abs(v));
+            }
+            std::fprintf(stderr,
+                         "%6d Hz inverted -> in_size %zu, dsp_size %zu, "
+                         "transform length %zu, audio peak %.5f\n",
+                         r.rateHz, inN, ch->config().dspBlockSize,
+                         ch->filterTransformLength(), static_cast<double>(peak));
+            check(peak > 0.01f,
+                  "the inverted geometry still demodulates at this rate");
+            inverted.insert(ch->filterTransformLength());
+        }
+        // WHAT INVERTING BUYS, measured the same way the defect was: one plan
+        // set for all four rates, so a crossing never meets an unplanned
+        // transform and the per-rate cold cost stops existing.
+        check(inverted.size() == 1,
+              "the inverted geometry plans ONE transform length for all rates");
     }
 
     if (g_failures == 0)

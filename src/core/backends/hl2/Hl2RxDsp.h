@@ -219,6 +219,69 @@ public:
     // holds across a sample-rate change without needing to be recomputed.
     Q_INVOKABLE void setSpectrumRateFps(int fps);
 
+    // ── Latency matching between the panadapter and the audio ─────────────
+    //
+    // THE DEFECT. processIqBlock() feeds Hl2Spectrum from its conjugated copy
+    // of the wire and feeds WdspChannel from the raw wire, and only the second
+    // of those passes through the RX filter chain. So a signal is DRAWN before
+    // it is HEARD, by the chain's full linear-phase group delay —
+    // WdspChannel::filterGroupDelaySamples(), which at kRxFilterTaps = 8192 and
+    // a 48 kHz DSP rate is 4095.5 samples: 85.3 ms in SSB/CW, 170.7 ms in
+    // AM/SAM where bp1 runs in series, 256.0 ms in FM. Nothing in the chain
+    // compensates, and nothing reports it.
+    //
+    // THE DEFAULT IS OFF, DELIBERATELY, AND THE DEFAULT IS THE ARGUMENT.
+    // Matching is not free and it is not obviously desirable. The operator
+    // closes two loops on this display and they want opposite things:
+    //
+    //   * ear-against-eye — watching a trace while listening to it. Wants the
+    //     two aligned; tolerates audio-LAGGING-video far better than the
+    //     reverse, which is the direction the defect already runs in.
+    //   * hand-against-eye — turning the VFO, dragging a span, placing a notch
+    //     and watching the panadapter answer. Wants the display as early as it
+    //     can be had. Delaying it puts 85-256 ms of dead time inside a control
+    //     loop the operator is closing by hand, which is where lag is least
+    //     forgiven.
+    //
+    // Only one of those can win, and the second is the one an operator is in
+    // most of the time. So the display keeps leading by default and this exists
+    // to be switched on where the first loop is what matters — and to make the
+    // skew a NUMBER rather than an accident. panadapterAudioSkewMs() reports it
+    // whether or not the delay is running.
+    //
+    // WHAT IT DOES NOT FIX. Only the term the filter contributes. Transport
+    // jitter, this class's own m_iqBuffer block quantisation, WDSP's i/o
+    // buffering and the audio sink are all outside it and none is reported by
+    // WdspChannel; expect a residual of roughly one DSP block. That residual is
+    // what tests/hl2_rxdsp_test.cpp measures rather than assumes.
+    //
+    // RE-ARMED, NOT COMPUTED ONCE. The delay follows the channel: a rebuild
+    // (installChannel) and a mode change (setMode) both re-read the group delay
+    // from the live channel. THIS IS THE HOOK A RUNTIME TAP-COUNT SETTER HAS TO
+    // REACH — a setter that changes filterTaps without coming back through
+    // here leaves an alignment configured against a group delay that no longer
+    // exists, which is a value nobody re-writes rather than a value nobody
+    // writes, and just as silent.
+    Q_INVOKABLE void setPanadapterAudioAlignment(bool on);
+    [[nodiscard]] bool panadapterAudioAlignmentEnabled() const noexcept
+    {
+        return m_panAlignOn;
+    }
+    // The delay ACTUALLY in force on the panadapter path, in input-rate
+    // samples. 0 when the alignment is off or no channel exists — which is the
+    // same readback discipline as appliedNoiseBlankerEnabled(): a request that
+    // could not be armed must not read back as armed.
+    [[nodiscard]] std::size_t panadapterAlignmentDelaySamples() const noexcept
+    {
+        return m_panDelaySamples;
+    }
+    // The skew that REMAINS between what is drawn and what is heard, in
+    // milliseconds, positive meaning audio lags the display. The filter's
+    // contribution minus whatever the delay line is holding back — so it is
+    // the full group delay with the alignment off and ~0 with it on, and it
+    // does not silently become a restatement of the request.
+    [[nodiscard]] double panadapterAudioSkewMs() const noexcept;
+
     // Impulse noise blanker, on the raw IQ ahead of the demodulator.
     //
     // THE ONLY NOISE BLANKER THIS RADIO HAS. The HL2 ships raw IQ and runs no
@@ -585,6 +648,10 @@ private:
     // arithmetic, called on the mute's release edge and on a channel install so
     // the two cannot drift apart. DSP thread only.
     void armMeterSettle();
+    // Size the panadapter delay line from the LIVE channel's group delay. One
+    // site for the arithmetic, called from installChannel() and setMode() and
+    // from the setter itself, so the three cannot drift apart. DSP thread only.
+    void armPanadapterAlignment();
 
     // May a control verb push at m_channel right now? False while a background
     // rebuild is outstanding — see beginRebuild() for why pushing then would
@@ -662,6 +729,19 @@ private:
     // the demodulator takes the raw wire. A member rather than a local: this
     // runs per IQ block on the I/O thread.
     std::vector<std::complex<float>> m_conjugated;
+    // Panadapter latency-matching delay line — see setPanadapterAudioAlignment().
+    // A plain ring at the INPUT rate: read-then-write delays by exactly its
+    // length, and the length is re-derived from the channel rather than stored
+    // as a duration, so it cannot outlive the geometry it was computed for.
+    // Empty and bypassed (m_panDelaySamples == 0) unless the alignment is on,
+    // which is what keeps the default path exactly as it was.
+    bool m_panAlignOn = false;
+    std::vector<std::complex<float>> m_panDelayRing;
+    std::size_t m_panDelaySamples = 0;
+    std::size_t m_panDelayWrite = 0;
+    // Delayed spectrum block, the ring's output. Separate from m_conjugated so
+    // the accumulate()/process() pair below still sees one contiguous span.
+    std::vector<std::complex<float>> m_panDelayed;
     std::vector<float> m_i, m_q;                    // deinterleaved input scratch
     std::vector<float> m_left, m_right;             // WdspChannel output scratch
     // Applied to m_left/m_right on the way into m_stereo. See DcBlocker above
