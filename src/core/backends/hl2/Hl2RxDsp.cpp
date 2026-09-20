@@ -615,13 +615,29 @@ void Hl2RxDsp::processIqBlock(const std::vector<std::complex<float>>& iq)
     std::size_t consumed = 0;
     while (m_iqBuffer.size() - consumed >= block) {
         if (m_audioMuted) {
-            // Clock the audio channel with silence rather than skipping it.
-            // Skipping would let the pipeline's contents go stale and emerge on
-            // unmute; feeding zeros keeps latency constant and guarantees that
-            // what comes out when transmit ends is silence.
-            std::fill(m_i.begin(), m_i.end(), 0.0f);
-            std::fill(m_q.begin(), m_q.end(), 0.0f);
-        } else
+            // D86 LEG C -- #5497's triage, fix 2. HOLD the RXA chain instead of
+            // clocking it with zeros: fexchange2 is not reached, and a zeroed
+            // output block of the same size is emitted at the same cadence.
+            //
+            // What stood here fed zeros for three stated reasons -- LATENCY,
+            // SILENCE, and STALENESS. Emitting a zeroed block at the same
+            // cadence answers the first two. It does NOT answer the third, and
+            // that is deliberate: kRxFilterTaps is 8192 at 48 kHz, so 170.667 ms
+            // of overlap-save history still holds pre-transmit content across a
+            // skipped over. Whether that emerges on unmute as spliced audio is
+            // what a listening test has to decide -- see #5498.
+            //
+            // The gain is that the AGC keeps its PRE-TRANSMIT setting instead of
+            // being driven by the silence we fed it, so residual leak arrives
+            // into a settled AGC rather than a railed one. The two meter reads
+            // further down are already guarded on m_audioMuted, and the S-meter
+            // one stays correct for the opposite reason: the channel is not
+            // clocked at all, so its `avg` holds rather than decays.
+            consumed += block;
+            std::fill(m_stereo.begin(), m_stereo.end(), 0.0f);
+            emit audioReady(m_stereo);
+            continue;
+        }
         for (std::size_t n = 0; n < block; ++n) {
             // NOT conjugated. This carried a `-imag()` on the stated reasoning
             // that the HPSDR wire order is the opposite handedness to WDSP's
