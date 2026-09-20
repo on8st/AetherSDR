@@ -467,6 +467,62 @@ public:
     Q_INVOKABLE void flushTxIq();
     [[nodiscard]] std::size_t txQueueDepth() const noexcept { return m_txIq.size(); }
 
+    // ---- TX IQ FIFO fault accounting ----
+    //
+    // The FIFO is bounded ABOVE at kTxQueueMax and not below, and both ends
+    // silently alter what goes on the air: overflow drops the oldest samples
+    // (a discontinuity), underflow substitutes transmit silence for samples
+    // that never arrived (a step to zero mid-envelope). queueTxIq's own
+    // documentation above says so, and until these counters existed NOTHING
+    // said it had happened -- not a log line, not a reading, not a test.
+    //
+    // THESE COUNT; THEY DO NOT REPAIR. The truncation is still exactly what it
+    // was, deliberately: giving the FIFO a floor (a pre-roll, a target depth,
+    // or a held/ramped last sample instead of a step to zero) changes what
+    // this client transmits, and that is a separate decision from being able
+    // to see the fault at all. Counting first is what makes that decision
+    // measurable rather than argued.
+    //
+    // The spectral cost is measured, not assumed: on EP2 captures of live
+    // speech, windows containing no starvation give 78.6-78.8 dB
+    // opposite-sideband suppression and windows containing one give
+    // 33.7-35.2 dB. A SINGLE zeroed sample takes it from 78.99 dB to 48.97 dB.
+    // Gating a one-sided analytic spectrum with a real gate is an image
+    // generator, and the gate here is the zero fill.
+    //
+    // WHY THE RADIO'S OWN FIFO TELEMETRY CANNOT SEE THIS, which is the trap:
+    // Hl2Telemetry::txFifoFillMsbs and ::txFifoRecovery report the GATEWARE's
+    // 127-deep DSIQ FIFO, and that FIFO is fed by EP2 PACKET ARRIVALS. An
+    // underflow here does not drop a packet or shorten one -- onEp2PacerTick
+    // emits a full-size EP2 frame on the wall clock either way, and
+    // ep2WriteTxIq zero-fills the samples that were not supplied. The radio
+    // therefore receives an unbroken 48 kHz sample stream whose CONTENT is
+    // partly silence, and its FIFO fill is identical in both cases. A healthy
+    // gateware FIFO reading is not evidence that this did not happen; the two
+    // counters are the only thing that is.
+    //
+    // Underflow is counted only on the queued-IQ path while keyed. The CW and
+    // test-tone paths synthesise a whole block per packet and cannot starve,
+    // and an UNKEYED frame carries silence by design rather than by fault.
+    //
+    // Packets and samples are both counted because they separate two different
+    // faults that the sample count alone conflates: a burst of whole-packet
+    // underflows at key-down is the missing pre-roll (the queue has not been
+    // primed yet), while occasional PARTIAL packets mid-over are the pacer and
+    // the audio device clock drifting apart. Same counter, different shapes.
+    [[nodiscard]] std::uint64_t txUnderflowPackets() const noexcept { return m_txUnderflowPackets; }
+    [[nodiscard]] std::uint64_t txUnderflowSamples() const noexcept { return m_txUnderflowSamples; }
+    [[nodiscard]] std::uint64_t txOverflowSamples() const noexcept { return m_txOverflowSamples; }
+
+    // ---- Silence recovery (S3 row 3.4) ----
+    //
+    // How many times the EP6 silence watchdog re-sent the run command instead
+    // of declaring the link down, and how many of those the stream came back
+    // from. Attempts without completions is the shape that says this recovery
+    // is not the right one for whatever is actually failing.
+    [[nodiscard]] std::uint64_t silenceRecoveryAttempts() const noexcept { return m_silenceRecoveryAttempts; }
+    [[nodiscard]] std::uint64_t silenceRecoveriesCompleted() const noexcept { return m_silenceRecoveriesCompleted; }
+
     // A baseband test tone, offsetHz from the TX carrier, amplitude 0..1.
     // amplitude <= 0 disables it. Takes precedence over queued IQ.
     //
@@ -703,6 +759,18 @@ private:
     int     m_startAttempts = 0;          // start datagrams sent this connect
     QElapsedTimer m_ep2Clock;             // pacer reference clock
     QElapsedTimer m_sinceLastEp6;         // silence detection
+    // A recovery is in flight for the CURRENT silence. Set when the watchdog
+    // re-sends the run command, cleared by the EP6 packet that ends the
+    // silence -- so it is per-silence, not per-session, and a link that goes
+    // quiet twice gets two recoveries rather than one.
+    bool m_silenceRecoveryArmed = false;
+    std::uint64_t m_silenceRecoveryAttempts = 0;
+    std::uint64_t m_silenceRecoveriesCompleted = 0;
+    // No test seam here on purpose. hl2_receiver_count_restart_test already
+    // owns a fake radio that gates EP6 on its own run state, which is the exact
+    // shape of the failure this recovers from, so the silence path is driven
+    // through a real (loopback) socket and a real 2 s wall clock rather than
+    // through an override that would let the production reading rot untested.
     // Free-running from construction and never restarted: the RQST/ACK floor
     // differences it, so it must not be reset under an outstanding request the
     // way m_sinceLastEp6 is per packet.
@@ -733,6 +801,21 @@ private:
     // Roughly a quarter second at 48 kHz. Past this the operator is hearing
     // latency, so dropping is better than growing the backlog.
     static constexpr std::size_t kTxQueueMax = 12000;
+    // Monotonic for the life of the client; see the accessors above. Never
+    // reset on key, unkey or link loss -- a per-over counter would answer a
+    // different question and would lose the drift that accumulates across a
+    // session, which is the one these exist to show.
+    std::uint64_t m_txUnderflowPackets = 0;
+    std::uint64_t m_txUnderflowSamples = 0;
+    std::uint64_t m_txOverflowSamples = 0;
+    // Length of the starvation currently in progress, in packets and in
+    // substituted silent samples, so ONE log line describes the whole event
+    // instead of one line per EP2 frame at 380 frames/second. Reported and
+    // cleared by reportTxUnderflowRun(), which every exit from the queued-IQ
+    // path calls: a full packet, a flush, or the key going up.
+    std::uint64_t m_txUnderflowRunPackets = 0;
+    std::uint64_t m_txUnderflowRunSamples = 0;
+    void reportTxUnderflowRun();
     double m_toneHz = 0.0;
     double m_toneAmp = 0.0;
     double m_tonePhase = 0.0;   // radians, carried across packets

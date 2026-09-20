@@ -9,6 +9,7 @@
 #include <QtGlobal>
 
 #include <QDebug>
+#include <QLoggingCategory>
 
 #include <algorithm>
 #include <cmath>
@@ -26,6 +27,14 @@
 #endif
 
 namespace AetherSDR::hl2 {
+
+// Same category string as Hl2TxDsp's lcTxMod and Hl2Backend's lcHl2Tx:
+// "aether.hl2.tx", off by default and documented in LogManager as high-rate
+// and as a SEPARATE toggle from "Hermes-Lite 2". A starvation is reported
+// from HERE rather than from Hl2Backend's telemetry handler because the
+// counters are incremented by the EP2 pacer on the I/O thread; reading them
+// from the telemetry handler would be a cross-thread read of a plain integer.
+static Q_LOGGING_CATEGORY(lcTxFifo, "aether.hl2.tx")
 
 namespace {
 
@@ -406,9 +415,116 @@ void MetisClient::onWatchdogTick()
     if (!m_running || !m_linkUp)
         return;
     if (m_sinceLastEp6.isValid() && m_sinceLastEp6.elapsed() > kSilenceTimeoutMs) {
+        const qint64 silentMs = m_sinceLastEp6.elapsed();
+        // ---- STAGE 1: ASK THE RADIO AGAIN BEFORE GIVING UP ON IT ----
+        //
+        // Until this existed, an established link that went quiet had NO
+        // recovery at the protocol level. This tick cleared m_linkUp and then
+        // could never fire again (its own first line returns on !m_linkUp), and
+        // m_startRetryTimer was armed by exactly two paths -- start() and
+        // setReceiverCount() -- neither of which is this one. The only recovery
+        // in the product was a layer up: RadioModel's reconnect timer re-driving
+        // connectRadio five seconds after disconnected(), which closes and
+        // reopens every WDSP channel. The protocol-level answer is one 64-byte
+        // datagram.
+        //
+        // This matters most in the case the client cannot otherwise get out of:
+        // if the gateware halted its stream because EP2 stopped arriving, then
+        // EP2 resuming does NOT restart it. The radio needs a new run command,
+        // and nothing was sending one.
+        //
+        // THE WIRE ACT HERE IS NOT NEW. metisRunCommand to a radio whose run
+        // state we cannot observe, repeated on m_startRetryTimer, is exactly
+        // what start() and setReceiverCount() already do on every connect and
+        // every receiver-count change: a lost start and a slow one are
+        // indistinguishable, so that retry has always been willing to re-send
+        // to a radio that may already be streaming. What is new is a third path
+        // arming it.
+        //
+        // AND THE GATEWARE SAYS IT IS SAFE, which is worth having written down
+        // because "commanding a radio that thinks it is already streaming" is
+        // the obvious objection. dsopenhpsdr1.v decodes the run byte in ONE
+        // state, RUNSTOP, as a plain level assignment with no edge detection:
+        //     run_next = eth_data[0];  wide_spectrum_next = eth_data[1];
+        // It sets no state_next, flushes no FIFO, resets no DDC and clears no
+        // counter. A second start while run is already 1 re-writes 1 over 1 and
+        // nothing downstream sees an edge; every consumer in hermeslite_core.v
+        // takes run as a level. The duplicate also re-latches wide_spectrum
+        // from bit 1 and watchdog_disable from bit 7, which is precisely why
+        // this sends metisRunCommand with the LIVE bandscope and watchdog state
+        // rather than metisStart() -- metisStart() hard-codes bit 1 clear and
+        // would silently drop the bandscope mid-capture. (Same reason the
+        // start-retry lambda above does not use metisStart() either.)
+        //
+        // One more thing the gateware settles: its own anti-wedge watchdog
+        // (dsopenhpsdr1.v, watchdog_cnt, tripping at &watchdog_cnt to
+        // `run <= 0`) is cleared by EP2 ARRIVALS and advanced on the EP6
+        // dispatch cadence. So the failure it produces is exactly the one with
+        // no client-side recovery before this: EP2 stops, EP6 keeps flowing so
+        // our silence timer never runs, the gateware eventually sets run to 0,
+        // EP6 stops, and only THEN does this watchdog fire -- at which point
+        // resuming EP2 cannot restart the radio and only a run command can.
+        //
+        // NO metis-stop, and NO sendPrimingBurst(). setReceiverCount() uses both
+        // because it is changing the EP6 payload layout and needs a hard edge;
+        // here the layout is unchanged and there is nothing to re-prime. It also
+        // matters that sendPrimingBurst() spends ~20 ms in QThread::msleep on
+        // THIS thread -- the one pacing EP2 -- and stalling the pacer is a
+        // plausible cause of the very silence being recovered from.
+        //
+        // m_linkUp DELIBERATELY STAYS TRUE for the length of the attempt. The
+        // start-retry's own comment gives the reason and setReceiverCount()
+        // relies on it: clearing it makes a stream that comes back re-emit
+        // linkUp(), and Hl2Backend republishes its entire initial state on that,
+        // over the operator's live panes. A recovery that succeeded should be
+        // invisible except in the counters.
+        if (!m_silenceRecoveryArmed && m_socket && m_startRetryTimer) {
+            m_silenceRecoveryArmed = true;
+            ++m_silenceRecoveryAttempts;
+            qInfo() << "MetisClient: no EP6 for" << silentMs
+                    << "ms — re-sending the run command before declaring link loss"
+                       " (attempt budget" << kMaxStartAttempts << "at"
+                    << kStartRetryMs << "ms)";
+            // SEQUENCE TRACKING IS DELIBERATELY LEFT ALONE, which is the one
+            // place this path must NOT copy setReceiverCount(). That path
+            // resets m_haveRxSeq because it sends metisStop first, and the
+            // gateware zeroes ep6_seq_no on ~run (usopenhpsdr1.v, ep6_seq_no:
+            // `if (~run) ep6_seq_no <= 20'h0`) -- so there, the sequence really
+            // does restart. Here there is no stop, and the two outcomes want
+            // opposite handling:
+            //   - the radio never halted (the silence was ours): the stream
+            //     kept counting, the gap across it is REAL, and resetting would
+            //     erase a genuine loss of ~760 packets at 48 kHz / 1 RX;
+            //   - the radio halted and this command restarts it: ep6_seq_no
+            //     begins at zero, and the existing backward-gap guard below
+            //     (`gap < 0x80000000u`) already declines to score that as loss.
+            // Doing nothing is therefore correct in BOTH, and resetting is
+            // correct in only one. The recovery itself is counted instead.
+            countTx(sendTo(*m_socket,
+                           metisRunCommand(m_bsState != BandscopeState::Idle,
+                                           m_watchdogEnabled),
+                           m_host, m_port));
+            m_startAttempts = 1;
+            m_startRetryTimer->start(kStartRetryMs);
+            return;
+        }
+        // ---- STAGE 2: the attempt had its window and the stream is still gone ----
+        //
+        // The retry disarms itself the moment EP6 flows (its recency test on
+        // m_sinceLastEp6), so an ACTIVE timer here means the budget is still
+        // running and the radio has not answered yet. Waiting costs at most
+        // kMaxStartAttempts * kStartRetryMs = 1500 ms of additional delay before
+        // link loss is declared, against the 5000 ms full teardown it can save.
+        // That trade is deliberate and it is a real regression in the case where
+        // recovery FAILS -- worst case to a rebuilt link goes from ~7.0 s to
+        // ~8.5 s. It buys the case where recovery succeeds costing nothing at all.
+        if (m_startRetryTimer && m_startRetryTimer->isActive())
+            return;
+
         // Socket still open but the radio went quiet — surface it as link loss
         // rather than sitting in a permanently "connected" state.
         m_linkUp = false;
+        m_silenceRecoveryArmed = false;
         // And drop the outstanding request with the link, exactly as stop()
         // does. Hl2ControlRequest::reset()'s own doc says "for a link that went
         // down", and this is that; leaving the machine Awaiting here made the
@@ -489,6 +605,10 @@ void MetisClient::stop()
         m_socket = nullptr;
     }
     m_running = false;
+    // Any silence recovery in flight ends with the session. The COUNTERS do
+    // not: they are a session-life record and a stop is not a reason to forget
+    // that a recovery happened.
+    m_silenceRecoveryArmed = false;
     // metisStop() is 0x00, which clears wide_spectrum as well as run. The gate
     // has nothing left to sample and its intent ends with the session.
     resetBandscopeGate();
@@ -1053,8 +1173,13 @@ void MetisClient::queueTxIq(std::span<const std::complex<float>> iq, const TxCoo
     for (const auto& s : iq)
         m_txIq.push_back(s);
     // Drop the OLDEST on overflow: stale transmit audio is worse than a gap.
-    while (m_txIq.size() > kTxQueueMax)
+    // COUNTED, because the drop is a discontinuity in the middle of an
+    // envelope and nothing else on the wire or in the telemetry records that
+    // it happened -- see txOverflowSamples().
+    while (m_txIq.size() > kTxQueueMax) {
         m_txIq.pop_front();
+        ++m_txOverflowSamples;
+    }
 }
 
 void MetisClient::setTxTestTone(double offsetHz, double amplitude, const TxCoordinator::Operation& operation)
@@ -1072,6 +1197,30 @@ void MetisClient::setTxTestTone(double offsetHz, double amplitude, const TxCoord
 void MetisClient::flushTxIq()
 {
     m_txIq.clear();
+    // A flush is how an over ends, so it is also where a starvation that ran
+    // to the end of that over stops. Without this the run would sit unreported
+    // until the NEXT transmission happened to emit a full packet, and would
+    // then be attributed to it.
+    reportTxUnderflowRun();
+}
+
+void MetisClient::reportTxUnderflowRun()
+{
+    if (m_txUnderflowRunPackets == 0)
+        return;
+    qCDebug(lcTxFifo) << "HL2 tx fifo: HOST queue starved for"
+                      << m_txUnderflowRunPackets << "EP2 packet(s),"
+                      << m_txUnderflowRunSamples
+                      << "sample(s) of substituted silence on the air"
+                      << "(session totals: underflow" << m_txUnderflowPackets
+                      << "packets /" << m_txUnderflowSamples << "samples, overflow"
+                      << m_txOverflowSamples << "samples)."
+                      << "This is the CLIENT's queue, not the radio's DSIQ FIFO:"
+                      << "the EP2 frame went out full size on schedule, so the"
+                      << "gateware's fill and pacingFault readings are unaffected"
+                      << "by it and cannot be used to rule it out.";
+    m_txUnderflowRunPackets = 0;
+    m_txUnderflowRunSamples = 0;
 }
 
 std::array<std::uint8_t, kUsbPacketSize> MetisClient::buildNextControlPacket()
@@ -1194,7 +1343,14 @@ std::array<std::uint8_t, kUsbPacketSize> MetisClient::buildNextControlPacket()
         while (m_tonePhase > 2.0 * 3.14159265358979323846)
             m_tonePhase -= 2.0 * 3.14159265358979323846;
         ep2WriteTxIq(pkt, block);
-    } else if (keyed && !m_txIq.empty()) {
+    } else if (keyed && !m_cwMode && m_toneAmp <= 0.0) {
+        // THE QUEUED-IQ PATH, and the only one that can starve: CW and the
+        // test tone above synthesise a whole block per packet, so they always
+        // fill. The empty queue is folded in here rather than left to fall off
+        // the end of the chain, because a packet of pure silence is not a
+        // lesser fault than a short one -- it is the largest one this FIFO can
+        // produce, and leaving it uncounted was the shape of the original
+        // defect.
         std::vector<std::complex<float>> block;
         const std::size_t n = std::min<std::size_t>(kTxSamplesPerPacket, m_txIq.size());
         block.reserve(n);
@@ -1202,7 +1358,32 @@ std::array<std::uint8_t, kUsbPacketSize> MetisClient::buildNextControlPacket()
             block.push_back(m_txIq.front());
             m_txIq.pop_front();
         }
-        ep2WriteTxIq(pkt, block);   // a short block leaves the rest as silence
+        if (n < static_cast<std::size_t>(kTxSamplesPerPacket)) {
+            // Count the SILENCE, not the samples: the figure that matters is
+            // how much of this envelope the radio was handed as zeros.
+            const auto shortBy = static_cast<std::uint64_t>(kTxSamplesPerPacket) - n;
+            ++m_txUnderflowPackets;
+            m_txUnderflowSamples += shortBy;
+            ++m_txUnderflowRunPackets;
+            m_txUnderflowRunSamples += shortBy;
+        } else {
+            // A full packet ends whatever run was in progress.
+            reportTxUnderflowRun();
+        }
+        if (n > 0)
+            ep2WriteTxIq(pkt, block);   // a short block leaves the rest as silence
+        // n == 0 needs no write at all: ep2Packet already zero-filled the
+        // payload, which is the same bytes ep2WriteTxIq would produce for an
+        // empty span. Skipping it keeps the wire identical to before this
+        // change -- the counters observe, they do not alter.
+    } else {
+        // UNKEYED. Silence here is the design, not a fault, so nothing is
+        // counted -- but the key having gone up is also the end of any
+        // starvation that was still running when it did, and the pacer reaches
+        // this branch within one EP2 interval of the unkey. That makes this
+        // the backstop for every way an over can end, including the paths that
+        // clear m_txIq without going through flushTxIq().
+        reportTxUnderflowRun();
     }
     return pkt;
 }
@@ -1346,6 +1527,17 @@ void MetisClient::handleDatagram(std::span<const std::uint8_t> bytes)
     // recently the stream produced anything, which both the silence watchdog
     // and the start-retry read.
     m_sinceLastEp6.restart();
+    if (m_silenceRecoveryArmed) {
+        // The stream is back and m_linkUp never dropped, so nothing downstream
+        // saw this happen. The counter is the only record that it did, which is
+        // the point: a recovery that is invisible to the operator must not also
+        // be invisible to whoever asks later why the audio had a hole in it.
+        m_silenceRecoveryArmed = false;
+        ++m_silenceRecoveriesCompleted;
+        qInfo() << "MetisClient: EP6 resumed after a silence recovery ("
+                << m_silenceRecoveriesCompleted << "of" << m_silenceRecoveryAttempts
+                << "attempts recovered) — no teardown was needed";
+    }
     if (!m_linkUp) {
         m_linkUp = true;
         if (m_connectWatchdog)

@@ -15,6 +15,7 @@
 
 #include <QCoreApplication>
 
+#include <cstdint>
 #include <cstdio>
 #include <vector>
 
@@ -29,6 +30,11 @@ struct MetisClientTestAccess {
         client.m_packetSinkForTest = std::move(sink);
     }
     static void send(MetisClient& client) { client.sendControlPacket(); }
+    // kTxQueueMax is private and deliberately stays that way; the overflow
+    // check needs the real bound rather than a retyped copy of it, because a
+    // test that retypes a constant agrees with itself while the code it guards
+    // moves underneath.
+    static constexpr std::size_t queueMax() { return MetisClient::kTxQueueMax; }
 };
 
 struct Hl2TxGateTestAccess {
@@ -519,6 +525,136 @@ int main(int argc, char** argv)
         MetisClientTestAccess::send(entered);
         check(written && tx.coordinator.acknowledgeStopped(tx.operation),
               "Metis writer guard ends only after the terminal writer returns");
+    }
+
+    // ---- TX IQ FIFO fault accounting (S3 row 3.3) ----
+    //
+    // The FIFO is bounded above at kTxQueueMax and not below. Both ends change
+    // what goes on the air and, until these counters, neither was recorded
+    // anywhere: not a log line, not a reading, and not a test. The radio's own
+    // DSIQ telemetry cannot stand in for them -- an underflow HERE still emits
+    // a full-size EP2 frame on schedule, so the gateware's fill and
+    // pacingFault readings are identical whether it happened or not.
+    //
+    // Every counting assertion below is paired with a NEGATIVE CONTROL on the
+    // same counter. A counter that only ever goes up is a number nobody can
+    // act on: the operator needs "this over was clean" to mean something.
+    {
+        // ---- NEGATIVE CONTROL: a clean transmission counts nothing ----
+        //
+        // Queued exactly on the packet boundary and drained exactly, so the
+        // queued-IQ path is exercised at full length four times over. If any
+        // of the three counters can be provoked by ordinary keyed traffic then
+        // none of the positive results below mean anything.
+        TxTestAuthority tx;
+        MetisClient clean;
+        clean.enableTransmit(true);
+        clean.setMox(true, tx.operation);
+        const std::vector<std::complex<float>> exact(
+            static_cast<std::size_t>(kTxSamplesPerPacket) * 4, std::complex<float>(0.25f, -0.25f));
+        clean.queueTxIq(exact, tx.context);
+        for (int i = 0; i < 4; ++i) {
+            const auto pkt = clean.buildNextControlPacket();
+            check(payloadNonZero(pkt), "a fully fed keyed packet carries IQ");
+        }
+        check(clean.txQueueDepth() == 0, "four packets drain four packets' worth");
+        check(clean.txUnderflowPackets() == 0 && clean.txUnderflowSamples() == 0,
+              "NEGATIVE CONTROL: a queue drained on an exact packet boundary counts no underflow");
+        check(clean.txOverflowSamples() == 0,
+              "NEGATIVE CONTROL: a queue that never reached kTxQueueMax counts no overflow");
+    }
+
+    {
+        // ---- NEGATIVE CONTROL: unkeyed silence is not a fault ----
+        //
+        // An unkeyed frame carries transmit silence BY DESIGN. Counting it
+        // would make the counter read a fault on a radio that is receiving,
+        // which is the failure mode the resting state of the gateware's own
+        // txFifoRecovery flag already demonstrates: a reading with a non-zero
+        // idle baseline reports idle as fault.
+        TxTestAuthority tx;
+        MetisClient idle;
+        idle.enableTransmit(true);          // gate OPEN, key UP
+        for (int i = 0; i < 16; ++i) {
+            const auto pkt = idle.buildNextControlPacket();
+            check(!payloadNonZero(pkt), "an unkeyed frame carries silence");
+        }
+        check(idle.txUnderflowPackets() == 0 && idle.txUnderflowSamples() == 0,
+              "NEGATIVE CONTROL: unkeyed silence is the design, not an underflow");
+    }
+
+    {
+        // ---- POSITIVE: a PARTIAL block is counted, in samples of silence ----
+        //
+        // This is the drift case: the audio device clock and the EP2 wall
+        // clock have pulled apart far enough that the queue holds less than
+        // one packet. FIND-23 measured exactly this shape on EP2 captures of
+        // live speech -- one starvation per over, of 18 to 64 samples -- and
+        // measured what it costs: windows with no starvation give 78.6-78.8 dB
+        // opposite-sideband suppression, windows with one give 33.7-35.2 dB.
+        TxTestAuthority tx;
+        MetisClient partial;
+        partial.enableTransmit(true);
+        partial.setMox(true, tx.operation);
+        constexpr std::size_t kShort = 40;
+        const std::vector<std::complex<float>> ragged(
+            static_cast<std::size_t>(kTxSamplesPerPacket) + kShort,
+            std::complex<float>(0.25f, -0.25f));
+        partial.queueTxIq(ragged, tx.context);
+
+        (void)partial.buildNextControlPacket();   // the full one
+        check(partial.txUnderflowPackets() == 0,
+              "the full packet ahead of the short one is not counted");
+
+        (void)partial.buildNextControlPacket();   // the short one
+        check(partial.txUnderflowPackets() == 1, "one short packet, one underflow packet");
+        check(partial.txUnderflowSamples()
+                  == static_cast<std::uint64_t>(kTxSamplesPerPacket) - kShort,
+              "underflow counts the SILENCE substituted, not the samples supplied");
+    }
+
+    {
+        // ---- POSITIVE: an EMPTY queue is the LARGEST underflow, not a no-op ----
+        //
+        // Before the counters this case did not even reach the queued-IQ
+        // branch -- `keyed && !m_txIq.empty()` was false, the chain fell off
+        // the end, and a whole packet of silence went on the air recorded by
+        // nothing. It is the missing pre-roll: at key-down the queue has not
+        // been primed, so the first packets of every over take this path.
+        //
+        // The wire is asserted UNCHANGED here as well. These counters observe;
+        // they must not alter a single byte of what the radio receives.
+        TxTestAuthority tx;
+        MetisClient starved;
+        starved.enableTransmit(true);
+        starved.setMox(true, tx.operation);
+        check(starved.txQueueDepth() == 0, "nothing queued");
+        const auto pkt = starved.buildNextControlPacket();
+        check(!payloadNonZero(pkt),
+              "an empty keyed queue still emits a byte-identical silent EP2 payload");
+        check(starved.txUnderflowPackets() == 1
+                  && starved.txUnderflowSamples() == static_cast<std::uint64_t>(kTxSamplesPerPacket),
+              "an empty queue counts a WHOLE packet of substituted silence");
+    }
+
+    {
+        // ---- POSITIVE + NEGATIVE: overflow, against the real bound ----
+        //
+        // Overflow drops the OLDEST, which is the right policy on transmit and
+        // is also a discontinuity in the middle of an envelope. Counted for
+        // the same reason as the underflow: nothing else records it.
+        TxTestAuthority tx;
+        MetisClient over;
+        constexpr std::size_t kPast = 500;
+        const std::vector<std::complex<float>> flood(
+            MetisClientTestAccess::queueMax() + kPast, std::complex<float>(0.1f, 0.1f));
+        over.queueTxIq(flood, tx.context);
+        check(over.txQueueDepth() == MetisClientTestAccess::queueMax(),
+              "the queue is bounded above at kTxQueueMax");
+        check(over.txOverflowSamples() == kPast,
+              "overflow counts exactly the samples dropped past the bound");
+        check(over.txUnderflowPackets() == 0,
+              "NEGATIVE CONTROL: overflowing the queue is not also an underflow");
     }
 
     if (g_failures == 0)
