@@ -179,6 +179,23 @@ jobs:
         if: ${{ !cancelled() }}
         run: python tools/gen_touchpoint_manifest.py --check
 
+      # The step above proves the catalogue is SYNCHRONIZED and TAGGED. It says
+      # nothing about the conversion column, because it regenerates that column
+      # from the sidecar and then compares the regenerated file to itself — so
+      # un-converting a touchpoint keeps it perfectly green. This step is the
+      # other half: the conversion ledger only ever grows. Per-key, not by
+      # count, so a lateral swap (one row loses `converted`, another gains it)
+      # cannot pass flat. Needs the `fetch-depth: 0` the checkout above already
+      # sets, because it reads the ledger at the merge base.
+      #
+      # No --strict: every finding it can emit is a hard regression, so an
+      # advisory default would only reproduce this file's own opening lesson —
+      # a gate that shipped and sat unenforced because nothing checks that the
+      # enforcing flag is actually passed.
+      - name: aetherd converted-only-grows
+        if: ${{ !cancelled() }}
+        run: python tools/check_touchpoint_status.py
+
       # ── Test registration stays in tests/tests.cmake. The root CMakeLists.txt
       # was 6,357 lines, over half of it 300+ test-target declarations; the split
       # cut it to ~2,780. tests/tests.cmake fails the CONFIGURE step if a test

@@ -4773,6 +4773,11 @@ find_package(Python3 QUIET COMPONENTS Interpreter)
 if(Python3_Interpreter_FOUND)
     add_test(NAME check_a11y_test
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_a11y_test.py)
+    # The aetherd conversion ratchet. Its end-to-end cases build a throwaway
+    # git repository in a temp dir and run the checker as a subprocess, so they
+    # need `git` on PATH but no network, no radio and no build artefacts.
+    add_test(NAME check_touchpoint_status_test
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_touchpoint_status_test.py)
 endif()
 
 # #5262 M3a: the three-state control doctrine as a mechanism. Pins the two
