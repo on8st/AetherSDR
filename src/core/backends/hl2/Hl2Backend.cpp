@@ -1342,6 +1342,28 @@ bool Hl2Backend::removePanadapter(const QString& panId)
     // describing a receiver that has stopped producing readings. UI numbers are
     // not renumbered by the removal below, so the surviving meters keep their
     // identities.
+    //
+    // EXCEPT RECEIVER 0 — say it here, because the sentence above is otherwise
+    // stronger than the code. Only the LAST receiver is refused above, so UI 0
+    // of two IS closable, and withdrawSliceLevelMeter(0) returns early by
+    // design: receiver 0's "SLC"/"LEVEL" is defineMeters()' def(1), not ours.
+    // So that one entry does stay in the catalogue, frozen at its last reading.
+    //
+    // THE ASYMMETRY IS IN THE DECLARATION, WHICH IS WHY THE WITHDRAWAL CANNOT
+    // BE SYMMETRIC. Every other receiver's meter is declared per receiver, by
+    // openReceiverDsp(), so a close-then-reopen gets it back. def(1) is declared
+    // ONCE per session, from defineMeters() at the linkUp edge. Withdraw it on a
+    // close and the next Hl2ReceiverMap::append() hands the lowest free UI
+    // number — 0 — to the new receiver, defineSliceLevelMeter(0) returns early,
+    // and nothing re-declares it: receiver 0's S-meter would be gone for the
+    // rest of the session. A stale entry is the smaller fault than a permanently
+    // missing one.
+    //
+    // Making def(1) per-receiver instead is the fix that would make this
+    // symmetric, and it is not a meter-routing change: defineMeter() derives the
+    // TX waveform meters' manifest slice context from the SLC definition that
+    // precedes them in defineMeters()' block, so moving it moves them. Out of
+    // scope here.
     withdrawSliceLevelMeter(removedUi);
 
     // Tear the DSP down BEFORE the wire shrinks, so nothing is left consuming a
@@ -2842,6 +2864,41 @@ void Hl2Backend::finishDspSetup(const DspSetupResult& result)
             // the degradation. Trim to what opened and carry on.
             if (i == 0) {
                 invalidateTxDspConfiguration();
+                // AND WITHDRAW EVERY RECEIVER'S METER, for the same reason the
+                // trim below does — this exit had the same omission and is the
+                // one that leaves the MOST behind.
+                //
+                // buildReceivers() called openReceiverDsp() for all
+                // `actualNumRx` receivers before the I/O thread configured any
+                // of them, so a definition is standing for every receiver above
+                // the first even though receiver 0's failure means NONE of them
+                // will ever produce a reading: the wire below is never started
+                // and connected() never fires.
+                //
+                // Nor does anything clean up after us. RadioModel wipes the
+                // catalogue from onDisconnected(), and a connect refused here
+                // never emits disconnected() — so these definitions stand until
+                // the NEXT connect's releaseReceiverDsps() collects them, or for
+                // the life of the application if no reconnect is armed. That is
+                // the same phantom-catalogue outcome the four sites already
+                // fixed, on the one path that reaches it without a teardown.
+                //
+                // THE CHAINS ARE DELIBERATELY LEFT ALONE. Whether a refused
+                // connect should tear its receivers down is a separate question
+                // about this branch and is not decided here; the withdrawal is
+                // about what the meter catalogue claims, which is wrong either
+                // way. A later connect's buildReceivers() releases them.
+                //
+                // From the MAP, and from ddc 0 — not from `i` and not from 1.
+                // Hl2Receivers.h is explicit that the ddc<->ui identity is the
+                // starting state and not an invariant, and if ddc 0 were to hold
+                // a nonzero ui its meter would be ours to withdraw too.
+                // withdrawSliceLevelMeter() no-ops on ui 0, whose meter is
+                // defineMeters()' and is never declared on this path anyway.
+                for (int k = 0; k < actualNumRx; ++k) {
+                    if (const Hl2ReceiverIds* gone = m_ids.byDdc(k))
+                        withdrawSliceLevelMeter(gone->uiNumber);
+                }
                 emit connectionError(
                     QStringLiteral("HL2 DSP: %1").arg(QString::fromStdString(err)));
                 emit dspSetupFinished();
