@@ -480,12 +480,16 @@ public:
     static uint64_t outstandingAllocationsForTest() noexcept;
 
     // Shared FFTW-planner serialization guard. Anything outside this class
-    // that calls fftw_plan_*/fftw_destroy_plan directly (today: AnanSpectrum,
-    // off the real-time path) must hold this for the call, or it can race a
+    // that calls fftw_plan_*/fftw_destroy_plan directly (today: AnanSpectrum
+    // and Hl2Spectrum -- the latter since #5424, which this comment predates;
+    // both off the real-time path) must hold this for the call, or it can race a
     // concurrent WdspChannel::create()/reconfigure() on a DIFFERENT channel
     // and corrupt FFTW's process-global plan cache -- the same reason
-    // open()/close() and every control call below already take it. Held only
-    // around the planner call itself, not the whole construction.
+    // open()/close() and every control call below already take it. Hold it
+    // around the planner call AND the FFTW allocations paired with it: the edge
+    // #5424 fixed was a free against an allocation, not the planner, so
+    // narrowing Hl2Spectrum's to the plan alone reopens it. (AnanSpectrum's is
+    // narrower, and records in its own comment why that is safe there.)
     [[nodiscard]] static std::unique_lock<std::mutex> fftwSetupLock();
 
 private:
