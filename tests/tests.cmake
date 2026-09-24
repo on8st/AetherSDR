@@ -769,7 +769,14 @@ endif()
 # the same toolchain and warning flags. Run manually with ./build/<target>.
 
 add_executable(wdsp_channel_test tests/wdsp_channel_test.cpp)
-target_link_libraries(wdsp_channel_test PRIVATE aethercore)
+# aether::wdsp as well as aethercore: aethercore links it PRIVATE, so the
+# symbols already reach here through the static link closure but the facade's
+# PUBLIC include directory does not. This case calls SetTXAALCSt and
+# GetTXAMeter directly -- the TXA ALC is configured in WdspChannel::open() and
+# metered nowhere in AetherSDR, so there is no AetherSDR-side surface to
+# measure it through, and inventing one to satisfy a test would be adding API
+# for the test's convenience.
+target_link_libraries(wdsp_channel_test PRIVATE aethercore aether::wdsp)
 add_test(NAME wdsp_channel_test COMMAND wdsp_channel_test)
 
 # Socket-free lifetime checks for the two process-global FFTW planners.

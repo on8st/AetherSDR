@@ -1,5 +1,7 @@
 #include "core/dsp/WdspChannel.h"
 
+#include <aether_wdsp.h>
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -1311,10 +1313,18 @@ WdspChannel::Config liveTransmitConfig(WdspChannel::Mode mode,
 // 1 = tone in Q only, 2 = both (what fillAudioTone does).
 // `paceUs`: wall-clock delay between calls. 0 is a tight loop; the live value
 // is inputBlockSize / inputSampleRate = 21333 us.
+// `tone2Hz` > 0 makes the stimulus a TWO-TONE: the two tones share `amplitude`
+// equally, so `amplitude` stays the PEAK of the composite waveform however many
+// tones it has. That matters here because the one threshold in TXA's ALC is a
+// peak-envelope threshold (see runTransmitAlcImdTest), so the drive figure the
+// table prints has to be the number that threshold is compared against.
 TransmitRun runTransmitChannel(int plane, double toneHz, WdspChannel::Mode mode,
                                double lowHz, double highHz,
                                std::size_t blocks, std::size_t discardBlocks,
-                               int paceUs, double amplitude = 0.1)
+                               int paceUs, double amplitude = 0.1,
+                               double tone2Hz = 0.0, int forceAlc = -1,
+                               std::vector<double>* alcGainDb = nullptr,
+                               bool clampInput = false)
 {
     TransmitRun run;
     const WdspChannel::Config config = liveTransmitConfig(mode, lowHz, highHz);
@@ -1325,6 +1335,13 @@ TransmitRun runTransmitChannel(int plane, double toneHz, WdspChannel::Mode mode,
         return run;
     }
     run.created = true;
+    // -1 leaves the channel exactly as WdspChannel::open() configured it, which
+    // is what the asserted legs measure. 0/1 forces the stage so one binary can
+    // put the two states side by side; nothing in WDSP writes alc.p->run except
+    // SetTXAALCSt, so this holds for the rest of the run.
+    if (forceAlc >= 0) {
+        SetTXAALCSt(channel->channelId(), forceAlc);
+    }
 
     std::vector<float> inputI(config.inputBlockSize, 0.0f);
     std::vector<float> inputQ(config.inputBlockSize, 0.0f);
@@ -1334,10 +1351,23 @@ TransmitRun runTransmitChannel(int plane, double toneHz, WdspChannel::Mode mode,
 
     for (std::size_t block = 0; block < blocks; ++block) {
         for (std::size_t sample = 0; sample < inputI.size(); ++sample) {
-            const double phase = 2.0 * std::numbers::pi * toneHz *
-                                 static_cast<double>(block * inputI.size() + sample) /
-                                 static_cast<double>(config.inputSampleRate);
-            const float value = static_cast<float>(amplitude * std::cos(phase));
+            const double n =
+                static_cast<double>(block * inputI.size() + sample);
+            const double k = 2.0 * std::numbers::pi /
+                             static_cast<double>(config.inputSampleRate);
+            const double composite =
+                (tone2Hz > 0.0)
+                    ? 0.5 * (std::cos(k * toneHz * n) + std::cos(k * tone2Hz * n))
+                    : std::cos(k * toneHz * n);
+            // clampInput reproduces Hl2TxDsp's LAST act before modulate():
+            // std::clamp(preAlc * m_alcGain, -1.0f, 1.0f). With it, `amplitude`
+            // is the peak the waveform WOULD have had, and what the channel
+            // actually receives is that waveform flat-topped at 1.0 -- which is
+            // the hottest thing the live path can deliver, and the only way the
+            // TXA ALC's 0.997424 threshold is reachable in production.
+            const double raw = amplitude * composite;
+            const float value = static_cast<float>(
+                clampInput ? std::clamp(raw, -1.0, 1.0) : raw);
             inputI[sample] = (plane == 1) ? 0.0f : value;
             inputQ[sample] = (plane == 0) ? 0.0f : value;
         }
@@ -1396,6 +1426,19 @@ TransmitRun runTransmitChannel(int plane, double toneHz, WdspChannel::Mode mode,
                 run.index.push_back(block * outBlock + k);
             }
         }
+        // Sampled ONCE PER BLOCK, because that is the only rate this meter has:
+        // xmeter() runs after the whole DSP buffer and publishes the gain as it
+        // stood at the buffer's LAST sample. At 1024 samples of 48 kHz that is
+        // one sample every 21.3 ms, so a ripple at any audio rate is ALIASED --
+        // a rippling gain shows here as scatter between blocks, never as the
+        // ripple's shape, and a constant gain shows as identical readings. The
+        // full-rate instrument for the ripple is the spectrum of the output,
+        // not this. Said plainly because a min/max from this meter is easy to
+        // read as a bound on the ripple, and it is not one.
+        if (alcGainDb != nullptr && block >= discardBlocks) {
+            alcGainDb->push_back(GetTXAMeter(channel->channelId(),
+                                             AETHER_WDSP_TXA_ALC_GAIN));
+        }
         if (paceUs > 0) {
             std::this_thread::sleep_for(std::chrono::microseconds(paceUs));
         }
@@ -1439,7 +1482,10 @@ TransmitRun runTransmitChannelSettled(int plane, double toneHz,
                                       WdspChannel::Mode mode, double lowHz,
                                       double highHz, std::size_t blocks,
                                       std::size_t discardBlocks, int paceUs,
-                                      double amplitude = 0.1)
+                                      double amplitude = 0.1,
+                                      double tone2Hz = 0.0, int forceAlc = -1,
+                                      std::vector<double>* alcGainDb = nullptr,
+                                      bool clampInput = false)
 {
     TransmitRun best;
     for (int attempt = 0; attempt < 4; ++attempt) {
@@ -1452,7 +1498,8 @@ TransmitRun runTransmitChannelSettled(int plane, double toneHz,
         const int pace = paceUs * (attempt + 1);
         TransmitRun run = runTransmitChannel(plane, toneHz, mode, lowHz, highHz,
                                              blocks, discardBlocks, pace,
-                                             amplitude);
+                                             amplitude, tone2Hz, forceAlc,
+                                             alcGainDb, clampInput);
         if (!run.created || run.underrunBlocks == 0) {
             return run;
         }
@@ -1799,12 +1846,20 @@ bool runTransmitLiveGeometryTest()
 //     Hl2Backend::defaultTxPassbandForMode returns today. The MODE is still set
 //     per row, because a migration would set it.
 //
-//  2. THE ALC CANNOT BE SWITCHED OFF, SO IT IS MEASURED INSTEAD. The phasing
-//     modulator's sweep runs with Hl2TxDsp's ALC off. A TXA channel has no such
-//     switch: create_txa brings alc up with run = 1, max_gain = 1.0 and
-//     out_targ = 1.0. It cannot BOOST -- max_gain 1.0 is unity -- but it will
-//     pull down anything that reaches the target, and a sweep run through a
-//     limiter measures gain-riding rather than a filter.
+//  2. THE ALC IS MEASURED HERE RATHER THAN ASSUMED IDLE. This used to read
+//     "the ALC cannot be switched off, so it is measured instead", and that
+//     was only ever true of what THIS HOST declared: WDSP has always had
+//     SetTXAALCSt, and WdspChannel::open() now calls it with 0 on the
+//     transmit branch, so a TXA channel opened by this tree has no ALC in it
+//     at all. create_txa still brings alc up with run = 1, max_gain = 1.0 and
+//     out_targ = 1.0 -- it cannot BOOST, but it would pull down anything that
+//     reaches the target, and a sweep run through a limiter measures
+//     gain-riding rather than a filter.
+//
+//     The linearity probe below is KEPT rather than deleted, and is now worth
+//     more than it was: it no longer argues that the ALC is idle at this
+//     amplitude, it pins that nothing in the chain rides gain at all. See
+//     runTransmitAlcImdTest for the stage itself.
 //
 //     The amplitude is therefore hl2_txdsp_test's own 0.5, and the linearity
 //     probe below is what licenses it: halving the audio halves the emitted
@@ -2121,11 +2176,15 @@ bool runTransmitSuppressionSweepTest()
     // Two checks on the method, not on the chain.
     //
     // FIRST: halving the amplitude must halve the emitted carrier exactly.
-    // create_txa's alc runs with max_gain = 1.0 and out_targ = 1.0 and cannot be
-    // turned off; if it were acting at the sweep's amplitude the two runs would
-    // not scale, because a limiter is not a linear stage. This is the assertion
-    // that makes "the ALC is idle here" a measurement rather than a reading of
-    // TXA.c.
+    // A limiter is not a linear stage, so if anything in the chain were riding
+    // gain at the sweep's amplitude the two runs would not scale. This is the
+    // assertion that makes "no gain is being ridden here" a measurement rather
+    // than a reading of TXA.c -- which matters in both directions now:
+    // create_txa's alc still comes up with run = 1, and it is
+    // WdspChannel::open()'s SetTXAALCSt(id, 0) that takes it out. This probe
+    // fails if that call is ever dropped AND the sweep amplitude reaches the
+    // 0.997424 threshold; runTransmitAlcImdTest is the case that fails if the
+    // call is dropped at all.
     //
     // SECOND: the deepest rows above read past 200 dB, which no float32 FIR
     // achieves. If that figure were a real filter response it would not move
@@ -2623,6 +2682,434 @@ bool runTransmitZerosCensusTest()
     return true;
 }
 
+// ── TXA's OWN ALC, and why it must not be in this chain ───────────────────
+//
+// create_txa() builds an ALC (a wcpAGC) with run = 1 and never offers a call to
+// change that. AetherSDR declares only SetTXAMode and SetTXABandpassFreqs, so
+// until this case existed nothing in the tree had ever set it, and nothing
+// reads its meter either -- TXA_ALC_GAIN is fed from &alc.p->gain and no
+// AetherSDR surface publishes it. An unmetered level control after the filters
+// is the same shape of fault #5463 -> #5646 removed from the mic path.
+//
+// ITS POSITION IS WHAT MAKES ITS PRODUCTS ESCAPE. xtxa() runs it AFTER bp0, bp1
+// and bp2 and immediately before the modulators, so anything it creates reaches
+// the wire unfiltered. Every product this case measures lands OUTSIDE the
+// 300..2700 Hz passband and is still there.
+//
+// ── The threshold, derived from loadWcpAGC() rather than assumed ──────────
+//
+//     out_target  = out_targ * (1 - exp(-n_tau)) * 0.9999 = 0.997424
+//     min_volts   = out_target / (var_gain * max_gain)    = 0.997424
+//     slope_const = out_target * (1 - 1/var_gain) / tmp   = 0   (var_gain = 1)
+//     mult        = out_target / volts,   volts >= min_volts
+//
+// The gain is therefore EXACTLY 1.0 until the tracked envelope rises above
+// 0.997424, and out_target/volts -- a pure limiter, never makeup -- above it.
+// The envelope reaching it is the audio peak unchanged: rsmpin has gain 1.0,
+// xpanel has gain1 = 1.0, every other stage between (phrot, amsq, eqp,
+// preemph, leveler, cfcomp, compressor, osctrl) is created run = 0 and nothing
+// here turns one on, and bp0's gain of 2.0 for SSB is exactly what makes the
+// analytic signal's magnitude equal the real audio's amplitude rather than half
+// it. Hl2TxDsp's own ALC targets 0.85 and its hard clamp is +/-1.0, so the
+// stage is dormant at nominal drive and reachable only at the clamp.
+//
+// ── THE OBVIOUS TEST DOES NOT BITE, AND THAT IS THE FINDING ───────────────
+//
+// The natural hypothesis is that the 1 ms tau_attack tracks the 0.83 ms
+// envelope of a two-tone spaced ~1200 Hz and gain-modulates at the difference
+// frequency. MEASURED, IT DOES NOT, and the table below is kept in the output
+// so the next person does not have to rediscover it:
+//
+//     spacing 1200 Hz, drive 1.0 .. 10.0   ->  IMD3 at the arithmetic floor
+//                                              (-164 dBc, i.e. nothing)
+//
+// tau_attack is not the stage's time resolution. What the loop actually
+// compares against is `ring_max`, a running maximum over attack_buffsize =
+// ceil(sample_rate * n_tau * tau_attack) = 288 samples at 48 kHz -- a 6 ms
+// LOOK-AHEAD PEAK WINDOW. An envelope that repeats every 0.83 ms puts seven
+// peaks inside that window, so ring_max is constant and the gain applied is a
+// constant scalar: limiting with no modulation and no products.
+//
+// The stage only modulates when the envelope is slow enough for the window to
+// resolve it -- below roughly 1/6 ms ~= 170 Hz. Measured at drive 1.2:
+//
+//     spacing   50 Hz  ->  -31.5 dBc      spacing  200 Hz  ->  floor
+//     spacing  100 Hz  ->  -46.6 dBc      spacing  400+ Hz ->  floor
+//
+// WHICH IS THE BAND SPEECH LIVES IN. Syllabic and plosive envelope energy is
+// all below 170 Hz, so on voice this stage is a gain modulator, and it sits
+// where its products cannot be filtered. The two-tone below at 50 Hz spacing
+// is the narrowest honest proxy for that; a 1200 Hz two-tone is blind to it,
+// which is exactly why an on-air IMD3 figure taken at wide tone spacing cannot
+// be attributed to this stage.
+//
+// ── AND YET THE ALC MUST STAY, WHICH IS THE POINT OF THIS CASE ────────────
+//
+// All of the above was assembled as the argument for calling SetTXAALCSt(id, 0)
+// in WdspChannel::open(). MEASURING PAST THE WIRE CLAMP KILLED IT. Behind TXA
+// sits ep2WriteTxIq, which clamps I and Q independently at +/-1.0 -- a harder
+// nonlinearity than the ALC, after every filter, and one that moves phase too.
+// The running ALC holds the envelope below 0.997424 and keeps that clipper
+// asleep. Turn it off and bp0's ringing on Hl2TxDsp's already-clamped audio
+// reaches about 1.27, the clipper wakes, and wire IMD3 at 1205 Hz spacing goes
+// from -89.4 dBc to -27.8 dBc: 61.7 dB WORSE.
+//
+// So this case ASSERTS THE ALC IS IN CIRCUIT, and its bound is taken at the
+// wire and not at the TXA output. The TXA-output figures are kept because they
+// are what makes the trap legible: measured there, turning the ALC off looks
+// free.
+struct TwoToneImd
+{
+    double toneDb = 0.0;      // stronger wanted tone, dB (arbitrary ref)
+    double lowerDb = -300.0;  // 2f1-f2 product, dBc against ONE tone
+    double upperDb = -300.0;  // 2f2-f1 product, dBc against ONE tone
+    std::size_t samples = 0;
+    // TXA_ALC_GAIN across the retained blocks. See the sampling note in
+    // runTransmitChannel: block-rate, so this bounds the gain, not its ripple.
+    double alcMinDb = 0.0;
+    double alcMaxDb = 0.0;
+    std::size_t alcReadings = 0;
+    // TXA OUTPUT IQ, before ep2WriteTxIq. Unity maps straight to 16-bit full
+    // scale: Hl2TxDsp::modulate does m_iq.emplace_back(m_outI[k], m_outQ[k])
+    // with no gain, Hl2Backend hands that to MetisClient::queueTxIq unchanged,
+    // and ep2WriteTxIq clamps each component to +/-1.0 and multiplies by 32767.
+    // So peakIq is DIRECTLY the fraction of full scale the gateware sees, and
+    // anything at or above 1.0 is being clipped on the way out.
+    double peakIq = 0.0;   // max |I + jQ|
+    double rmsIq = 0.0;    // sqrt(mean(|I + jQ|^2))
+};
+
+double worstImd(const TwoToneImd& imd)
+{
+    return std::max(imd.lowerDb, imd.upperDb);
+}
+
+// Both signs, because USB puts the wanted energy on the NEGATIVE baseband half
+// (fir_bandpass builds exp(-j*w*pos); see runTransmitLiveGeometryTest) while a
+// product is only known to be somewhere. In-band opposite-sideband suppression
+// is already pinned above 100 dB by runTransmitSuppressionSweepTest, so the
+// larger of the two bins is the component and the other is its image.
+double eitherSignBin(const TransmitRun& run, double hz, double fs,
+                     std::size_t count)
+{
+    return std::max(binPower(run.iq, run.index, hz, fs, count),
+                    binPower(run.iq, run.index, -hz, fs, count));
+}
+
+TwoToneImd measureTwoToneImd(double drivePeak, double f1Hz, double f2Hz,
+                             double lowHz, double highHz,
+                             WdspChannel::Mode mode = WdspChannel::Mode::Usb,
+                             int forceAlc = -1, double gridHz = 50.0,
+                             bool clampInput = false, bool wireClamp = false)
+{
+    TwoToneImd out;
+    const double fs = 48000.0;
+    std::vector<double> alcGainDb;
+    const TransmitRun run =
+        runTransmitChannelSettled(0, f1Hz, mode, lowHz, highHz,
+                                  96, 24, kSpectralPaceUs, drivePeak, f2Hz,
+                                  forceAlc, &alcGainDb, clampInput);
+    if (!alcGainDb.empty()) {
+        const auto [lo, hi] =
+            std::minmax_element(alcGainDb.begin(), alcGainDb.end());
+        out.alcMinDb = *lo;
+        out.alcMaxDb = *hi;
+        out.alcReadings = alcGainDb.size();
+    }
+    if (!run.created || run.iq.empty()) {
+        return out;
+    }
+    // Every frequency in play is a whole multiple of 50 Hz, so truncating to a
+    // whole number of 50 Hz cycles puts ALL of them -- wanted tones, products
+    // and DC -- exactly on the analysis grid at once, and the rectangular
+    // window's leakage between them sums to zero. Without it the product bins
+    // read the Dirichlet kernel of the two strong tones and this case measures
+    // its own analysis window. Same correction, same reason, as the sweep's
+    // wholeCycleCount() use above.
+    const std::size_t count = wholeCycleCount(run.iq.size(), gridHz, fs);
+    if (count == 0) {
+        return out;
+    }
+    out.samples = count;
+    {
+        double sumSq = 0.0;
+        for (std::size_t n = 0; n < count; ++n) {
+            const double mag = std::abs(std::complex<double>(run.iq[n].real(),
+                                                             run.iq[n].imag()));
+            out.peakIq = std::max(out.peakIq, mag);
+            sumSq += mag * mag;
+        }
+        out.rmsIq = std::sqrt(sumSq / static_cast<double>(count));
+    }
+    // ── THE WIRE, MODELLED EXACTLY ───────────────────────────────────────
+    //
+    // MetisProtocol.cpp's ep2WriteTxIq is the last thing between TXA and the
+    // radio, and it is a CLIPPER: it clamps I and Q INDEPENDENTLY to +/-1.0 and
+    // then scales by 32767. Measuring at the TXA output alone therefore answers
+    // a question nobody asked -- with the ALC off the envelope leaving TXA can
+    // exceed 1.0, and what reaches the band is that envelope flat-topped per
+    // component, which distorts phase as well as amplitude. Anything claiming
+    // the ALC can be removed has to be measured HERE, past the clipper, or it
+    // is measuring a signal that never existed.
+    //
+    // The 16-bit quantisation is modelled too, so the floor this leg reports is
+    // the wire's floor (about -90 dBc) and not the correlation's.
+    TransmitRun wired;
+    const TransmitRun* analysed = &run;
+    if (wireClamp) {
+        wired.index = run.index;
+        wired.iq.reserve(run.iq.size());
+        for (const std::complex<float>& z : run.iq) {
+            const auto q = [](float v) -> float {
+                if (v > 1.0f) v = 1.0f;
+                if (v < -1.0f) v = -1.0f;
+                return static_cast<float>(
+                    static_cast<std::int16_t>(v * 32767.0f)) / 32767.0f;
+            };
+            wired.iq.emplace_back(q(z.real()), q(z.imag()));
+        }
+        analysed = &wired;
+    }
+    const TransmitRun& a = *analysed;
+    const double tone = std::max(eitherSignBin(a, f1Hz, fs, count),
+                                 eitherSignBin(a, f2Hz, fs, count));
+    if (tone <= 0.0) {
+        return out;
+    }
+    out.toneDb = 20.0 * std::log10(tone);
+    // suppressionDb() is 20*log10(unwanted/wanted) and so is ALREADY dBc, and
+    // already negative for a product below its tone. No sign flip.
+    // std::abs: for the survey pair the lower product is at a NEGATIVE audio
+    // frequency, and eitherSignBin already probes both wire signs.
+    out.lowerDb = suppressionDb(tone, eitherSignBin(a, std::abs(2.0 * f1Hz - f2Hz), fs, count));
+    out.upperDb = suppressionDb(tone, eitherSignBin(a, std::abs(2.0 * f2Hz - f1Hz), fs, count));
+    return out;
+}
+
+bool runTransmitAlcImdTest()
+{
+    constexpr double kLow = 300.0;
+    constexpr double kHigh = 2700.0;
+    constexpr double kF1 = 1400.0;
+    constexpr double kNarrow = 1450.0;   // 50 Hz apart: inside the 6 ms window
+    constexpr double kWide = 2600.0;     // 1200 Hz apart: invisible to it
+    // The survey/on-air pair, kept at its own frequencies rather than rounded.
+    constexpr double kSurveyF1 = 702.0;
+    constexpr double kSurveyF2 = 1907.0;
+    // Above the 0.997424 threshold, and in the regime the live path actually
+    // reaches. Hl2TxDsp clamps at +/-1.0, but bp0 -- 2048+ taps, sitting ahead
+    // of the ALC -- rings on that clamped waveform, and the clipped leg below
+    // MEASURES where that lands: TXA_ALC_GAIN reads 2.08 dB there, i.e. an
+    // envelope of 10^(2.08/20) = 1.27. So 1.2 is inside what the clamp
+    // delivers, not an invented overdrive.
+    constexpr double kHotDrive = 1.20;
+    // A chain with no level control left in it should be at the float32
+    // arithmetic floor, around -165 dBc. -80 dBc is nowhere near either the
+    // floor or the -31 dBc the stage produces, so this bound cannot be met by
+    // accident in either direction.
+    constexpr double kImdBoundDbc = -80.0;
+
+    bool ok = true;
+    std::cout << "  TXA two-tone IMD3, " << kLow << ".." << kHigh
+              << " Hz, dBc against ONE tone:\n";
+
+    // ── THE SURVEY'S QUESTION, ANSWERED DIRECTLY ─────────────────────────
+    //
+    // streams/hl2-telemetry/docs/txa-parameter-survey.md section 10 disputes
+    // the "1 ms attack tracks a 0.83 ms envelope" mechanism and offers three
+    // alternatives. This leg settles it on the stimulus the on-air figure was
+    // taken with -- 702 + 1907 Hz (1205 Hz apart), LSB, the signed passband
+    // Hl2TxDsp::applyModeAndFilter builds for LSB -- at the three levels asked
+    // for, with the ALC FORCED on and off in the same binary so the comparison
+    // is not across two builds.
+    //
+    // Survey alternative (c), that bp0's gain of 2.0 pushes the peak over
+    // out_target, is DISPROVED by the tone column below: a two-tone whose
+    // composite peak is P comes out with each tone at P/2, i.e. an analytic
+    // envelope of exactly P. Gain 2.0 on a one-sided filter makes the analytic
+    // magnitude EQUAL the real amplitude rather than double it, because the
+    // real tone only had half its energy in the retained half-plane.
+    std::cout << "    -- survey leg: LSB, " << kSurveyF1 << " + " << kSurveyF2
+              << " Hz (" << (kSurveyF2 - kSurveyF1)
+              << " Hz apart), ALC forced on vs off --\n"
+              << "       peak|IQ| is the TXA output envelope, and NOTHING scales it\n"
+              << "       between here and the wire: ep2WriteTxIq clamps each of I\n"
+              << "       and Q at +/-1.0 and multiplies by 32767, so 1.0 IS full scale.\n";
+    for (const double perToneDbfs : {-20.0, -10.0, -6.0}) {
+        const double perTone = std::pow(10.0, perToneDbfs / 20.0);
+        const double peak = 2.0 * perTone;   // composite envelope peak
+        TwoToneImd on, off;
+        for (const int state : {1, 0}) {
+            const TwoToneImd imd =
+                measureTwoToneImd(peak, kSurveyF1, kSurveyF2, -kHigh, -kLow,
+                                  WdspChannel::Mode::Lsb, state, 1.0);
+            (state == 1 ? on : off) = imd;
+            std::cout << "      " << perToneDbfs << " dBFS/tone (peak "
+                      << peak << ")  ALC " << (state ? "ON " : "OFF")
+                      << "  IMD3 worst " << worstImd(imd)
+                      << " dBc   ALC_GAIN min " << imd.alcMinDb << " max "
+                      << imd.alcMaxDb << " ripple "
+                      << (imd.alcMaxDb - imd.alcMinDb)
+                      << " dB   peak|IQ| " << imd.peakIq << " ("
+                      << (20.0 * std::log10(std::max(1e-12, imd.peakIq)))
+                      << " dBFS, " << (imd.peakIq * 32767.0)
+                      << "/32767)   rms|IQ| " << imd.rmsIq << "\n";
+        }
+        // SAY WHEN THE DIFFERENCE IS NOT A MEASUREMENT. At -6 dBFS/tone the two
+        // figures are -174 and -191 dBc and the arithmetic prints "16.9 dB",
+        // which reads as a real cost and is not one: both are the correlation's
+        // own floor, which moves by tens of dB run to run. A floor minus a
+        // floor is noise, and an unlabelled 16.9 in a table is exactly how a
+        // wrong mechanism gets believed.
+        const bool bothAtFloor = worstImd(on) < -140.0 && worstImd(off) < -140.0;
+        std::cout << "      " << perToneDbfs
+                  << " dBFS/tone: ALC costs " << (worstImd(on) - worstImd(off))
+                  << " dB of IMD3"
+                  << (bothAtFloor ? "   [BOTH AT THE ARITHMETIC FLOOR -- this"
+                                    " difference is noise, not a cost]" : "")
+                  << "\n";
+        // THE INDEX CROSS-CHECK, and the reason a mirrored enum value is safe
+        // here. -800 dB is 20*log10(1e-40): alc.p->gain is assigned ONLY inside
+        // xwcpagc's run branch, so a stage that has never run leaves it at the
+        // allocation's zero. No other TXA meter index can produce that value.
+        if (!require(off.alcReadings > 0 && off.alcMaxDb < -700.0,
+                     "TXA_ALC_GAIN index is wrong: a never-run ALC did not "
+                     "read -800 dB")) {
+            ok = false;
+        }
+        if (perToneDbfs <= -10.0 &&
+            !require(on.alcReadings > 0 &&
+                         std::abs(on.alcMaxDb) < 1.0e-9 &&
+                         std::abs(on.alcMinDb) < 1.0e-9,
+                     "TXA_ALC_GAIN index is wrong: a running ALC below its "
+                     "threshold did not read exactly 0.0 dB")) {
+            ok = false;
+        }
+    }
+
+    // ── IS THE STAGE REACHABLE ON THE LIVE PATH AT ALL? ──────────────────
+    //
+    // Hl2TxDsp's last act before modulate() is
+    // std::clamp(preAlc * m_alcGain, -1.0f, 1.0f), so the channel can never see
+    // an INPUT peak above 1.0 -- barely over the ALC's 0.997424 threshold. What
+    // the ALC sees is not that peak, though: bp0 rings on the flat tops and the
+    // envelope arriving at the ALC is about 1.27 (read off TXA_ALC_GAIN in the
+    // rows below). This leg feeds exactly that: a two-tone overdriven to 1.4 and then
+    // flat-topped at 1.0, which is what an operator with the mic slider up
+    // actually delivers. The ALC is forced on and off around the SAME clipped
+    // input, so the clipping's own products cancel out of the comparison and
+    // the difference is the ALC's alone.
+    std::cout << "    -- clipped leg: what Hl2TxDsp's +/-1.0 clamp delivers --\n";
+    for (const double spacingHz : {50.0, 1205.0}) {
+        TwoToneImd on, off;
+        for (const int state : {1, 0}) {
+            const TwoToneImd imd = measureTwoToneImd(
+                1.4, kF1, kF1 + spacingHz, kLow, kHigh,
+                WdspChannel::Mode::Usb, state, 5.0, true);
+            (state == 1 ? on : off) = imd;
+            std::cout << "      spacing " << spacingHz << " Hz, clipped at 1.0"
+                      << "  ALC " << (state ? "ON " : "OFF") << "  IMD3 worst "
+                      << worstImd(imd) << " dBc   ALC_GAIN min "
+                      << imd.alcMinDb << " max " << imd.alcMaxDb << " ripple "
+                      << (imd.alcMaxDb - imd.alcMinDb) << " dB\n";
+        }
+        std::cout << "      spacing " << spacingHz << " Hz: ALC costs "
+                  << (worstImd(on) - worstImd(off)) << " dB of IMD3\n";
+    }
+
+    // ── THE LEG THAT DECIDES ON-versus-OFF, MEASURED PAST THE CLIPPER ────
+    //
+    // Everything above stops at the TXA output. This one carries on through
+    // ep2WriteTxIq's per-component +/-1.0 clamp and 16-bit scaling, which is
+    // where the argument for KEEPING the ALC lives: with the ALC in circuit the
+    // envelope leaving TXA cannot exceed 0.997424, so the wire clipper never
+    // engages; with it off, bp0's ringing on Hl2TxDsp's clamped audio takes the
+    // envelope to about 1.27, and the clipper -- which is a harder nonlinearity
+    // than the ALC, and clips I and Q separately so it moves phase too -- takes
+    // the difference. If OFF is worse here, the right change is not this one.
+    std::cout << "    -- past ep2WriteTxIq's +/-1.0 wire clamp (the band's view) --\n";
+    for (const double spacingHz : {50.0, 1205.0}) {
+        TwoToneImd on, off;
+        for (const int state : {1, 0}) {
+            const TwoToneImd imd = measureTwoToneImd(
+                1.4, kF1, kF1 + spacingHz, kLow, kHigh,
+                WdspChannel::Mode::Usb, state, 5.0, true, true);
+            (state == 1 ? on : off) = imd;
+            std::cout << "      spacing " << spacingHz << " Hz  ALC "
+                      << (state ? "ON " : "OFF") << "  IMD3 worst "
+                      << worstImd(imd) << " dBc\n";
+        }
+        std::cout << "      spacing " << spacingHz
+                  << " Hz: turning the ALC OFF changes wire IMD3 by "
+                  << (worstImd(off) - worstImd(on))
+                  << " dB (positive = OFF is WORSE)\n";
+        // THE BOUND, and it is on the ALC-ON row because that is the shipped
+        // configuration. 1205 Hz spacing only: at 50 Hz both rows are dominated
+        // by Hl2TxDsp's own input clamp, which is a different stage's problem
+        // and not something this case should pin.
+        if (spacingHz > 1000.0 &&
+            !require(worstImd(on) <= kImdBoundDbc,
+                     "wire IMD3 past ep2WriteTxIq exceeded -80 dBc at 1205 Hz "
+                     "spacing with the shipped TXA configuration")) {
+            ok = false;
+        }
+    }
+
+    // Characterisation rows, printed and not asserted: the 1200 Hz pair is the
+    // control that shows a wide two-tone cannot see this stage at all, and the
+    // 0.85 row is the stage dormant below its threshold.
+    for (const auto& row : {std::pair {kWide, kHotDrive},
+                            std::pair {kNarrow, 0.85}}) {
+        const TwoToneImd imd = measureTwoToneImd(row.second, kF1, row.first,
+                                                 kLow, kHigh);
+        std::cout << "    [characterisation] spacing " << (row.first - kF1)
+                  << " Hz, peak " << row.second << ": lower " << imd.lowerDb
+                  << " upper " << imd.upperDb << " dBc\n";
+    }
+
+    // 1. CHARACTERISATION ONLY now. 50 Hz spacing, driven into the clamp.
+    //    This used to carry the -80 dBc assertion, back when the case was
+    //    arguing for removing the ALC. It is measured at the TXA OUTPUT, which
+    //    is the plane that made removal look free; the assertion moved to the
+    //    wire leg above, where the answer is the opposite.
+    const TwoToneImd hot = measureTwoToneImd(kHotDrive, kF1, kNarrow, kLow, kHigh);
+    const double worst = std::max(hot.lowerDb, hot.upperDb);
+    std::cout << "    spacing " << (kNarrow - kF1) << " Hz, peak " << kHotDrive
+              << ": 2f1-f2 (" << (2.0 * kF1 - kNarrow) << " Hz) " << hot.lowerDb
+              << " dBc  2f2-f1 (" << (2.0 * kNarrow - kF1) << " Hz) "
+              << hot.upperDb << " dBc  worst " << worst << " dBc  ["
+              << hot.samples << " samples]\n";
+    if (!require(hot.samples > 0, "two-tone run produced no capture")) {
+        ok = false;
+    }
+
+    // 2. THE ALC IS IN CIRCUIT, asserted directly rather than inferred from a
+    //    decibel figure. Doubling the drive must NOT double the output: a
+    //    limiter answers ~0 dB here and a bypassed one answers 6.02 dB. This is
+    //    the assertion that fails the moment somebody adds
+    //    SetTXAALCSt(id, 0) to WdspChannel::open(), and it says so in its
+    //    message, because the decibel bound above it is at a plane where that
+    //    change looks harmless.
+    //
+    //    Drive 2.0 is a transfer-function probe, not a claim about the live
+    //    path -- Hl2TxDsp never emits it. The ratio is what is being measured.
+    const TwoToneImd unity = measureTwoToneImd(1.0, kF1, kNarrow, kLow, kHigh);
+    const TwoToneImd doubled = measureTwoToneImd(2.0, kF1, kNarrow, kLow, kHigh);
+    const double stepDb = doubled.toneDb - unity.toneDb;
+    std::cout << "    ALC in circuit: peak 1.0 -> " << unity.toneDb
+              << " dB, peak 2.0 -> " << doubled.toneDb << " dB, step "
+              << stepDb << " dB (0 expected with the ALC limiting, 6.02 without)\n";
+    if (!require(std::abs(stepDb) < 1.0,
+                 "TXA's ALC is not limiting: doubling the drive doubled the "
+                 "output. If SetTXAALCSt(id, 0) was just added, read the note "
+                 "on its declaration in aether_wdsp.h -- it costs 61.7 dB of "
+                 "wire IMD3")) {
+        ok = false;
+    }
+
+    return ok;
+}
+
 } // namespace
 
 bool runTransmitDiscardTest()
@@ -2691,6 +3178,7 @@ int main()
     check(runLeakChecked("TX live geometry", runTransmitLiveGeometryTest));
     check(runLeakChecked("TX suppression sweep", runTransmitSuppressionSweepTest));
     check(runLeakChecked("TX zeros census", runTransmitZerosCensusTest));
+    check(runLeakChecked("TX ALC two-tone IMD", runTransmitAlcImdTest));
     check(runLeakChecked("underrun test", runUnderrunTest));
     check(runLeakChecked("reconfiguration test", runReconfigurationTest));
     check(runLeakChecked("start/stop test", runStartStopTest));

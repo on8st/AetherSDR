@@ -74,7 +74,8 @@ SetChannelState(id, 1, 0)
 lifecycle.** Everything else is `create_txa`'s construction defaults, and for SSB they are
 already correct: `panel.run = 1` with `inselect = 2`, `bp0.run = 1` at
 `max(2048, dsp_size)` taps with `mp = 0`, `alc.run = 1` with `max_gain = 1.0` and
-`out_targ = 1.0`, and `gen0`, `gen1`, `phrot`, `amsq`, `eqp`, `preemph`, `leveler`,
+`out_targ = 1.0` (**and it has to stay that way — see the correction below**),
+and `gen0`, `gen1`, `phrot`, `amsq`, `eqp`, `preemph`, `leveler`,
 `cfcomp`, `compressor`, `bp1`, `bp2`, `osctrl`, `ammod`, `fmmod`, `iqc` and `cfir` all
 `run = 0`. Verified in 2.10's `third_party/wdsp/upstream/TXA.c`, `create_txa`. **The "long,
 largely undocumented initialisation sequence" the note describes is, for SSB, empty.**
@@ -429,6 +430,11 @@ uninformative.
   taps, plus one `dsp_size` block because `wdspmain` calls `dexchange` before `xtxa`. The
   per-block phase measurement shows the delay is *constant* to 7.2 × 10⁻⁶ degrees but does
   not measure its *value* — a single frequency fixes delay only modulo one period.
+  That derivation also **never counted the ALC's look-ahead ring**, which adds
+  `attack_buffsize = ceil(dsp_rate * n_tau * tau_attack)` = 288 samples = 6 ms at 48 kHz:
+  `xwcpagc` reads `ring[out_index]` while writing `ring[in_index]` with
+  `in_index = attack_buffsize + out_index`. The ALC runs, so **+21.6 ms understates the
+  chain by 6 ms**; the figure to quote is ~27.6 ms.
 - **Any mode but SSB.** No AM, DSB, SAM, FM or CW channel was opened. §4.2 flags the
   specific open question for the AM/FM family.
 - **Unkey is now covered offline.** A tone followed by reset, no clocking for
@@ -444,7 +450,10 @@ uninformative.
   introduced an impulse cache in `fir_bandpass` that 2.00 did not have. The NNR stages 2.10
   adds are `create_rxa`-only and cost a transmit channel nothing.
 - **Cold-connect cost.** Not measured; S6 §13's argument is untouched.
-- **IMD.** No two-tone measurement exists for either chain.
+- **IMD.** ~~No two-tone measurement exists for either chain.~~ **Superseded.**
+  `tests/wdsp_channel_test.cpp`'s `runTransmitAlcImdTest` measures two-tone IMD3 on the
+  TXA chain offline, at the TXA output *and* past `ep2WriteTxIq`'s wire clamp. See the
+  correction at the end of this document.
 - **The EP2 seam.** Unchanged by any of this, and a TXA migration must not be proposed as
   fixing it.
 
@@ -500,3 +509,69 @@ WDSP's existing ring flush. It is a control-path operation, not an audio callbac
 or a fade to be emitted on air. RX and a pending asynchronous flush are refused.
 The regression measures all post-reset samples and keeps real-time pacing so
 starvation cannot masquerade as success. No hardware or RF behavior is claimed.
+
+
+## Correction — TXA's own ALC: measured, and it stays
+
+Added after this document was first written, and it **reverses a proposal rather than
+recording one**. The proposal was to call `SetTXAALCSt(id, 0)` in `WdspChannel::open()` and
+take WDSP's ALC out of the transmit chain. It was measured first. It is not shipped.
+
+### The case for removing it, which was entirely true and still wrong
+
+`create_txa()` builds an ALC (`wcpAGC`) with `run = 1`. AetherSDR declares only
+`SetTXAMode` and `SetTXABandpassFreqs`, so it runs on WDSP's defaults, configured by
+nothing, and — because this host publishes no TXA meter — **observed by nothing**. It sits
+*after* `bp0`, `bp1` and `bp2` and immediately before the modulators, so anything it creates
+reaches the wire unfiltered. `max_gain = var_gain = 1.0` makes `loadWcpAGC` give
+`min_volts = out_target` and `slope_constant = 0`, so its multiplier is exactly
+`out_target / volts` capped at 1.0: it can only ever **limit**, never make up gain. It costs
+6 ms of group delay. Every sentence there checks out.
+
+### What killed it
+
+The last stage before the radio is `MetisProtocol.cpp`'s `ep2WriteTxIq`, which clamps I and
+Q **independently** at ±1.0 — a harder nonlinearity than the ALC, sitting after everything,
+and one that moves phase as well as amplitude. While the ALC runs, the envelope leaving TXA
+cannot exceed `out_target = 0.997424` and that clipper never engages. With the ALC off,
+`bp0`'s ringing on the audio `Hl2TxDsp` has *already* clamped at ±1.0 takes the envelope to
+about **1.27** — measured, via `TXA_ALC_GAIN` reading 2.08 dB — and the wire clipper takes
+the difference.
+
+Measured in `tests/wdsp_channel_test.cpp`'s `runTransmitAlcImdTest`, two-tone IMD3 in dBc
+against one tone, USB 300..2700 Hz, driven as `Hl2TxDsp` drives it:
+
+| stimulus | at the TXA output | past `ep2WriteTxIq` |
+|---|---|---|
+| 1205 Hz spacing, ALC **on** | −87.5 | **−89.4** |
+| 1205 Hz spacing, ALC **off** | −87.7 | **−27.8** |
+| 50 Hz spacing, ALC **on** | −21.5 | −21.5 |
+| 50 Hz spacing, ALC **off** | −23.0 | −20.6 |
+
+**Turning the ALC off is 61.7 dB worse on the band at 1205 Hz spacing.** The column that
+made removal look free is the one that stops at the TXA output, which is not where the
+transmitter ends. `runTransmitAlcImdTest` now asserts the ALC is *in circuit*.
+
+### The mechanism it was blamed for is not its mechanism
+
+The stated reason for removing it was that the 1 ms `tau_attack` tracks the 0.83 ms envelope
+of a two-tone spaced ~1205 Hz and gain-modulates at the difference frequency. It does not.
+`volts` tracks `ring_max`, a running maximum over
+`attack_buffsize = ceil(rate × n_tau × tau_attack)` = 288 samples = a **6 ms look-ahead peak
+window**, which spans about seven of those envelope periods. Measured at 702 + 1907 Hz, LSB,
+at −20, −10 and −6 dBFS per tone: the gain ripples by **0.000 dB** and the IMD3 difference
+between ALC on and off is below the arithmetic floor at every level.
+
+It modulates only below roughly 170 Hz — where speech envelopes are — and even there, at
+50 Hz spacing, it costs 1.5 dB against an input clamp already producing −23 dBc.
+
+**So an on-air IMD3 figure taken at wide tone spacing cannot be attributed to this stage in
+either direction.** The −27.8 dBc row is the one worth carrying into an on-air
+investigation: the wire clipper, not the ALC, is the stage that produces IMD3 of that order
+at that spacing.
+
+### Supersedes
+
+- The "not measured" list's `**IMD.** No two-tone measurement exists for either chain.` —
+  one exists now, offline, for the TXA chain.
+- The group-delay bullet's +21.6 ms, which never counted the ALC's 6 ms ring.

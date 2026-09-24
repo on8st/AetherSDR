@@ -194,6 +194,84 @@ void SetRXAAGCHang(int channel, int hangMs);
 void SetRXAAGCHangThreshold(int channel, int hangThreshold);
 void SetTXAMode(int channel, int mode);
 void SetTXABandpassFreqs(int channel, double lowHz, double highHz);
+// ── TXA's own ALC (wcpAGC.c), which create_txa() builds with run = 1 ───────
+//
+// state 0 turns it OFF. Nothing else in WDSP ever writes alc.p->run -- not
+// SetTXAMode, not SetTXABandpassFreqs, not TXASetupBPFilters -- so one call
+// after OpenChannel would hold for the channel's lifetime.
+//
+// DECLARED AND DELIBERATELY NOT CALLED. This host leaves the ALC RUNNING, and
+// the declaration is here so the next person to propose turning it off finds
+// the measurement that says not to before they write the call.
+//
+// The case for turning it off looks strong and every part of it is true. The
+// stage runs on create_txa's defaults, configured by nothing. It cannot add
+// gain -- max_gain = var_gain = 1.0 makes loadWcpAGC give min_volts =
+// out_target and slope_constant = 0, so the multiplier is exactly
+// out_target/volts capped at 1.0. It is unmetered: this host publishes no TXA
+// meter, so nothing shows it acting. And xtxa() runs it AFTER bp0, bp1 and bp2
+// and before the modulators, so anything it creates escapes every filter.
+//
+// WHAT IS BEHIND IT IS A CLIPPER, AND THAT SETTLES IT. The last stage before
+// the radio is MetisProtocol.cpp's ep2WriteTxIq, which clamps I and Q
+// INDEPENDENTLY to +/-1.0 -- a harder nonlinearity than the ALC, after
+// everything, and one that moves phase as well as amplitude. While the ALC
+// runs, the envelope leaving TXA cannot exceed out_target = 0.997424 and that
+// clipper never engages. With it off, bp0's ringing on the audio Hl2TxDsp has
+// already clamped at +/-1.0 takes the envelope to about 1.27 (measured: the
+// TXA_ALC_GAIN meter reads 2.08 dB there) and the wire clipper takes the rest.
+//
+// MEASURED, in wdsp_channel_test's runTransmitAlcImdTest, two-tone IMD3 in dBc
+// against one tone, USB 300..2700, driven as Hl2TxDsp drives it:
+//
+//                              at the TXA output      past the wire clamp
+//   1205 Hz spacing, ALC on        -87.5                   -89.4
+//   1205 Hz spacing, ALC off       -87.7                   -27.8
+//     50 Hz spacing, ALC on        -21.5                   -21.5
+//     50 Hz spacing, ALC off       -23.0                   -20.6
+//
+// Turning the ALC off is 61.7 dB WORSE on the band at 1205 Hz spacing. The
+// column that made it look harmless is the one that stops at the TXA output,
+// which is not where the transmitter ends.
+//
+// AND THE MECHANISM IT WAS BLAMED FOR IS NOT ITS MECHANISM. The claim was that
+// the 1 ms tau_attack tracks the 0.83 ms envelope of a two-tone spaced
+// ~1205 Hz. It does not: the loop compares against ring_max, a running maximum
+// over attack_buffsize = ceil(rate * n_tau * tau_attack) = 288 samples = a 6 ms
+// LOOK-AHEAD PEAK WINDOW, which spans about seven of those envelope periods.
+// Measured at 702 + 1907 Hz, LSB, at -20, -10 and -6 dBFS per tone, the gain
+// ripples by 0.000 dB and the IMD3 difference is below the arithmetic floor.
+// It modulates only below about 170 Hz -- where speech envelopes are -- and
+// even there, at 50 Hz spacing, it costs 1.5 dB against a clipper already
+// producing -23 dBc.
+//
+// It DOES cost 6 ms of transmit group delay (xwcpagc reads ring[out_index]
+// while writing ring[in_index] with in_index = attack_buffsize + out_index),
+// which docs/hl2-txa-configuration-diff.md's +21.6 ms derivation never counted.
+// That is a real cost and it is not worth 61.7 dB.
+//
+// RECEIVE IS UNTOUCHED EITHER WAY: this writes txa[channel].alc, and RXA.c has
+// no alc stage at all.
+void SetTXAALCSt(int channel, int state);
+
+// TXA meter readouts. The indices mirror txaMeterType in wdsp/upstream/TXA.h,
+// exactly as AetherWdspRxMeter below mirrors RXA.h's, and a mirrored constant
+// is a constant that can drift. It is cross-checked at RUN TIME rather than by
+// eye: TXA_ALC_GAIN is fed from &alc.p->gain through xmeter's
+// 20*log10(*pgain + 1e-40), and alc.p->gain is only ever assigned inside
+// xwcpagc's `if (run)` branch, so the meter has three states that no other
+// index shares -- exactly 0.0 dB with the ALC running and below its threshold
+// (gain = volts * inv_out_target with volts floored at out_target), strictly
+// positive with it running and reducing, and -800 dB with it never having run
+// at all (gain still zero from the allocation). wdsp_channel_test asserts all
+// three, so a wrong index here fails rather than reads plausibly.
+enum AetherWdspTxMeter
+{
+    AETHER_WDSP_TXA_ALC_PK = 12,
+    AETHER_WDSP_TXA_ALC_AV = 13,
+    AETHER_WDSP_TXA_ALC_GAIN = 14
+};
+double GetTXAMeter(int channel, int meterType);
 // RXA meter readouts. RXA_S_PK / RXA_S_AV are the real signal-strength
 // meters. RXA_ADC_PK / RXA_ADC_AV measure the POST-DDC slice, which is a
 // different question from the HL2's own pre-DDC full-spectrum clip
