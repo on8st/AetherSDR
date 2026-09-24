@@ -273,6 +273,13 @@ signals:
                   const AetherSDR::TxCoordinator::Context& context); // at outputSampleRateHz
     void micPeak(float dbfs);                                   // post-gain, pre-modulation
     void alcGain(float db);                                     // ALC gain applied
+    // WDSP's TXA_ALC_GAIN after the last modulated block: the REDUCTION the
+    // TXA ALC is applying, in dB, POSITIVE when reducing and 0 when idle. A
+    // DIFFERENT STAGE from alcGain above, which is this class's host ALC and
+    // reports reduction as a NEGATIVE number: the TXA ALC runs after the
+    // modulator's bandpass and is on out of create_txa(). Emitted only by the
+    // TXA build, once per call that placed at least one block on the wire.
+    void txaAlcGain(float db);
     // Post-ALC, post-limit peak in dBFS — the level actually handed to the
     // modulator. A LEVEL, not a gain: this is what an ALC meter shows, and it
     // moves opposite to alcGain (the harder the ALC works on a quiet mic, the

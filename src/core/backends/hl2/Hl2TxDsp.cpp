@@ -229,6 +229,7 @@ void Hl2TxDsp::modulate(std::span<const float> audio)
         m_modulatorRunning = true;
     }
 
+    bool placed = false;
     for (std::size_t off = 0; off + block <= audio.size(); off += block) {
         // MONO AUDIO IN I, ZEROS IN Q. Not a convenience: xpanel runs with
         // inselect = 2 and multiplies Q by zero, which was measured rather than
@@ -272,6 +273,14 @@ void Hl2TxDsp::modulate(std::span<const float> audio)
             // inverts every in-band row, 167.31 dB becoming -175.64 dB.
             m_iq.emplace_back(m_outI[k], m_outQ[k]);
         }
+        placed = true;
+    }
+    // Read once per call rather than per block. The value is the ALC's state
+    // at the end of the last block (meter.c copies alc->gain; it does not
+    // average it), read under the meter's own lock rather than csDSP.
+    if (placed) {
+        emit txaAlcGain(static_cast<float>(
+            m_channel->transmitMeter(WdspChannel::TxMeter::AlcGain)));
     }
 }
 

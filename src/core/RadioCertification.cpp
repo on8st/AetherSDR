@@ -121,6 +121,10 @@ constexpr MeterSpec kMeterTable[] = {
     {"TX",  "ALCGAIN",  true,  true,  false, "gain the host ALC is applying, in dB; "
                                              "MeterModel::alcGainDb() consumes it and "
                                              "no GUI surface renders it yet (#5636)"},
+    {"TX",  "TXAALCGAIN", true, true, false, "WDSP TXA ALC reduction in dB, POSITIVE "
+                                             "when acting and 0 idle (opposite sign to "
+                                             "ALCGAIN); TXA modulator build only; no "
+                                             "GUI surface renders it"},
     {"TX",  "COMPPEAK", true,  true,  false, "host speech processor, polled onto the "
                                              "meter at 20 Hz; reads 0 with PROC off, "
                                              "which is a value and not a silence"},

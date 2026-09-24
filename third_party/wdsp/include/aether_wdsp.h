@@ -194,6 +194,59 @@ void SetRXAAGCHang(int channel, int hangMs);
 void SetRXAAGCHangThreshold(int channel, int hangThreshold);
 void SetTXAMode(int channel, int mode);
 void SetTXABandpassFreqs(int channel, double lowHz, double highHz);
+
+// ── TXA stage configuration ───────────────────────────────────────────────
+//
+// Every TXA stage create_txa() (TXA.c) builds is otherwise reachable only
+// through its default. WdspChannel::open() sets each of these ONCE for a
+// transmit channel, at the value create_txa() already gives it, so the
+// configuration is written down in this repo rather than inherited from
+// vendored code. See WdspChannel.cpp for the block and the values.
+//
+// Control path only: each takes ch[channel].csDSP (or the stage's own lock),
+// the section wdspmain() holds while running xtxa(). Never from an audio
+// callback. Every symbol here is exported by libaether_wdsp.a (checked with
+// nm -g); SetTXABPSRun/Freqs/Window and SetTXAICFIRRun are NOT — they sit in
+// comments in bandpass.c and icfir.c — and must not be declared.
+void SetTXAPanelRun(int channel, int run);
+void SetTXAPanelSelect(int channel, int select);    // 1 = Q, 2 = I
+void SetTXAPanelGain1(int channel, double gain);    // LINEAR, not dB
+void SetTXAPHROTRun(int channel, int run);
+void SetTXAPHROTAutoMode(int channel, int autoMode);
+void SetTXAAMSQRun(int channel, int run);
+void SetTXAEQRun(int channel, int run);             // default curve is NOT flat
+void SetTXALevelerSt(int channel, int state);
+void SetTXACFCOMPRun(int channel, int run);         // default curve is NOT flat
+void SetTXACFCOMPPeqRun(int channel, int run);
+void SetTXACompressorRun(int channel, int run);     // an instantaneous clipper
+void SetTXAosctrlRun(int channel, int run);         // needs the compressor's bp2
+void SetTXACFIRRun(int channel, int run);
+void SetTXAPreGenRun(int channel, int run);
+void SetTXAPostGenRun(int channel, int run);
+void SetTXABandpassWindow(int channel, int wintype); // 1 = 7-term Blackman-Harris
+void SetTXABandpassMP(int channel, int mp);          // 0 = linear phase
+void SetTXAALCSt(int channel, int state);
+void SetTXAALCAttack(int channel, int attackMs);
+void SetTXAALCDecay(int channel, int decayMs);
+void SetTXAALCMaxGain(int channel, double maxGainDb); // dB; 0.0 = unity
+// TXA meter readouts, a subset of txaMeterType in TXA.h. The values are that
+// enum's positions and must track it.
+//
+// TXA_ALC_GAIN IS A REDUCTION, AND IT IS POSITIVE. meter.c reports
+// 20*log10(alc->gain), and xwcpagc() sets gain = volts / out_target while it
+// multiplies the signal by out_target / volts -- the reciprocal. So the meter
+// reads 0 dB while the ALC is idle and +N dB while it takes N dB off, which is
+// the opposite sign to Hl2TxDsp's host TX:ALCGAIN (0 idle, negative reducing).
+enum AetherWdspTxMeter
+{
+    AETHER_WDSP_TXA_ALC_PK = 12,
+    AETHER_WDSP_TXA_ALC_AV = 13,
+    AETHER_WDSP_TXA_ALC_GAIN = 14,
+    AETHER_WDSP_TXA_OUT_PK = 15,
+    AETHER_WDSP_TXA_OUT_AV = 16
+};
+double GetTXAMeter(int channel, int meterType);
+
 // RXA meter readouts. RXA_S_PK / RXA_S_AV are the real signal-strength
 // meters. RXA_ADC_PK / RXA_ADC_AV measure the POST-DDC slice, which is a
 // different question from the HL2's own pre-DDC full-spectrum clip

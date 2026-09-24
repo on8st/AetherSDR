@@ -769,7 +769,10 @@ endif()
 # the same toolchain and warning flags. Run manually with ./build/<target>.
 
 add_executable(wdsp_channel_test tests/wdsp_channel_test.cpp)
-target_link_libraries(wdsp_channel_test PRIVATE aethercore)
+# aether::wdsp directly as well, for the shim header: the explicit-TXA-stage
+# case drives a raw WDSP channel as its baseline, because the only honest
+# comparison for "these calls change nothing" is a channel that never got them.
+target_link_libraries(wdsp_channel_test PRIVATE aethercore aether::wdsp)
 add_test(NAME wdsp_channel_test COMMAND wdsp_channel_test)
 
 # Socket-free lifetime checks for the two process-global FFTW planners.

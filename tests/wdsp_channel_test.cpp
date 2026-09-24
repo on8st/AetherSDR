@@ -1,5 +1,7 @@
 #include "core/dsp/WdspChannel.h"
 
+#include <aether_wdsp.h>
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -2650,6 +2652,188 @@ bool runTransmitDiscardTest()
                    "TX discard cannot modify a receive channel");
 }
 
+// ── TX explicit stage configuration: bit-identical to never calling it ────
+//
+// WdspChannel::open() sets every TXA stage create_txa() builds, by name, at
+// the value create_txa() already gives it. The claim is "no sample changes",
+// and the only test of that claim which is not a tautology compares against a
+// channel that NEVER RECEIVED THE CALLS. Re-typing the values into this file
+// and checking them against themselves would pass whatever open() did.
+//
+// So three channels, fed the same samples:
+//
+//   explicit   a WdspChannel, opened by the production open() -- the block
+//              under test runs, exactly as it does for Hl2TxDsp.
+//   baseline   a raw WDSP channel opened the way open() did BEFORE the block:
+//              OpenChannel, SetTXAMode, SetTXABandpassFreqs, start. Nothing
+//              else. This is create_txa()'s defaults, untouched.
+//   control    the baseline plus ONE deviation (the leveler on). It must
+//              DIFFER from the baseline, which proves the comparison can see a
+//              single stage flag. Two channels that both emit zeros are
+//              also bit-identical; a comparison that cannot fail proves nothing.
+//
+// The stimulus is the lab's steady two-tone, 702 + 1907 Hz, mono in I as
+// Hl2TxDsp feeds it, at three levels: quiet, the host ALC's 0.85 target peak,
+// and hot enough that the TXA ALC itself acts. The last one matters: the ALC
+// setters re-run loadWcpAGC(), and only a level where the ALC is reducing can
+// show whether that re-derivation changed anything. TXA_ALC_GAIN is read on
+// every leg and must be >0 dB on the hot one, so the leg cannot silently stop
+// exercising what it is for.
+//
+// blockForOutput = true, unlike the live geometry: with it fexchange2 waits
+// for the worker, so the output is a pure function of the input and "bit-
+// identical" is a meaningful thing to require. With it off, when the worker
+// happens to run decides which blocks underrun.
+struct ExplicitStageLeg
+{
+    bool ok = false;
+    double maxAbsDiffBaseline = 0.0;   // explicit vs baseline
+    double maxAbsDiffControl = 0.0;    // control vs baseline
+    double peak = 0.0;
+    double alcReductionDb = 0.0;       // TXA_ALC_GAIN, explicit channel
+    double alcReductionBaselineDb = 0.0;
+};
+
+ExplicitStageLeg runExplicitStageLeg(double toneAmplitude)
+{
+    ExplicitStageLeg leg;
+
+    WdspChannel::Config config;
+    config.direction = WdspChannel::Direction::Transmit;
+    config.inputSampleRate = 24000;
+    config.dspSampleRate = 48000;
+    config.outputSampleRate = 48000;
+    config.inputBlockSize = 512;
+    config.dspBlockSize = 1024;
+    config.mode = WdspChannel::Mode::Usb;
+    config.filterLowHz = 150.0;
+    config.filterHighHz = 2850.0;
+    config.blockForOutput = true;
+
+    std::string error;
+    std::unique_ptr<WdspChannel> channel = WdspChannel::create(config, &error);
+    if (!require(channel != nullptr, error.c_str())) {
+        return leg;
+    }
+
+    // Raw channel ids from the TOP of WDSP's table. WdspChannel allocates from
+    // the bottom and this case holds one channel, so these are free; checked
+    // rather than assumed.
+    constexpr int kBaseline = 31;
+    constexpr int kControl = 30;
+    if (!require(channel->channelIdForTest() != kBaseline &&
+                     channel->channelIdForTest() != kControl,
+                 "explicit-stage test: raw channel ids collide with the WdspChannel")) {
+        return leg;
+    }
+    const auto openRaw = [&config](int id) {
+        OpenChannel(id, static_cast<int>(config.inputBlockSize),
+                    static_cast<int>(config.dspBlockSize), config.inputSampleRate,
+                    config.dspSampleRate, config.outputSampleRate, 1 /* TX */, 0,
+                    config.muteDelayUpSec, config.muteSlewUpSec,
+                    config.muteDelayDownSec, config.muteSlewDownSec, 1);
+        SetTXAMode(id, AETHER_WDSP_RX_USB);   // TXA_USB: same numbering as RXA
+        SetTXABandpassFreqs(id, config.filterLowHz, config.filterHighHz);
+    };
+    openRaw(kBaseline);
+    openRaw(kControl);
+    SetTXALevelerSt(kControl, 1);             // the one deviation
+    SetChannelState(kBaseline, 1, 0);
+    SetChannelState(kControl, 1, 0);
+
+    const std::size_t in = config.inputBlockSize;
+    const std::size_t out = channel->outputBlockSize();
+    std::vector<float> inI(in), inQ(in, 0.0f);
+    std::vector<float> aL(out), aR(out), bL(out), bR(out), cL(out), cR(out);
+    std::vector<float> scratchI(in), scratchQ(in);
+
+    bool processed = true;
+    constexpr std::size_t kBlocks = 120;      // 2.56 s at 24 kHz
+    for (std::size_t block = 0; block < kBlocks && processed; ++block) {
+        for (std::size_t k = 0; k < in; ++k) {
+            const double t = static_cast<double>(block * in + k) /
+                             static_cast<double>(config.inputSampleRate);
+            inI[k] = static_cast<float>(
+                toneAmplitude * (std::cos(2.0 * std::numbers::pi * 702.0 * t) +
+                                 std::cos(2.0 * std::numbers::pi * 1907.0 * t)));
+        }
+        processed = channel->processIq(inI, inQ, aL, aR) ==
+                    WdspChannel::ProcessResult::Ok;
+        int errB = 0;
+        int errC = 0;
+        // fexchange2 takes non-const pointers; hand it copies so no channel can
+        // disturb what the next one is fed.
+        scratchI = inI; scratchQ = inQ;
+        fexchange2(kBaseline, scratchI.data(), scratchQ.data(), bL.data(), bR.data(), &errB);
+        scratchI = inI; scratchQ = inQ;
+        fexchange2(kControl, scratchI.data(), scratchQ.data(), cL.data(), cR.data(), &errC);
+        processed = processed && errB == 0 && errC == 0;
+        for (std::size_t k = 0; k < out; ++k) {
+            leg.maxAbsDiffBaseline = std::max({leg.maxAbsDiffBaseline,
+                std::abs(static_cast<double>(aL[k]) - bL[k]),
+                std::abs(static_cast<double>(aR[k]) - bR[k])});
+            leg.maxAbsDiffControl = std::max({leg.maxAbsDiffControl,
+                std::abs(static_cast<double>(cL[k]) - bL[k]),
+                std::abs(static_cast<double>(cR[k]) - bR[k])});
+            leg.peak = std::max(leg.peak, std::hypot(static_cast<double>(aL[k]),
+                                                     static_cast<double>(aR[k])));
+        }
+    }
+    leg.alcReductionDb = channel->transmitMeter(WdspChannel::TxMeter::AlcGain);
+    leg.alcReductionBaselineDb = GetTXAMeter(kBaseline, AETHER_WDSP_TXA_ALC_GAIN);
+
+    SetChannelState(kBaseline, 0, 1);
+    SetChannelState(kControl, 0, 1);
+    CloseChannel(kBaseline);
+    CloseChannel(kControl);
+    channel.reset();
+
+    leg.ok = require(processed, "explicit-stage test: a channel refused a block");
+    return leg;
+}
+
+bool runTransmitExplicitStageTest()
+{
+    bool ok = true;
+    struct Level { const char* name; double amplitude; bool alcMustAct; };
+    // Per-tone amplitude; the two-tone's peak is twice it.
+    const Level levels[] = {
+        {"quiet (peak 0.20)", 0.10, false},
+        {"host-ALC target (peak 0.85)", 0.425, false},
+        {"hot (peak 1.20): TXA ALC acting", 0.60, true},
+    };
+    for (const Level& level : levels) {
+        const ExplicitStageLeg leg = runExplicitStageLeg(level.amplitude);
+        std::cout << "  TX explicit stages, " << level.name
+                  << ": |explicit - baseline| max " << leg.maxAbsDiffBaseline
+                  << ", |control - baseline| max " << leg.maxAbsDiffControl
+                  << ", output peak " << leg.peak
+                  << ", TXA_ALC_GAIN " << leg.alcReductionDb << " dB (baseline "
+                  << leg.alcReductionBaselineDb << " dB)\n";
+        ok = leg.ok && ok;
+        ok = require(leg.peak > 0.0,
+                     "explicit-stage test: the channel produced no output") && ok;
+        // Exact, not within a tolerance: the same code on the same samples in
+        // the same order has no reason to differ in the last bit, and a
+        // tolerance is where a small real change would hide.
+        ok = require(leg.maxAbsDiffBaseline == 0.0,
+                     "explicit-stage test: setting the TXA stages at their "
+                     "create_txa() values changed the transmitted IQ") && ok;
+        ok = require(leg.maxAbsDiffControl > 1e-4,
+                     "explicit-stage test: the positive control (leveler on) did "
+                     "not change the output, so this comparison cannot see a stage "
+                     "flag") && ok;
+        ok = require(leg.alcReductionDb == leg.alcReductionBaselineDb,
+                     "explicit-stage test: TXA_ALC_GAIN differs from the baseline") && ok;
+        if (level.alcMustAct) {
+            ok = require(leg.alcReductionDb > 0.1,
+                         "explicit-stage test: the hot leg did not make the TXA ALC "
+                         "act, so it no longer tests the ALC setters") && ok;
+        }
+    }
+    return ok;
+}
+
 int main()
 {
     const uint64_t allocationBaseline = WdspChannel::outstandingAllocationsForTest();
@@ -2691,6 +2875,8 @@ int main()
     check(runLeakChecked("TX live geometry", runTransmitLiveGeometryTest));
     check(runLeakChecked("TX suppression sweep", runTransmitSuppressionSweepTest));
     check(runLeakChecked("TX zeros census", runTransmitZerosCensusTest));
+    check(runLeakChecked("TX explicit stage configuration",
+                         runTransmitExplicitStageTest));
     check(runLeakChecked("underrun test", runUnderrunTest));
     check(runLeakChecked("reconfiguration test", runReconfigurationTest));
     check(runLeakChecked("start/stop test", runStartStopTest));

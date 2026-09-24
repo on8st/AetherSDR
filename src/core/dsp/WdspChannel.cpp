@@ -38,6 +38,13 @@ constexpr int kWdspChannelCount = 32;
 constexpr int kRxChannelType = 0;
 constexpr int kTxChannelType = 1;
 
+// WdspChannel::TxMeter mirrors the shim's AetherWdspTxMeter, which mirrors
+// txaMeterType in TXA.h. The shim cannot include TXA.h, so these two copies at
+// least cannot drift apart silently; wdsp_channel_test checks the shim's
+// AlcGain index against what the ALC actually does.
+static_assert(static_cast<int>(WdspChannel::TxMeter::AlcGain) == AETHER_WDSP_TXA_ALC_GAIN);
+static_assert(static_cast<int>(WdspChannel::TxMeter::OutputPeak) == AETHER_WDSP_TXA_OUT_PK);
+
 std::mutex g_channelMutex;
 // THE FFTW PLANNER LOCK, AND IT IS NOT OURS. This used to be a mutex owned
 // by this file, which made a process-global FFTW property look like a WDSP
@@ -842,6 +849,13 @@ double WdspChannel::meter(Meter which) const noexcept
     return GetRXAMeter(m_channelId, static_cast<int>(which));
 }
 
+double WdspChannel::transmitMeter(TxMeter which) const noexcept
+{
+    if (m_config.direction != Direction::Transmit)
+        return -300.0;
+    return GetTXAMeter(m_channelId, static_cast<int>(which));
+}
+
 std::size_t WdspChannel::outputBlockSize() const noexcept
 {
     return m_outputBlockSize;
@@ -1037,6 +1051,57 @@ void WdspChannel::open() noexcept
     } else {
         SetTXAMode(m_channelId, wdspMode(m_config.mode));
         SetTXABandpassFreqs(m_channelId, m_config.filterLowHz, m_config.filterHighHz);
+        // ── BEGIN explicit TXA stage configuration ─────────────────────────
+        //
+        // create_txa() (third_party/wdsp/upstream/TXA.c) builds some twenty
+        // stages, and until this block the host set exactly two things on
+        // them: the mode and the passband, above. Every other stage ran at
+        // whatever the constructor passed -- a decision made in vendored code
+        // and written down nowhere in this repo. The TXA ALC is the stage that
+        // made that matter: it is ON out of create_txa(), it sits after every
+        // bandpass, and nothing here said so.
+        //
+        // EVERY VALUE BELOW IS THE VALUE create_txa() ALREADY GIVES THE STAGE.
+        // This block changes no sample: wdsp_channel_test's "TX explicit stage
+        // configuration" case compares a channel opened here against a channel
+        // that never received these calls, and requires them bit-identical.
+        // Changing any line is a transmit behaviour change, and belongs in its
+        // own commit with its own evidence.
+        //
+        // Each comment names the TXA.c line the value comes from, in the
+        // vendored WDSP 2.10 snapshot (third_party/wdsp/COMMIT). Window and MP
+        // apply to bp0, bp1 and bp2 alike; create_txa gives all three the same.
+        //
+        // NOT SET, deliberately: SetTXABandpassNC. create_txa gives the three
+        // bandpasses max(2048, dsp_size) taps, and TXASetNC() -- the only call
+        // that also rebuilds the FM and CFIR filters consistently -- stops and
+        // restarts the channel.
+        //
+        // The channel is still STOPPED here (it starts below). That matters for
+        // the three ALC time/gain setters: each re-runs loadWcpAGC(), which
+        // re-derives the look-ahead ring index from the current output index.
+        SetTXAPanelRun(m_channelId, 1);        // TXA.c:61   run
+        SetTXAPanelSelect(m_channelId, 2);     // TXA.c:68   2 = I; Hl2TxDsp puts audio in I
+        SetTXAPanelGain1(m_channelId, 1.0);    // TXA.c:65   unity; mic gain is Hl2TxDsp's
+        SetTXAPHROTRun(m_channelId, 0);        // TXA.c:72   phase rotator
+        SetTXAPHROTAutoMode(m_channelId, 0);   // phrot.c create_phrot(): autoMode = 0
+        SetTXAAMSQRun(m_channelId, 0);         // TXA.c:96   downward expander
+        SetTXAEQRun(m_channelId, 0);           // TXA.c:116  pre-EQ; default curve not flat
+        SetTXALevelerSt(m_channelId, 0);       // TXA.c:159  leveler; +5 dB makeup when on
+        SetTXACFCOMPRun(m_channelId, 0);       // TXA.c:203  continuous-frequency compressor
+        SetTXACFCOMPPeqRun(m_channelId, 0);    // TXA.c:205  its post-EQ
+        SetTXACompressorRun(m_channelId, 0);   // TXA.c:256  the TXA clipper
+        SetTXAosctrlRun(m_channelId, 0);       // TXA.c:277  CESSB overshoot control
+        SetTXACFIRRun(m_channelId, 0);         // TXA.c:426  Protocol-2 CIC compensation
+        SetTXAPreGenRun(m_channelId, 0);       // TXA.c:52   test generator, pre
+        SetTXAPostGenRun(m_channelId, 0);      // TXA.c:364  test generator, post
+        SetTXABandpassWindow(m_channelId, 1);  // TXA.c:252  7-term Blackman-Harris
+        SetTXABandpassMP(m_channelId, 0);      // TXA.c:246  linear phase
+        SetTXAALCSt(m_channelId, 1);           // TXA.c:314  run
+        SetTXAALCMaxGain(m_channelId, 0.0);    // TXA.c:324  max_gain 1.0 = 0 dB
+        SetTXAALCAttack(m_channelId, 1);       // TXA.c:321  tau_attack 0.001 s
+        SetTXAALCDecay(m_channelId, 10);       // TXA.c:322  tau_decay 0.010 s
+        // ── END explicit TXA stage configuration ───────────────────────────
     }
     // Cache what this open measured, right now, while we still hold the setup
     // lock -- a kill or a crash before exit must not throw the measurement away.

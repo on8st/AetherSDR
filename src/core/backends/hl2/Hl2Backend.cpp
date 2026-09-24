@@ -642,6 +642,15 @@ Hl2Backend::Hl2Backend(QObject* parent) : IRadioBackend(parent)
         m_alcGainDb = db;
         emit meterUpdate(QStringLiteral("TX:ALCGAIN"), db);
     });
+    // The OTHER ALC: WDSP's, inside the TXA channel, after the bandpass. It is
+    // on out of create_txa() and until this key nothing could see whether it
+    // acts. Published raw, as WDSP reports it -- a POSITIVE reduction, the
+    // opposite sign to TX:ALCGAIN beside it -- because the question it answers
+    // is "is this stage idle", and 0 dB means the same thing either way round.
+    // No GUI surface renders it; it is a telemetry and certification feed.
+    connect(m_txDsp, &Hl2TxDsp::txaAlcGain, this, [this](float db) {
+        emit meterUpdate(QStringLiteral("TX:TXAALCGAIN"), db);
+    });
     // The modulator's own copy of the mic gain, for healthSnapshot(). Reported
     // ALONGSIDE m_micLevel rather than instead of it: the operator's request and
     // the modulator's state are different facts, and a diagnosis needs to see
@@ -7685,6 +7694,12 @@ void Hl2Backend::defineMeters()
     // implicit slice rather than the explicit TX-waveform map.
     def(9, QStringLiteral("TX"),  QStringLiteral("ALCGAIN"), QStringLiteral("dB"),
         -20.0, 0.0,    QStringLiteral("Gain the ALC is applying"));
+    // WDSP's TXA ALC, a separate stage from meter 9's host ALC and reported
+    // with the opposite sign: WDSP's TXA_ALC_GAIN is the reduction, 0 dB idle
+    // and POSITIVE while it acts (aether_wdsp.h). The top is a presentation
+    // ceiling, like meter 9's floor. Fed only by the TXA modulator build.
+    def(10, QStringLiteral("TX"), QStringLiteral("TXAALCGAIN"), QStringLiteral("dB"),
+        0.0, 20.0,     QStringLiteral("Reduction the WDSP TXA ALC is applying"));
 }
 
 void Hl2Backend::publishTelemetry(const Hl2Telemetry& t)

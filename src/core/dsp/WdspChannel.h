@@ -410,6 +410,15 @@ public:
     enum class Meter { SignalPeak = 0, SignalAverage = 1,
                        AdcPeak = 2, AdcAverage = 3, AgcGain = 4 };
     [[nodiscard]] double meter(Meter which) const noexcept;
+    // The TXA counterpart, for a transmit channel: WDSP's txaMeterType values
+    // for the ALC and the channel output. AlcGain is the REDUCTION the TXA ALC
+    // applied at the end of the last block, in dB and POSITIVE — 0 idle, +N
+    // taking N dB off (see aether_wdsp.h for why the sign is that way round).
+    // A different stage from Hl2TxDsp's host ALC, and the opposite sign to its
+    // TX:ALCGAIN. Returns a large negative value on a receive channel.
+    enum class TxMeter { AlcPeak = 12, AlcAverage = 13, AlcGain = 14,
+                         OutputPeak = 15, OutputAverage = 16 };
+    [[nodiscard]] double transmitMeter(TxMeter which) const noexcept;
 
     [[nodiscard]] const Config& config() const noexcept { return m_config; }
     [[nodiscard]] std::size_t outputBlockSize() const noexcept;
