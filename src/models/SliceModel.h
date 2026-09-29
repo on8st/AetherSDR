@@ -447,6 +447,13 @@ signals:
     // Without them the operator's mute moved the model and the fader, and the
     // audio kept playing.
     void audioMuteCommandIssued(bool mute);
+    // The receiver's OWN audio muted or restored because an external receiver
+    // (a KiwiSDR virtual antenna) replaces it. Deliberately not
+    // audioMuteCommandIssued: that one is operator intent and the split-audio
+    // memory records it, and this mute is not the operator's. RadioModel sends
+    // both to the same seam verb, so a host-mixing backend silences the
+    // receiver the Kiwi is standing in for instead of mixing the two.
+    void receiveAudioReplacementMuteIssued(bool mute);
     void audioGainCommandIssued(int gainPercent);
     void audioPanCommandIssued(int panPercent);      // 0=left, 50=centre, 100=right
     void rxAntennaCommandIssued(const QString& antenna);

@@ -2639,6 +2639,14 @@ RadioModel::RadioModel(QObject* parent)
 
     // Forward equalizer model commands to the radio
     connect(&m_equalizerModel, &EqualizerModel::commandReady, this, [this](const QString& cmd){
+        // Without a command plane the graphic EQ is served by ClientEq
+        // (MainWindow::applyGraphicEqToClientEq, bound to the model's own
+        // state signals), so the slider and a mapped MIDI band DO act. Sending
+        // the `eq` text anyway only reached sendCmd's drop and told the
+        // operator a working control was unsupported.
+        if (!hasCommandPlane()) {
+            return;
+        }
         sendCmd(cmd);
     });
 
@@ -10295,6 +10303,14 @@ void RadioModel::wireSliceAudioIntentsToBackend(SliceModel* s)
     // these no-op there (m_backend's defaults). A backend that demodulates every
     // receiver on this host has to apply them in its own mixer.
     connect(s, &SliceModel::audioMuteCommandIssued, this,
+            [this, s](bool mute) {
+        if (m_backend) m_backend->setSliceAudioMute(s->sliceId(), mute);
+    });
+    // The KiwiSDR virtual antenna's mute of the receiver it replaces. Same verb,
+    // separate signal: see SliceModel::receiveAudioReplacementMuteIssued. On a
+    // Flex the verb is the no-op default and the slice's wire text does the
+    // work, exactly as before.
+    connect(s, &SliceModel::receiveAudioReplacementMuteIssued, this,
             [this, s](bool mute) {
         if (m_backend) m_backend->setSliceAudioMute(s->sliceId(), mute);
     });

@@ -1024,6 +1024,11 @@ void SliceModel::setExternalReceiveAudioReplacementMute(bool active,
         if (!m_audioMute) {
             m_audioMute = true;
             sendCommand(QString("slice set %1 audio_mute=1").arg(m_id));
+            // The wire text reaches a Flex only. A backend that mixes its
+            // receivers on this host takes the mute through the seam, or the
+            // model reads muted while the receiver keeps playing under the
+            // Kiwi audio.
+            emit receiveAudioReplacementMuteIssued(true);
         }
     } else {
         m_externalReceiveAudioReplacement = false;
@@ -1034,6 +1039,7 @@ void SliceModel::setExternalReceiveAudioReplacementMute(bool active,
             sendCommand(QString("slice set %1 audio_mute=%2")
                             .arg(m_id)
                             .arg(restoreMute ? 1 : 0));
+            emit receiveAudioReplacementMuteIssued(restoreMute);
         }
     }
     if (audioMute() != previousVisibleMute) {
