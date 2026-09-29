@@ -30,7 +30,10 @@ QString treatmentToken(ControlAvailability state)
 // in the light theme it is close to the ONLY half that separates the two muted
 // states — their colours are within 1.4:1 of each other there. So it is built
 // from the state and the reason together, never from colour alone (#4896).
-QString describe(ControlAvailability state, const QString& reason)
+//
+// An ACTIVE control has nothing extra to announce, so it gets back whatever
+// description it carried before registration (empty for most widgets).
+QString describe(ControlAvailability state, const QString& reason, const QString& base)
 {
     switch (state) {
         case ControlAvailability::Unavailable:
@@ -38,9 +41,9 @@ QString describe(ControlAvailability state, const QString& reason)
         case ControlAvailability::Inactive:
             return QObject::tr("Available, not currently active");
         case ControlAvailability::Active:
-            return QString();
+            return base;
     }
-    return QString();
+    return base;
 }
 
 }  // namespace
@@ -68,6 +71,8 @@ void ControlAvailabilityRegistry::registerWidget(QWidget* widget,
     Entry entry;
     entry.widget = widget;
     entry.reason = std::move(reason);
+    entry.baseToolTip = widget->toolTip();
+    entry.baseDescription = widget->accessibleDescription();
     entry.available = std::move(available);
     entry.engaged = std::move(engaged);
     m_entries.push_back(entry);
@@ -121,12 +126,13 @@ void ControlAvailabilityRegistry::applyOne(Entry& entry,
                 : engaged      ? ControlAvailability::Active
                                : ControlAvailability::Inactive;
 
-    const QString description = describe(entry.state, entry.reason);
+    const QString description = describe(entry.state, entry.reason, entry.baseDescription);
     // The reason rides on BOTH the tooltip and the accessible description. A
     // tooltip is exposed as help text, not the primary description; that was
-    // the gap #5266 shipped and #5299 then deleted.
+    // the gap #5266 shipped and #5299 then deleted. Otherwise the widget keeps
+    // the help tooltip it was registered with.
     const QString tip = entry.state == ControlAvailability::Unavailable ? entry.reason
-                                                                        : QString();
+                                                                        : entry.baseToolTip;
 
     if (QWidget* w = entry.widget) {
         // ENABLED STATE, NOT VISIBILITY. The doctrine's whole point: the control

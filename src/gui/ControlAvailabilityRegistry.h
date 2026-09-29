@@ -104,6 +104,12 @@ private:
         QPointer<QWidget> widget;
         QPointer<QAction> action;
         QString reason;
+        // What the widget said about itself before it was registered — its own
+        // help tooltip and description. Restored whenever it is NOT
+        // unavailable, so registering a control that already explains itself
+        // does not erase that explanation on the radios that support it.
+        QString baseToolTip;
+        QString baseDescription;
         AvailabilityPredicate available;
         EngagedPredicate engaged;
         ControlAvailability state{ControlAvailability::Unavailable};
