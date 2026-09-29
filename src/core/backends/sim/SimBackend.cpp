@@ -335,6 +335,10 @@ RadioCapabilities SimBackend::capabilities() const
     // is no oscillator to be wrong about.
     caps.hostFrequencyCalibration = false;
     caps.hostDroopCalibration = false;   // synthesised bins have no DDC to droop
+    // ABSENT although demo mode owns a command connection: that connection
+    // acknowledges `interlock set`, `mixer …` and the rest with success and
+    // models no effect, so the controls would move and do nothing.
+    caps.radioHeldSettings = std::nullopt;
     // The simulator has no profile store to list, load or save into.
     caps.hasProfiles = false;
     caps.hasSelectableMicInputs = false;

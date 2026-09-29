@@ -479,6 +479,10 @@ RadioCapabilities IcomCivBackend::capabilities() const
     // CI-V has no per-pan zoom-to-band/segment verb; the scope span is set
     // directly, not by a radio-owned flag.
     c.panZoomModes = std::nullopt;
+    // The Flex-shaped radio-held settings travel as command-plane text, which
+    // CI-V does not carry. A setting that gains a CI-V verb gets a field in
+    // RadioHeldSettings rather than engaging the whole record.
+    c.radioHeldSettings = std::nullopt;
 
     // NO IQ, on any networked Icom. Not deferred — absent. See icom-oracle §8.1.
     c.hasDaxStreams = false;

@@ -304,6 +304,15 @@ RadioCapabilities FlexBackend::capabilities() const
     // client does not apply a frequency scalar", which is correct for a Flex.
     caps.hostFrequencyCalibration = false;
     caps.hostDroopCalibration = false;   // no known DDC edge droop on this radio
+    // The radio holds its own station settings and takes them as FlexLib wire
+    // text over this backend's command plane (Radio Setup: Transmit, Phone &
+    // CW, Receive, Audio, Transverters). The strings are diagnostic only.
+    caps.radioHeldSettings = RadioCapabilities::RadioHeldSettings{
+        {QStringLiteral("interlock set"), QStringLiteral("transmit set"),
+         QStringLiteral("mic"), QStringLiteral("cw"), QStringLiteral("radio set"),
+         QStringLiteral("radio oscillator"), QStringLiteral("radio pll_start"),
+         QStringLiteral("mixer"), QStringLiteral("slice set record"),
+         QStringLiteral("xvtr")}};
     // Global / TX / mic profiles are a SmartSDR feature on every current model.
     caps.hasProfiles = true;
     caps.hasSelectableMicInputs = true;

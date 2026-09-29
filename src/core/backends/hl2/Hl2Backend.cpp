@@ -2424,6 +2424,12 @@ RadioCapabilities Hl2Backend::capabilities() const
     // here is not a claim the HL2's DDC has no droop, only that nothing has
     // characterised or corrected one.
     c.hostDroopCalibration = false;
+    // No command plane and no station settings held in the radio: interlock
+    // timings, max power level, mic bias/boost, the mixer, the 10 MHz
+    // reference and the rest of that Radio Setup surface do not exist on the
+    // HL2 protocol, so the dialog dims them with a reason. Frequency
+    // correction is the client's job here (hostFrequencyCalibration above).
+    c.radioHeldSettings = std::nullopt;
     // Declared because invokeExtension() now implements it (freqcal.get / .set /
     // .set_live). This field is the handshake a client pre-checks before issuing
     // an extension call, so leaving it empty while the verbs work would report

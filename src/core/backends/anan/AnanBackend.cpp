@@ -494,6 +494,8 @@ RadioCapabilities AnanBackend::capabilities() const
     c.backendPanAveraging = BackendPanAveraging{kMsPerAverageStep}; // AnanPanAnalyzer
     // No band/segment zoom: the protocol carries no per-pan zoom flag.
     c.panZoomModes = std::nullopt;
+    // No command plane: none of the radio-held Radio Setup settings exist here.
+    c.radioHeldSettings = std::nullopt;
     c.persistsMemories = false;    // default; stated explicitly
     c.clientSettingsDomains = RadioCapabilities::ClientSettingsDomain::RfGain;
     c.hostDroopCalibration = true; // AnanDroopCorrection.h -- real DDC0 CIC droop,

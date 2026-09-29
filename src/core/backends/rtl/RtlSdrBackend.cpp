@@ -144,6 +144,7 @@ RadioCapabilities RtlSdrBackend::capabilities() const
     c.hasCwTune = false;
     c.twoToneGenerator = std::nullopt;  // receive only; there is no transmitter.
     c.panZoomModes = std::nullopt;      // no command plane, no per-pan zoom flags.
+    c.radioHeldSettings = std::nullopt; // a dongle holds no station settings.
     c.hasAmCarrierLevel = false;
     c.hasVoxDelay = false;
     c.hasAgcThreshold = false;

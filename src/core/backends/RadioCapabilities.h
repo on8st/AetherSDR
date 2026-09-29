@@ -688,6 +688,38 @@ struct RadioCapabilities {
     // whether the client has measured and can correct it.
     bool hostDroopCalibration = false;
 
+    // The radio HOLDS a set of station settings of its own, and this client
+    // writes them as command-plane text: the Radio Setup dialog's interlock
+    // timings and TX REQ polarity, maximum power level, show-TX-in-waterfall,
+    // mic bias and +20 dB boost, meter-in-receive, CW sideband flag, CWX sync,
+    // RTTY mark default, frequency offset (`cal_freq`, `pll_start`,
+    // `freq_error_ppb`), 10 MHz reference source, mute-local-when-remote,
+    // binaural receive, the line-out and headphone mixer, radio-side slice
+    // recording, and the transverter table.
+    //
+    // WHY THIS EXISTS. Every one of those controls sends text that
+    // RadioModel::sendCmd drops when there is no command plane, so on a
+    // Hermes-Lite 2 (and ANAN, Icom, RTL) they moved and did nothing — the
+    // HERMES.md §17 dead-control shape. The dialog now dims each one with a
+    // stated reason unless this record is engaged (gui/RadioSetupControlGate.h).
+    //
+    // A RECORD AND NOT A BOOL, per #5262 M2 and the ratchet in
+    // tools/check_capability_records.py. A CAPABILITY AND NOT A FAMILY STRING,
+    // per the standing #5554 notice — and not RadioModel::hasCommandPlane()
+    // either, which SimBackend/demo mode also satisfies although its synthetic
+    // connection acknowledges these verbs and models no effect (the reason
+    // panZoomModes above is a record too). A second family that gains a typed
+    // verb for one of these settings should get a field here naming that
+    // setting, and the gate for that control asks the field.
+    struct RadioHeldSettings {
+        // The verbs that carry the settings, so the declaration names what it
+        // grants rather than being a bare presence bit. DIAGNOSTIC, exactly as
+        // PanZoomModes::setCommand: the gate branches on this record being
+        // ENGAGED and never on the strings.
+        QStringList setCommands;
+    };
+    std::optional<RadioHeldSettings> radioHeldSettings;
+
     // Peripherals / features every family may or may not have
     bool canReboot = false;        // supports a client-triggered radio reboot
     // The radio exposes an authoritative, client-settable dial lock. This is
