@@ -442,6 +442,7 @@ private:
     void applyCapabilitiesToUi(bool connected, const RadioCapabilities& caps);
     void applyTxAudioCapabilities(bool connected, const RadioCapabilities& caps);
     void wireStatusBarMessages();
+    void installBuildIdentityIndicator();
 
     // Push radio-side-DSP availability into one overlay menu's WNB row. Separate
     // from applyCapabilitiesToUi() because overlay menus are also built lazily

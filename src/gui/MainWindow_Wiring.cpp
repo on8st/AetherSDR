@@ -66,6 +66,8 @@
 #include "VfoWidget.h"
 #include "core/BandStackSettings.h"
 #include "core/AppSettings.h"
+#include "core/BuildIdentity.h"
+#include "core/ThemeManager.h"
 #include "core/NnrSettings.h"
 #include "core/SpotCommandPolicy.h"
 #include "core/WaterfallRate.h"
@@ -127,6 +129,77 @@ void MainWindow::wireStatusBarMessages()
                 statusBar()->showMessage(
                     tr("ATU Tune Failed - %1").arg(detail), 5000);
             });
+}
+
+// Lab-local: a build that is not an official CI/release build says so, in
+// the window title and as a tag in the lower-left corner of the status bar,
+// directly after the automation chip (the "bench-runner" tag) when that is
+// shown. composeBuildLabel() returns empty for an official build, so an
+// official build is unchanged.
+void MainWindow::installBuildIdentityIndicator()
+{
+    const BuildIdentity identity = currentBuildIdentity();
+    const QString label = composeBuildLabel(identity);
+    if (label.isEmpty() || !m_statusBarContainer) {
+        return;
+    }
+    const QString details = composeBuildDetails(identity);
+
+    setWindowTitle(QStringLiteral("%1 \u2014 %2").arg(windowTitle(), label));
+
+    auto* badge = new QLabel(label, m_statusBarContainer);
+    badge->setObjectName(QStringLiteral("buildIdentityBadge"));
+    badge->setAlignment(Qt::AlignCenter);
+    badge->setTextInteractionFlags(Qt::NoTextInteraction);
+    badge->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Fixed);
+    // Tinted warning pill: amber text and border on the warning background.
+    // Distinct from the automation chip (solid amber fill, dark text) and from
+    // the station name (large plain text, centred).
+    ThemeManager::instance().applyStyleSheet(
+        badge,
+        QStringLiteral("QLabel#buildIdentityBadge { color: {{color.accent.warning}}; "
+                       "background: {{color.background.warning}}; "
+                       "border: 1px solid {{color.accent.warning}}; border-radius: 4px; "
+                       "font-size: 12px; font-weight: bold; padding: 1px 8px; }"));
+    badge->setToolTip(details);
+    badge->setAccessibleName(tr("Unofficial build: %1").arg(label));
+    badge->setAccessibleDescription(details);
+
+    auto* layout = qobject_cast<QHBoxLayout*>(m_statusBarContainer->layout());
+    if (!layout) {
+        statusBar()->addPermanentWidget(badge);
+        return;
+    }
+    // Leftmost, or right after the automation chip and its separator.
+    int badgeIndex = 0;
+    if (m_automationChip) {
+        const int chipIndex = layout->indexOf(m_automationChip);
+        if (chipIndex >= 0) {
+            badgeIndex = chipIndex + 2;
+        }
+    }
+    layout->insertWidget(badgeIndex, badge, 0, Qt::AlignVCenter);
+    layout->insertSpacing(badgeIndex + 1, 6);
+
+    // A temporary showMessage() hides the whole container (#4649). Like the
+    // station label, the tag then moves into the permanent area so it stays
+    // visible, and returns to the lower-left corner when the message clears.
+    connect(statusBar(), &QStatusBar::messageChanged, this,
+            [this, layout, badge, badgeIndex](const QString& message) {
+        if (!message.isEmpty() && badge->parentWidget() == m_statusBarContainer) {
+            layout->removeWidget(badge);
+            statusBar()->insertPermanentWidget(0, badge);
+            badge->show();
+            // insertPermanentWidget reformats the bar and can re-show the
+            // container over the message text; keep it hidden.
+            m_statusBarContainer->hide();
+        } else if (message.isEmpty() && badge->parentWidget() != m_statusBarContainer) {
+            statusBar()->removeWidget(badge);
+            layout->insertWidget(badgeIndex, badge, 0, Qt::AlignVCenter);
+            badge->show();
+            updateStatusBarMinimumWidth();
+        }
+    });
 }
 
 

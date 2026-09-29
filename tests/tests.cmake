@@ -7111,3 +7111,13 @@ target_include_directories(cw_rx_model_test PRIVATE src)
 target_link_libraries(cw_rx_model_test PRIVATE aethercore Qt6::Core)
 add_test(NAME cw_rx_model_test COMMAND cw_rx_model_test)
 set_tests_properties(cw_rx_model_test PROPERTIES TIMEOUT 15)
+
+# Socket-free: the local-build label composition (lab-local build identity).
+add_executable(build_identity_test
+    tests/build_identity_test.cpp
+    src/core/BuildIdentity.cpp
+)
+target_include_directories(build_identity_test PRIVATE src)
+target_link_libraries(build_identity_test PRIVATE Qt6::Core)
+add_test(NAME build_identity_test COMMAND build_identity_test)
+set_tests_properties(build_identity_test PROPERTIES TIMEOUT 15)

@@ -6289,6 +6289,9 @@ void MainWindow::buildUI()
     hbox->addWidget(timeStack);
 
     statusBar()->addWidget(m_statusBarContainer, 1);
+    // Before wireStatusBarMessages(): it records the station label's layout
+    // index, which the build-identity tag shifts.
+    installBuildIdentityIndicator();
     wireStatusBarMessages();
     updateStatusBarMinimumWidth();
     updateBandStackIndicator();
