@@ -2384,8 +2384,8 @@ RadioModel::RadioModel(QObject* parent)
     // command from TransmitModel and ignores this.
     connect(&m_transmitModel, &TransmitModel::rfPowerCommandIssued, this,
             [this](int percent) {
-        if (m_backend)
-            m_backend->setTxPower(percent);
+        deliverIntent(ControlIntent::TxPower,
+                      [percent](IRadioBackend& b) { b.setTxPower(percent); });
     });
 
     // The CW pitch to a backend that owns its own demodulator.
@@ -2407,22 +2407,26 @@ RadioModel::RadioModel(QObject* parent)
     connect(&m_transmitModel, &TransmitModel::cwPitchChanged, this,
             [this](int hz) {
         if (m_backend && backendCapabilities().hostModulates)
-            m_backend->setCwPitch(hz);
+            deliverIntent(ControlIntent::CwPitch,
+                          [hz](IRadioBackend& b) { b.setCwPitch(hz); });
     });
     connect(&m_transmitModel, &TransmitModel::cwPitchCommandIssued, this,
             [this](int hz) {
         if (m_backend && backendCapabilities().hasRadioSideCwKeyer)
-            m_backend->setCwPitch(hz);
+            deliverIntent(ControlIntent::CwPitch,
+                          [hz](IRadioBackend& b) { b.setCwPitch(hz); });
     });
     connect(&m_transmitModel, &TransmitModel::cwSpeedCommandIssued, this,
             [this](int wpm) {
         if (m_backend && backendCapabilities().hasRadioSideCwKeyer)
-            m_backend->setCwSpeed(wpm);
+            deliverIntent(ControlIntent::CwSpeed,
+                          [wpm](IRadioBackend& b) { b.setCwSpeed(wpm); });
     });
     connect(&m_transmitModel, &TransmitModel::cwBreakInCommandIssued, this,
             [this](bool on) {
         if (m_backend && backendCapabilities().hasRadioSideCwKeyer)
-            m_backend->setCwBreakIn(on);
+            deliverIntent(ControlIntent::CwBreakIn,
+                          [on](IRadioBackend& b) { b.setCwBreakIn(on); });
     });
 
     // Host-keyed radios have nowhere to retain their keyer and sidetone
@@ -2468,12 +2472,15 @@ RadioModel::RadioModel(QObject* parent)
     // reaches nothing on any other family, so the intent has to cross the seam.
     connect(&m_transmitModel, &TransmitModel::voxCommandIssued, this,
             [this](bool on, int level, int delayMs) {
-        if (m_backend) m_backend->setVox(on, level, delayMs);
+        deliverIntent(ControlIntent::Vox, [on, level, delayMs](IRadioBackend& b) {
+            b.setVox(on, level, delayMs);
+        });
     });
     connect(&m_transmitModel, &TransmitModel::monitorCommandIssued, this,
             [this](bool on, int level) {
         if (m_backend && !usesFlexCommandPlane())
-            m_backend->setTxMonitor(on, level);
+            deliverIntent(ControlIntent::TxMonitor,
+                          [on, level](IRadioBackend& b) { b.setTxMonitor(on, level); });
     });
     // Primary keying intents have one typed route on every backend. Admission
     // happens before the model changes optimistic state; there is no parallel
@@ -2486,7 +2493,8 @@ RadioModel::RadioModel(QObject* parent)
     connect(&m_transmitModel, &TransmitModel::speechProcessorCommandIssued, this,
             [this](bool on, int level) {
         if (m_backend && !m_flexBackend)
-            m_backend->setSpeechProcessor(on, level);
+            deliverIntent(ControlIntent::SpeechProcessor,
+                          [on, level](IRadioBackend& b) { b.setSpeechProcessor(on, level); });
     });
 
     connect(&m_transmitModel, &TransmitModel::moxCommandIssued, this,
@@ -2601,7 +2609,8 @@ RadioModel::RadioModel(QObject* parent)
     connect(&m_transmitModel, &TransmitModel::txFilterCommandIssued, this,
             [this](int lowHz, int highHz) {
         if (m_backend && !usesFlexCommandPlane())
-            m_backend->setTxFilter(lowHz, highHz);
+            deliverIntent(ControlIntent::TxFilter,
+                          [lowHz, highHz](IRadioBackend& b) { b.setTxFilter(lowHz, highHz); });
     });
 
     // Mic gain reaches a host-modulating backend the same way and under the same
@@ -2609,7 +2618,8 @@ RadioModel::RadioModel(QObject* parent)
     connect(&m_transmitModel, &TransmitModel::micLevelCommandIssued, this,
             [this](int level) {
         if (m_backend && !usesFlexCommandPlane())
-            m_backend->setMicGain(level);
+            deliverIntent(ControlIntent::MicGain,
+                          [level](IRadioBackend& b) { b.setMicGain(level); });
     });
 
     // Forward transmit model commands to the radio
@@ -9981,6 +9991,91 @@ void RadioModel::logRemoteAudioRxSummary(const QString& reason) const
         << "RadioModel: remote_audio_rx summary" << fields.join(QLatin1Char(' '));
 }
 
+// ── No-command-plane drop accounting ────────────────────────────────────────
+//
+// WHY A RECEIPT AND NOT A TABLE. The obvious fix is a list of "wire verbs that
+// have a seam equivalent" consulted at the drop. That list would say which
+// verbs COULD be delivered, not which WERE: most seam verbs have a do-nothing
+// default, so on an ANAN or RTL (no transmitter) `transmit set rfpower=` would
+// be classified as delivered by a setTxPower() nobody implemented, and a dead
+// slider would go quiet. The receipt is taken from the verb itself — see
+// IRadioBackend::beginIntentReceipt() — so a backend that never overrode a
+// verb, or an override that declines, leaves the drop loud.
+//
+// WHY THE END OF THE TURN. Setters emit their wire text and their intent in
+// either order (setRfPower: wire first; setMicLevel: intent first), both
+// synchronously. Only a command that HAS a twin waits for the turn to finish;
+// everything else is reported on the spot, exactly as before.
+template <typename Deliver>
+void RadioModel::deliverIntent(ControlIntent intent, Deliver&& deliver)
+{
+    if (!m_backend)
+        return;
+    IRadioBackend& backend = *m_backend;
+    backend.beginIntentReceipt();
+    std::forward<Deliver>(deliver)(backend);
+    if (!backend.intentDeclined())
+        noteIntentApplied(intent);
+}
+
+void RadioModel::noteIntentApplied(ControlIntent intent)
+{
+    m_intentsAppliedThisTurn |= controlIntentBit(intent);
+    // Queued even with no drop pending, so a receipt can never outlive the
+    // turn that earned it and excuse an unrelated drop later.
+    scheduleDropAccountingFlush();
+}
+
+void RadioModel::accountDroppedCommand(const QString& command)
+{
+    const std::optional<ControlIntent> twin = controlIntentForCommand(command);
+    if (!twin) {
+        reportUnappliedDrop(command);
+        return;
+    }
+    if (controlIntentHeldForHostUse(*twin) && m_backend
+        && backendCapabilities().hostModulates) {
+        qCDebug(lcProtocol).noquote()
+            << "RadioModel: no command plane; host reads this at use time, not dropping"
+            << command;
+        return;
+    }
+    m_twinnedDropsThisTurn.append(command);
+    scheduleDropAccountingFlush();
+}
+
+void RadioModel::reportUnappliedDrop(const QString& command)
+{
+    qCWarning(lcProtocol).noquote()
+        << "RadioModel: no command plane for this backend, dropping" << command;
+    emit commandDropped(command);
+}
+
+void RadioModel::scheduleDropAccountingFlush()
+{
+    if (m_dropAccountingFlushQueued)
+        return;
+    m_dropAccountingFlushQueued = true;
+    QTimer::singleShot(0, this, [this] { flushDropAccounting(); });
+}
+
+void RadioModel::flushDropAccounting()
+{
+    m_dropAccountingFlushQueued = false;
+    const quint64 applied = std::exchange(m_intentsAppliedThisTurn, 0);
+    const QStringList drops = std::exchange(m_twinnedDropsThisTurn, {});
+    for (const QString& command : drops) {
+        const std::optional<ControlIntent> twin = controlIntentForCommand(command);
+        if (twin && (applied & controlIntentBit(*twin))) {
+            qCDebug(lcProtocol).noquote()
+                << "RadioModel: no command plane; applied through the seam, not dropping"
+                << command;
+            continue;
+        }
+        reportUnappliedDrop(command);
+    }
+}
+
 quint32 RadioModel::sendCmd(const QString& command, ResponseCallback cb)
 {
     auto& perf = PerfTelemetry::instance();
@@ -10107,13 +10202,13 @@ quint32 RadioModel::sendCmd(const QString& command, ResponseCallback cb)
     // with a `slice tune`, and the tune is Flex wire text), so fail the way the
     // rest of sendCmd's drops do: sequence 0, meaning "not dispatched".
     if (!hasCommandPlane()) {
-        // qCWarning, not qCDebug: a dropped command means a control moved and
-        // nothing reached the radio. Silent at default log levels, that is the
-        // HERMES §17 dead-control shape; loud, it is a reportable defect and
-        // the M4 conversion backlog finds its sites from these lines (#5263).
-        qCWarning(lcProtocol).noquote()
-            << "RadioModel: no command plane for this backend, dropping" << command;
-        emit commandDropped(command);
+        // Loud unless the control was applied another way: a dropped command
+        // whose control moved and reached nothing is the HERMES §17
+        // dead-control shape, and the M4 conversion backlog finds its sites
+        // from these warnings (#5263). One whose typed twin WAS applied is not
+        // that shape, and reporting it as one told HL2 operators their RF
+        // power slider was unsupported. accountDroppedCommand() decides.
+        accountDroppedCommand(command);
         if (cb)
             cb(kNoCommandPlaneCode, QStringLiteral("this radio has no command plane"));
         return 0;

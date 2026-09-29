@@ -39,6 +39,7 @@
 #include "CwxModel.h"
 #include "core/TxCoordinator.h"
 #include "DvkModel.h"
+#include "CommandDropAccounting.h"
 #include "UsbCableModel.h"
 #include "DaxIqModel.h"
 #include "NavtexModel.h"
@@ -713,6 +714,16 @@ public:
     // other family that takes typed intents through the IRadioBackend seam) —
     // there, Flex wire text has nowhere to go and is dropped at the sink.
     bool hasCommandPlane() const { return m_wanConn != nullptr || m_connection != nullptr; }
+
+    // A host-side applier (not a backend verb) reports that it applied this
+    // operator intent in the current event-loop turn — e.g. the client
+    // compressor that IS the speech processor on a host-modulating radio. The
+    // dropped Flex verb for the same control is then logged at debug and does
+    // not raise commandDropped. Call it only from code that actually applied
+    // the value: a receipt that was not earned hides a dead control, which is
+    // the exact thing the drop notice exists to reveal. Cleared at the end of
+    // the turn, so it can never excuse a later drop.
+    void noteIntentApplied(ControlIntent intent);
 
     // ── Memory command routing ──────────────────────────────────────────────
     //
@@ -1452,8 +1463,16 @@ signals:
     // A Flex-syntax command was dropped because this backend has no command
     // plane (HL2, Icom): the control that emitted it moved and nothing reached
     // the radio — the HERMES §17 shape, made visible (M0, #5263). Emitted on
-    // EVERY drop; the UI's one-shot-per-session throttling is the consumer's
-    // job, so logs and any non-UI consumers can observe each occurrence.
+    // every drop whose control was NOT applied another way; the UI's
+    // throttling is the consumer's job, so logs and any non-UI consumers can
+    // observe each occurrence.
+    //
+    // NOT emitted when the same setter's typed intent was applied through the
+    // seam (intent receipt) or by a host-side applier (noteIntentApplied) —
+    // that drop is logged at debug and is not a dead control. A command with a
+    // typed twin is classified at the end of the event-loop turn, because the
+    // model emits its wire text and its intent in either order; every other
+    // drop is emitted synchronously, exactly as before.
     void commandDropped(const QString& command);
     // Emitted when global profile list or active profile changes.
     void globalProfilesChanged();
@@ -1960,6 +1979,18 @@ private:
     // callbacks. sendCmd() refuses for the duration so an expiring callback
     // cannot repopulate the map being drained. (#5653 review)
     bool m_expiringPendingCallbacks{false};
+    // No-command-plane drop accounting (see commandDropped). Receipts and
+    // twinned drops collected during one event-loop turn, reconciled by
+    // flushDropAccounting() at its end.
+    template <typename Deliver>
+    void deliverIntent(ControlIntent intent, Deliver&& deliver);
+    void accountDroppedCommand(const QString& command);
+    void reportUnappliedDrop(const QString& command);
+    void scheduleDropAccountingFlush();
+    void flushDropAccounting();
+    quint64 m_intentsAppliedThisTurn{0};
+    QStringList m_twinnedDropsThisTurn;
+    bool m_dropAccountingFlushQueued{false};
     // Bumped at every session end. Captured by deferred work (the multiFLEX
     // peek window) so a timer armed in one session cannot fire into the next.
     quint64 m_sessionGeneration{0};

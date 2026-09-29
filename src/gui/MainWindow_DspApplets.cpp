@@ -725,6 +725,11 @@ void MainWindow::applySpeechProcessorToClientComp(bool operatorIntent)
     ClientComp* comp = m_audio->clientCompTx();
     if (!comp)
         return;
+    // On a host-modulating radio THIS compressor is the speech processor, so
+    // the `transmit set speech_processor_*` text dropped beside it reached no
+    // radio and was not meant to. Receipt it, so RadioModel logs that drop at
+    // debug instead of telling the operator PROC is unsupported while it works.
+    m_radioModel.noteIntentApplied(ControlIntent::SpeechProcessor);
 
     const auto& tx = m_radioModel.transmitModel();
     const bool on = tx.speechProcessorEnable();
@@ -816,6 +821,10 @@ void MainWindow::applyGraphicEqToClientEq(bool transmit)
     ClientEq* eq = transmit ? m_audio->clientEqTx() : m_audio->clientEqRx();
     if (!eq)
         return;
+    // Same receipt as the speech processor's: on a radio without the Flex
+    // command plane this ClientEq IS the graphic EQ, and the `eq` text dropped
+    // beside it was never going to reach a radio.
+    m_radioModel.noteIntentApplied(transmit ? ControlIntent::TxEq : ControlIntent::RxEq);
 
     const auto& model = m_radioModel.equalizerModel();
     const bool enabled = transmit ? model.txEnabled() : model.rxEnabled();

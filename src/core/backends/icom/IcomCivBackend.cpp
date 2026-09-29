@@ -4458,12 +4458,19 @@ void IcomCivBackend::setTxFilter(int lowHz, int highHz)
     // put a passband into whatever setting happens to live there — a silent
     // misconfiguration of the transmitter, which is worse in every way than a
     // control that declines.
+    // Both declines are reported through declineIntent() so RadioModel does
+    // not count the operator's passband as applied (IRadioBackend's intent
+    // receipt): nothing was written, and the dropped Flex verb beside this
+    // call is then announced instead of logged as delivered.
     const auto profile = txBandwidthProfileFor(*m_model);
-    if (!profile || !m_session)
+    if (!profile || !m_session) {
+        declineIntent();
         return;
+    }
     const int item = activeTxBandwidthItem();
     if (item < 0) {
         qCWarning(lcIcomTx) << "declining TX filter write before 16 58 reports the active slot";
+        declineIntent();
         return;   // 16 58 has not answered; reshaping a guessed slot is not a fix
     }
 

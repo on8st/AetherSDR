@@ -240,6 +240,31 @@ public:
     // the seam. It answers true because the seam is the one that is real.
     virtual bool ownsRxAudio() const { return false; }
 
+    // ---- intent receipt: did THIS backend act on the last operator intent? ----
+    //
+    // A model setter on the old command plane emits Flex wire text AND, for a
+    // control that has been converted, a typed intent that reaches one of the
+    // verbs below. On a backend with no command plane the wire text is dropped
+    // and RadioModel has to decide whether to tell the operator that the
+    // control is unsupported. It may only stay quiet when the intent was
+    // actually applied, and "RadioModel called the verb" is not that: most of
+    // these verbs have a do-nothing default, so a backend that never overrode
+    // one would look exactly like a backend that did.
+    //
+    // So the answer comes from the verb itself. RadioModel calls
+    // beginIntentReceipt(), makes the call, and reads intentDeclined(). Every
+    // do-nothing default below calls declineIntent(), and so does an override
+    // on any path where it deliberately writes nothing (see
+    // IcomCivBackend::setTxFilter). The failure mode is therefore a notice the
+    // operator did not need, never a dead control reported as handled: a new
+    // verb that forgets to decline is still covered by its default, and only an
+    // override that silently ignores its input can mislead, which is a bug in
+    // that override whatever this receipt says.
+    //
+    // Owner thread only, like every other verb on this interface.
+    void beginIntentReceipt() { m_intentDeclined = false; }
+    bool intentDeclined() const { return m_intentDeclined; }
+
     // ---- connection lifecycle ----
     // Typed restore handoff (RFC #4603 proposal B): called by RadioModel
     // BEFORE connectRadio(), and only when this backend's declared
@@ -646,6 +671,7 @@ public:
     {
         Q_UNUSED(on);
         Q_UNUSED(level);
+        declineIntent();
     }
 
     // Tune carrier on/off, at the operator's TUNE power (percent, 0..100).
@@ -672,7 +698,7 @@ public:
     // Flex takes this as a text command from TransmitModel, so FlexBackend has
     // nothing to do here. A backend that owns its own drive register (HL2)
     // implements it.
-    virtual void setTxPower(int percent) { Q_UNUSED(percent); }
+    virtual void setTxPower(int percent) { Q_UNUSED(percent); declineIntent(); }
 
     // The operator's CW pitch, in Hz (TransmitModel's range: 100..6000).
     //
@@ -686,7 +712,7 @@ public:
     //
     // Default no-op: a Flex owns its own DSP and takes `cw pitch` as text from
     // TransmitModel, so this seam would be a second, redundant opinion.
-    virtual void setCwPitch(int hz) { Q_UNUSED(hz); }
+    virtual void setCwPitch(int hz) { Q_UNUSED(hz); declineIntent(); }
 
     // Radio-resident text keyer. Unlike setCwKeying(), this hands printable
     // text to a keyer in the radio; it is the neutral seam used by CWX, CAT,
@@ -702,8 +728,8 @@ public:
         return QStringLiteral("radio has no text keyer");
     }
     virtual void abortCwText(const TxCoordinator::Operation& operation, const AetherSDR::TxCoordinator::Completion& completion = {}) { Q_UNUSED(operation); Q_UNUSED(completion); }
-    virtual void setCwSpeed(int wpm) { Q_UNUSED(wpm); }
-    virtual void setCwBreakIn(bool on) { Q_UNUSED(on); }
+    virtual void setCwSpeed(int wpm) { Q_UNUSED(wpm); declineIntent(); }
+    virtual void setCwBreakIn(bool on) { Q_UNUSED(on); declineIntent(); }
 
     // The speech processor, as the operator sees it: an enable plus a
     // normalized level. RadioCapabilities publishes whether the presentation
@@ -719,6 +745,7 @@ public:
     {
         Q_UNUSED(on);
         Q_UNUSED(level);
+        declineIntent();
     }
 
     // VOX — the enable, the trigger threshold and the hang time.
@@ -733,6 +760,7 @@ public:
     virtual void setVox(bool on, int level, int delayMs)
     {
         Q_UNUSED(on); Q_UNUSED(level); Q_UNUSED(delayMs);
+        declineIntent();
     }
 
     // The ANTENNA TUNER, and NOT setTune().
@@ -896,6 +924,7 @@ public:
     {
         Q_UNUSED(lowHz);
         Q_UNUSED(highHz);
+        declineIntent();
     }
 
     // Microphone gain, 0..100, as the Phone applet's MIC slider means it.
@@ -912,6 +941,7 @@ public:
     virtual void setMicGain(int level)
     {
         Q_UNUSED(level);
+        declineIntent();
     }
 
     // Processed transmit audio, int16 interleaved stereo at sampleRateHz.
@@ -1398,6 +1428,8 @@ signals:
     void audioFrameReady(const AetherSDR::PcmFrame& pcm);
 
 protected:
+    // See beginIntentReceipt(). Call from any path that writes nothing.
+    void declineIntent() { m_intentDeclined = true; }
     TxCoordinator::Context transmitContext() const { return m_transmitContext; }
     quint64 pcmSession() const { return m_pcmSession; }
 
@@ -1444,6 +1476,7 @@ protected:
 
 private:
     TxCoordinator::Context m_transmitContext;
+    bool m_intentDeclined = false;
     // One line per session, not per frame: this fires at audio rate.
     void warnAudioDropped()
     {
