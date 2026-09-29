@@ -86,12 +86,11 @@ private:
 static void gate(ControlAvailabilityRegistry& registry, QWidget* widget,
                  RadioSetupControl control)
 {
-    registry.registerWidget(
+    registry.registerSetting(
         widget, radioSetupControlUnavailableReason(control),
         [control](bool, const RadioCapabilities& caps) {
             return radioSetupControlAvailable(control, caps);
-        },
-        [] { return true; });
+        });
 }
 
 int main(int argc, char** argv)
@@ -181,7 +180,29 @@ int main(int argc, char** argv)
               "while Max Power still follows radioHeldSettings");
     }
 
-    // ---- 3. the mechanism: dimmed, shown, announced ----
+    // ---- 3a. offline: a setting is left exactly as built ----
+    //
+    // Not Inactive. Greying every setting "not currently active" with no radio
+    // attached would re-tint the whole Radio Setup dialog offline, and it is
+    // the regression radio_setup_label_theme_token_test caught when these
+    // controls were first registered with registerWidget().
+    {
+        RadioModel model;  // not connected
+        ControlAvailabilityRegistry registry(model);
+        QLineEdit edit;
+        const QString sheet = QStringLiteral("QLineEdit { font-size: 11px; }");
+        edit.setStyleSheet(sheet);
+        edit.setToolTip(QStringLiteral("help"));
+        gate(registry, &edit, RadioSetupControl::MaxPower);
+        check(registry.stateOf(&edit) == ControlAvailability::Active,
+              "offline: a gated setting is Active, not Inactive");
+        check(edit.isEnabled() && edit.styleSheet() == sheet
+                  && edit.toolTip() == QStringLiteral("help")
+                  && edit.accessibleDescription().isEmpty(),
+              "offline: its stylesheet, tooltip and description are untouched");
+    }
+
+    // ---- 3b. the mechanism: dimmed, shown, announced ----
     {
         RadioModel model;
         ControlAvailabilityRegistry registry(model);
@@ -214,7 +235,7 @@ int main(int argc, char** argv)
                                 QStringLiteral("flex"));
         emit model.capabilitiesChanged(true, flexCaps);
         check(registry.stateOf(maxPower) == ControlAvailability::Active,
-              "Flex: Max Power is Active, not greyed as Inactive");
+              "Flex: Max Power is Active again, not greyed as Inactive");
         check(maxPower->isEnabled(), "Flex: Max Power is enabled");
         check(maxPower->toolTip() == QStringLiteral("Maximum transmit power, percent"),
               "Flex: the control keeps the help tooltip it was built with");

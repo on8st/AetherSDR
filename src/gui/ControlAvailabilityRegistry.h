@@ -82,6 +82,15 @@ public:
                         AvailabilityPredicate available,
                         EngagedPredicate engaged = {});
 
+    // A SETTING has no engaged state of its own: where the radio honours it, it
+    // is simply live. It renders Unavailable (dimmed, with the reason) or
+    // Active (left exactly as built, its own help text intact) — never
+    // Inactive, including while no radio is connected. Registering a whole
+    // settings page with registerWidget() would grey every live setting as
+    // "not currently active" on a supported radio, and grey the whole page
+    // while disconnected.
+    void registerSetting(QWidget* widget, QString reason, AvailabilityPredicate available);
+
     // Same contract for a menu entry or toolbar action.
     void registerAction(QAction* action,
                         QString reason,
@@ -112,6 +121,7 @@ private:
         QString baseDescription;
         AvailabilityPredicate available;
         EngagedPredicate engaged;
+        bool setting{false};  // registerSetting(): Unavailable or Active only
         ControlAvailability state{ControlAvailability::Unavailable};
     };
 

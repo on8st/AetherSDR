@@ -2688,18 +2688,14 @@ void RadioSetupDialog::gateOnRadio(RadioSetupControl control, const QList<QWidge
         if (!widget) {
             continue;
         }
-        // The engaged predicate is always true ON PURPOSE. A setting has no
-        // "supported but not engaged" state of its own: where the radio honours
-        // it, it is simply live, and rendering it Inactive would grey every
-        // working setting on a Flex. So these controls are Unavailable (dimmed,
-        // with the reason) or Active (unchanged) — and Inactive only while no
-        // radio is connected, which the registry decides.
-        controlAvailability().registerWidget(
+        // A SETTING, not an engageable control: Unavailable (dimmed, with the
+        // reason) or Active (exactly as built). Never Inactive — that would
+        // grey every working setting on a Flex, and the whole page offline.
+        controlAvailability().registerSetting(
             widget, reason,
             [control](bool, const RadioCapabilities& caps) {
                 return radioSetupControlAvailable(control, caps);
-            },
-            [] { return true; });
+            });
     }
 }
 
@@ -2797,9 +2793,8 @@ QWidget* RadioSetupDialog::buildTxTab()
         // what MainWindow asks before enabling that action
         // (RadioModel::hasCommandPlane(), MainWindow::applyCapabilitiesToUi).
         // One condition, so the button and the menu entry cannot disagree.
-        controlAvailability().registerWidget(bandSetBtn, txBandSettingsUnavailableReason(),
-            [this](bool, const RadioCapabilities&) { return m_model->hasCommandPlane(); },
-            [] { return true; });
+        controlAvailability().registerSetting(bandSetBtn, txBandSettingsUnavailableReason(),
+            [this](bool, const RadioCapabilities&) { return m_model->hasCommandPlane(); });
 
         for (auto* lbl : group->findChildren<QLabel*>())
             if (lbl->styleSheet().isEmpty()) applyLabelStyle(lbl);

@@ -82,6 +82,24 @@ void ControlAvailabilityRegistry::registerWidget(QWidget* widget,
     applyOne(m_entries.last(), m_model.isConnected(), m_model.backendCapabilities());
 }
 
+void ControlAvailabilityRegistry::registerSetting(QWidget* widget,
+                                                  QString reason,
+                                                  AvailabilityPredicate available)
+{
+    if (!widget || !available) {
+        return;
+    }
+    Entry entry;
+    entry.widget = widget;
+    entry.reason = std::move(reason);
+    entry.baseToolTip = widget->toolTip();
+    entry.baseDescription = widget->accessibleDescription();
+    entry.available = std::move(available);
+    entry.setting = true;
+    m_entries.push_back(entry);
+    applyOne(m_entries.last(), m_model.isConnected(), m_model.backendCapabilities());
+}
+
 void ControlAvailabilityRegistry::registerAction(QAction* action,
                                                  QString reason,
                                                  AvailabilityPredicate available,
@@ -122,9 +140,9 @@ void ControlAvailabilityRegistry::applyOne(Entry& entry,
     // capability.
     const bool available = !connected || entry.available(connected, caps);
     const bool engaged = connected && available && entry.engaged && entry.engaged();
-    entry.state = !available   ? ControlAvailability::Unavailable
-                : engaged      ? ControlAvailability::Active
-                               : ControlAvailability::Inactive;
+    entry.state = !available                  ? ControlAvailability::Unavailable
+                : (engaged || entry.setting)  ? ControlAvailability::Active
+                                              : ControlAvailability::Inactive;
 
     const QString description = describe(entry.state, entry.reason, entry.baseDescription);
     // The reason rides on BOTH the tooltip and the accessible description. A
