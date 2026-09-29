@@ -52,6 +52,10 @@ public:
     // Real demodulated demo audio rides the seam; the PanadapterStream this
     // backend also vends still carries the old shim's synthetic scene.
     bool ownsRxAudio() const override { return true; }
+    // Path B below: the owned RadioConnection answers the models' wire text
+    // (synthetic ANF/NB/VFO status included), so an intent verb left at its
+    // default was carried there rather than dropped.
+    bool ownsCommandPlane() const override { return true; }
     void connectRadio(const RadioConnectRequest& request) override;
     void disconnectRadio() override;
     bool isConnected() const override;

@@ -1023,6 +1023,13 @@ void MainWindow::wireRadioModel()
             : tr("Cannot create slice: %1").arg(reason);
         statusBar()->showMessage(what, 6000);
     });
+    // A seam intent the backend does not implement (HERMES §17's dead-control
+    // shape, #5263). The backend latches once per intent per session, so each
+    // distinct control says so once; a slider drag does not repeat it.
+    connect(&m_radioModel, &RadioModel::backendIntentUnsupported, this,
+            [this](const QString&, const QString& message) {
+        statusBar()->showMessage(message, 8000);
+    });
     connect(&m_radioModel, &RadioModel::sliceCreateFailed,
             this, [this](int limit, const QString& model) {
         statusBar()->showMessage(

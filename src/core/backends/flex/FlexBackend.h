@@ -78,6 +78,9 @@ public:
 
     // ---- IRadioBackend ----
     RadioCapabilities capabilities() const override;
+    // The SmartSDR command plane itself: every intent verb this class leaves
+    // at its default is carried by the model's wire text instead (#5262 M4).
+    bool ownsCommandPlane() const override { return true; }
     void connectRadio(const RadioConnectRequest& request) override;
     void disconnectRadio() override;
     bool isConnected() const override;

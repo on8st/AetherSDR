@@ -12,6 +12,7 @@
 #include <QLoggingCategory>
 #include <QMap>
 #include <QObject>
+#include <QSet>
 #include <QString>
 #include <QStringList>
 #include <QVariant>
@@ -192,6 +193,7 @@ public:
     explicit IRadioBackend(QObject* parent = nullptr) : QObject(parent)
     {
         connect(this, &IRadioBackend::connected, this, [this] {
+            m_refusedIntents.clear();
             m_slicePcm.clear();
             ++m_pcmSession;
             m_pcmLive = m_speakerPcm.start(PcmPurpose::Speaker, -1, {}, m_pcmSession);
@@ -240,6 +242,20 @@ public:
     // the seam. It answers true because the seam is the one that is real.
     virtual bool ownsRxAudio() const { return false; }
 
+    // True when this backend owns a SmartSDR-syntax COMMAND PLANE — a
+    // RadioConnection that RadioModel::sendCmd writes to — so the Flex wire text
+    // the models emit beside each typed intent reaches a radio (or, for the
+    // demo, a synthetic one) that answers it. Same shape and same reason as
+    // ownsRxAudio(): a question about THIS backend, not a family-name list.
+    //
+    // It decides one thing: whether an intent verb this backend does NOT
+    // override has been dropped (refuseUnimplementedIntent() below says so) or
+    // was carried by that wire text instead, which is what every "Flex takes
+    // this as text from TransmitModel" note on the verbs below describes.
+    // Transitional exactly as the command plane is: when #5262 M4 removes the
+    // plane, a family that answers true here implements its verbs instead.
+    virtual bool ownsCommandPlane() const { return false; }
+
     // ---- connection lifecycle ----
     // Typed restore handoff (RFC #4603 proposal B): called by RadioModel
     // BEFORE connectRadio(), and only when this backend's declared
@@ -270,11 +286,11 @@ public:
     // remains exclusively a resize/reposition intent; keeping the two verbs
     // distinct prevents a width that happens to equal a preset from changing
     // slots. Empty RadioCapabilities::rxFilterControl.presets means callers
-    // never invoke this default no-op.
+    // never invoke this default; one that does is refused loudly.
     virtual void setSliceFilterPreset(int sliceId, int presetId)
     {
-        Q_UNUSED(sliceId);
-        Q_UNUSED(presetId);
+        Q_UNUSED(sliceId); Q_UNUSED(presetId);
+        refuseUnimplementedIntent("filter-preset", tr("Radio filter presets"));
     }
     // Receive AGC. mode is the neutral vocabulary the slice model uses —
     // "off" / "slow" / "med" / "fast"; thresholdDb is the operator's 0..100
@@ -331,13 +347,13 @@ public:
     // panCenterBandwidthChanged. Callers must not assume the requested value was
     // taken — that assumption is what this verb exists to remove.
     //
-    // Default no-op: a Flex radio owns its pan geometry and is driven by
-    // "display pan set … bandwidth=" wire text, so FlexBackend has nothing to do
-    // here.
+    // Default refuses (refuseUnimplementedIntent): a Flex radio owns its pan
+    // geometry and is driven by "display pan set … bandwidth=" wire text, so
+    // FlexBackend has nothing to do here and ownsCommandPlane() keeps it quiet.
     virtual void setPanBandwidth(const QString& panId, double hz)
     {
-        Q_UNUSED(panId);
-        Q_UNUSED(hz);
+        Q_UNUSED(panId); Q_UNUSED(hz);
+        refuseUnimplementedIntent("pan-bandwidth", tr("Panadapter zoom"));
     }
 
     // Receive RF gain for a panadapter, in dB.
@@ -355,12 +371,12 @@ public:
     // a value that stops moving. What the hardware took comes back on
     // panRfGainChanged.
     //
-    // Default no-op: a Flex radio takes rfgain as wire text, so FlexBackend has
-    // nothing to do here.
+    // Default refuses (refuseUnimplementedIntent): a Flex radio takes rfgain as
+    // wire text, so FlexBackend has nothing to do here.
     virtual void setPanRfGain(const QString& panId, int gainDb)
     {
-        Q_UNUSED(panId);
-        Q_UNUSED(gainDb);
+        Q_UNUSED(panId); Q_UNUSED(gainDb);
+        refuseUnimplementedIntent("rf-gain", tr("RF gain"));
     }
 
     // The backend's own automatic receive-gain control, or nullptr when it has
@@ -379,25 +395,30 @@ public:
     // backend published; a backend clamps rather than refuses, exactly as
     // setPanRfGain does.
     //
-    // Default no-op AND no capability flag: the empty label list a backend
-    // publishes by default already hides the control, so a family without these
-    // stages needs no declaration and cannot be asked for one.
+    // No capability flag: the empty label list a backend publishes by default
+    // already hides the control, so a family without these stages needs no
+    // declaration and cannot be asked for one. If it is asked anyway, the
+    // default refuses loudly rather than letting a visible control lie.
     virtual void setPanPreamp(const QString& panId, int step)
     {
-        Q_UNUSED(panId);
-        Q_UNUSED(step);
+        Q_UNUSED(panId); Q_UNUSED(step);
+        refuseUnimplementedIntent("preamp", tr("Preamp"));
     }
     virtual void setPanAttenuator(const QString& panId, int step)
     {
-        Q_UNUSED(panId);
-        Q_UNUSED(step);
+        Q_UNUSED(panId); Q_UNUSED(step);
+        refuseUnimplementedIntent("attenuator", tr("Attenuator"));
     }
     virtual void setSliceRxAntenna(int sliceId, const QString& antenna)
     {
-        Q_UNUSED(sliceId);
-        Q_UNUSED(antenna);
+        Q_UNUSED(sliceId); Q_UNUSED(antenna);
+        refuseUnimplementedIntent("rx-antenna", tr("RX antenna selection"));
     }
-    virtual void setRadioDialLock(bool locked) { Q_UNUSED(locked); }
+    virtual void setRadioDialLock(bool locked)
+    {
+        Q_UNUSED(locked);
+        refuseUnimplementedIntent("dial-lock", tr("Dial lock"));
+    }
 
     // How often the operator wants panadapter frames, in frames per second.
     //
@@ -558,13 +579,13 @@ public:
     // every later edit. Requiring the caller to pick would force it to guess
     // what the radio will do, and two clients on the same Flex would collide.
     //
-    // Default no-ops. A backend with no notch engine declares
-    // capabilities().maxNotchFilters = 0 and the UI does not offer the control
-    // at all, so these are never reached rather than silently doing nothing.
+    // A backend with no notch engine declares capabilities().maxNotchFilters = 0
+    // and the UI does not offer the control at all, so these defaults are never
+    // reached — and if one is, it refuses loudly rather than silently.
     virtual void createNotch(double centerHz, double widthHz)
     {
-        Q_UNUSED(centerHz);
-        Q_UNUSED(widthHz);
+        Q_UNUSED(centerHz); Q_UNUSED(widthHz);
+        refuseUnimplementedIntent("notch", tr("Notch filters"));
     }
     // Move, resize, or otherwise change an existing notch. A delta rather than
     // a fixed argument list for two reasons: it PERMITS a centre+width change
@@ -574,18 +595,20 @@ public:
     // host-DSP backend having to pretend it understands them.
     virtual void setNotch(int notchId, const AetherSDR::NotchDelta& delta)
     {
-        Q_UNUSED(notchId);
-        Q_UNUSED(delta);
+        Q_UNUSED(notchId); Q_UNUSED(delta);
+        refuseUnimplementedIntent("notch", tr("Notch filters"));
     }
     virtual void removeNotch(int notchId)
     {
         Q_UNUSED(notchId);
+        refuseUnimplementedIntent("notch", tr("Notch filters"));
     }
     // Global bypass for every notch at once, the equivalent of a Flex
     // tnf_enabled. Individual notches keep their own active flag underneath.
     virtual void setNotchesEnabled(bool on)
     {
         Q_UNUSED(on);
+        refuseUnimplementedIntent("notch", tr("Notch filters"));
     }
 
     // TX keying intent. The decision to allow keying is made ABOVE this seam by
@@ -644,8 +667,8 @@ public:
     // separate from the diagnostic receive-during-TX gate above.
     virtual void setTxMonitor(bool on, int level)
     {
-        Q_UNUSED(on);
-        Q_UNUSED(level);
+        Q_UNUSED(on); Q_UNUSED(level);
+        refuseUnimplementedIntent("tx-monitor", tr("TX monitor"));
     }
 
     // Tune carrier on/off, at the operator's TUNE power (percent, 0..100).
@@ -672,7 +695,11 @@ public:
     // Flex takes this as a text command from TransmitModel, so FlexBackend has
     // nothing to do here. A backend that owns its own drive register (HL2)
     // implements it.
-    virtual void setTxPower(int percent) { Q_UNUSED(percent); }
+    virtual void setTxPower(int percent)
+    {
+        Q_UNUSED(percent);
+        refuseUnimplementedIntent("tx-power", tr("RF power control"));
+    }
 
     // The operator's CW pitch, in Hz (TransmitModel's range: 100..6000).
     //
@@ -684,9 +711,14 @@ public:
     // panadapter's CW passband draws a whole pitch away from the marker while
     // the transmitter keys on the marker itself.
     //
-    // Default no-op: a Flex owns its own DSP and takes `cw pitch` as text from
-    // TransmitModel, so this seam would be a second, redundant opinion.
-    virtual void setCwPitch(int hz) { Q_UNUSED(hz); }
+    // Default refuses (refuseUnimplementedIntent): a Flex owns its own DSP and
+    // takes `cw pitch` as text from TransmitModel, so this seam would be a
+    // second, redundant opinion; RadioModel does not call it there.
+    virtual void setCwPitch(int hz)
+    {
+        Q_UNUSED(hz);
+        refuseUnimplementedIntent("cw-pitch", tr("CW pitch"));
+    }
 
     // Radio-resident text keyer. Unlike setCwKeying(), this hands printable
     // text to a keyer in the radio; it is the neutral seam used by CWX, CAT,
@@ -702,8 +734,16 @@ public:
         return QStringLiteral("radio has no text keyer");
     }
     virtual void abortCwText(const TxCoordinator::Operation& operation, const AetherSDR::TxCoordinator::Completion& completion = {}) { Q_UNUSED(operation); Q_UNUSED(completion); }
-    virtual void setCwSpeed(int wpm) { Q_UNUSED(wpm); }
-    virtual void setCwBreakIn(bool on) { Q_UNUSED(on); }
+    virtual void setCwSpeed(int wpm)
+    {
+        Q_UNUSED(wpm);
+        refuseUnimplementedIntent("cw-speed", tr("CW speed"));
+    }
+    virtual void setCwBreakIn(bool on)
+    {
+        Q_UNUSED(on);
+        refuseUnimplementedIntent("cw-break-in", tr("CW break-in"));
+    }
 
     // The speech processor, as the operator sees it: an enable plus a
     // normalized level. RadioCapabilities publishes whether the presentation
@@ -729,10 +769,12 @@ public:
     // IC-705 has 16 46 for the enable and 14 16 / 14 17 for level and delay; a
     // radio with fewer ignores what it does not have.
     //
-    // Default no-op: a Flex takes VOX as text from TransmitModel.
+    // Default refuses (refuseUnimplementedIntent): a Flex takes VOX as text from
+    // TransmitModel, and ownsCommandPlane() keeps that quiet.
     virtual void setVox(bool on, int level, int delayMs)
     {
         Q_UNUSED(on); Q_UNUSED(level); Q_UNUSED(delayMs);
+        refuseUnimplementedIntent("vox", tr("VOX"));
     }
 
     // The ANTENNA TUNER, and NOT setTune().
@@ -753,7 +795,8 @@ public:
     //
     // Two enables and one offset, because that is the shape every radio that
     // has them uses — including the IC-705, where they are 21 01, 21 02 and
-    // 21 00. A radio without RIT simply does not implement these.
+    // 21 00. A radio without RIT does not implement these, and the default
+    // then refuses loudly (one "rit-xit" notice per session).
     // RECEIVE DSP THE RADIO'S OWN FIRMWARE RUNS — the set gated by
     // capabilities().hasRadioSideDsp.
     //
@@ -770,14 +813,17 @@ public:
     virtual void setSliceNoiseReduction(int sliceId, bool on, int level)
     {
         Q_UNUSED(sliceId); Q_UNUSED(on); Q_UNUSED(level);
+        refuseUnimplementedIntent("noise-reduction", tr("Noise reduction"));
     }
     virtual void setSliceNoiseBlanker(int sliceId, bool on, int level)
     {
         Q_UNUSED(sliceId); Q_UNUSED(on); Q_UNUSED(level);
+        refuseUnimplementedIntent("noise-blanker", tr("Noise blanker"));
     }
     virtual void setSliceAutoNotch(int sliceId, bool on)
     {
         Q_UNUSED(sliceId); Q_UNUSED(on);
+        refuseUnimplementedIntent("auto-notch", tr("Auto-notch"));
     }
     // The radio's single operator-placed notch — capabilities().hasManualNotch.
     //
@@ -794,10 +840,12 @@ public:
     virtual void setSliceManualNotch(int sliceId, bool on, int position)
     {
         Q_UNUSED(sliceId); Q_UNUSED(on); Q_UNUSED(position);
+        refuseUnimplementedIntent("manual-notch", tr("Manual notch"));
     }
     virtual void setSliceSquelch(int sliceId, bool on, int level)
     {
         Q_UNUSED(sliceId); Q_UNUSED(on); Q_UNUSED(level);
+        refuseUnimplementedIntent("squelch", tr("Squelch"));
     }
 
     // FM repeater controls.  These are separate radio registers on an Icom
@@ -809,27 +857,33 @@ public:
     virtual void setSliceFmToneMode(int sliceId, const QString& mode)
     {
         Q_UNUSED(sliceId); Q_UNUSED(mode);
+        refuseUnimplementedIntent("fm-repeater", tr("FM tone and repeater control"));
     }
     virtual void setSliceFmToneValue(int sliceId, double hz)
     {
         Q_UNUSED(sliceId); Q_UNUSED(hz);
+        refuseUnimplementedIntent("fm-repeater", tr("FM tone and repeater control"));
     }
     virtual void setSliceFmToneRxValue(int sliceId, double hz)
     {
         Q_UNUSED(sliceId); Q_UNUSED(hz);
+        refuseUnimplementedIntent("fm-repeater", tr("FM tone and repeater control"));
     }
     virtual void setSliceFmDtcs(int sliceId, int code, bool txReverse,
                                 bool rxReverse)
     {
         Q_UNUSED(sliceId); Q_UNUSED(code); Q_UNUSED(txReverse); Q_UNUSED(rxReverse);
+        refuseUnimplementedIntent("fm-repeater", tr("FM tone and repeater control"));
     }
     virtual void setSliceRepeaterOffsetDir(int sliceId, const QString& direction)
     {
         Q_UNUSED(sliceId); Q_UNUSED(direction);
+        refuseUnimplementedIntent("fm-repeater", tr("FM tone and repeater control"));
     }
     virtual void setSliceFmRepeaterOffset(int sliceId, double hz)
     {
         Q_UNUSED(sliceId); Q_UNUSED(hz);
+        refuseUnimplementedIntent("fm-repeater", tr("FM tone and repeater control"));
     }
     virtual void setSliceFmRepeater(int sliceId, const QString& direction,
                                     double offsetHz, const QString& toneMode,
@@ -860,9 +914,21 @@ public:
     // radio-wide selected-VFO state, not a memory/slice parameter.
     virtual void setTransmitFrequencyCheck(bool on) { Q_UNUSED(on); }
 
-    virtual void setRitEnabled(bool on) { Q_UNUSED(on); }
-    virtual void setXitEnabled(bool on) { Q_UNUSED(on); }
-    virtual void setRitOffset(int hz) { Q_UNUSED(hz); }
+    virtual void setRitEnabled(bool on)
+    {
+        Q_UNUSED(on);
+        refuseUnimplementedIntent("rit-xit", tr("RIT/XIT"));
+    }
+    virtual void setXitEnabled(bool on)
+    {
+        Q_UNUSED(on);
+        refuseUnimplementedIntent("rit-xit", tr("RIT/XIT"));
+    }
+    virtual void setRitOffset(int hz)
+    {
+        Q_UNUSED(hz);
+        refuseUnimplementedIntent("rit-xit", tr("RIT/XIT"));
+    }
 
     // The TRANSMIT offset, separately from the receive one.
     //
@@ -894,8 +960,8 @@ public:
     // control works until the operator touches anything else.
     virtual void setTxFilter(int lowHz, int highHz)
     {
-        Q_UNUSED(lowHz);
-        Q_UNUSED(highHz);
+        Q_UNUSED(lowHz); Q_UNUSED(highHz);
+        refuseUnimplementedIntent("tx-filter", tr("TX filter"));
     }
 
     // Microphone gain, 0..100, as the Phone applet's MIC slider means it.
@@ -912,6 +978,7 @@ public:
     virtual void setMicGain(int level)
     {
         Q_UNUSED(level);
+        refuseUnimplementedIntent("mic-gain", tr("Mic gain"));
     }
 
     // Processed transmit audio, int16 interleaved stereo at sampleRateHz.
@@ -1114,6 +1181,12 @@ signals:
     //
     // If it does not stop the radio working, it belongs here.
     void configurationWarning(const QString& message);
+
+    // An operator intent reached a verb this backend does not implement, so
+    // nothing was sent. `intent` is a stable key ("vox", "rit-xit", …) and
+    // `message` the operator-facing sentence. Emitted at most once per intent
+    // per connected session by refuseUnimplementedIntent(); see there.
+    void intentUnsupported(const QString& intent, const QString& message);
 
     void capabilitiesChanged();
 
@@ -1398,6 +1471,48 @@ signals:
     void audioFrameReady(const AetherSDR::PcmFrame& pcm);
 
 protected:
+    // THE LOUD DEFAULT for an operator-intent verb this backend does not
+    // override (HERMES §17's dead-control shape, M0 item 1 of #5263).
+    //
+    // A silent `{ Q_UNUSED(...); }` default is the seam's version of the drop
+    // RadioModel::sendCmd made loud in #5265: the control moves, the model
+    // commits, nothing reaches the radio and nothing is said. The typed intents
+    // were added precisely so non-Flex families stop falling through the
+    // command plane, and every one a backend has not implemented yet fell into
+    // the same hole one layer lower — quieter than the sendCmd drop it
+    // replaced. So an un-overridden intent verb calls this instead.
+    //
+    // Silent when:
+    //   - ownsCommandPlane(): the Flex wire text emitted beside the intent was
+    //     the carrier, and sendCmd reports its own drops;
+    //   - not connected: nothing would be sent in any case, and a restore or
+    //     profile load on a torn-down session is not an operator asking;
+    //   - this intent was already refused this session: a slider drag is one
+    //     request, not forty. The latch resets on connected().
+    //
+    // One notice per INTENT, not per virtual: RIT/XIT's four verbs, the FM
+    // repeater's six and the notch's four are each one operator control, and
+    // RadioModel's RIT handler calls two of them for a single press.
+    //
+    // A backend that deliberately ignores a verb says so with an override —
+    // that is the difference between a considered "no" and a forgotten one.
+    void refuseUnimplementedIntent(const char* intent, const QString& feature)
+    {
+        if (ownsCommandPlane() || !isConnected()) {
+            return;
+        }
+        const QString key = QString::fromLatin1(intent);
+        if (m_refusedIntents.contains(key)) {
+            return;
+        }
+        m_refusedIntents.insert(key);
+        qWarning().noquote() << "IRadioBackend:" << metaObject()->className()
+                             << "does not implement the" << key
+                             << "intent - the control moved and nothing was sent";
+        emit intentUnsupported(
+            key, tr("%1 isn't available on this radio — nothing was sent.").arg(feature));
+    }
+
     TxCoordinator::Context transmitContext() const { return m_transmitContext; }
     quint64 pcmSession() const { return m_pcmSession; }
 
@@ -1456,6 +1571,7 @@ private:
                    << ", connected =" << isConnected() << ")";
     }
 
+    QSet<QString> m_refusedIntents;   // see refuseUnimplementedIntent()
     bool m_pcmLive = false;
     quint64 m_pcmSession = 0;
     quint64 m_pcmDropWarned = 0;

@@ -377,6 +377,13 @@ target_include_directories(atu_seam_gate_test PRIVATE src tests)
 target_link_libraries(atu_seam_gate_test PRIVATE aethercore Qt6::Core)
 add_test(NAME atu_seam_gate_test COMMAND atu_seam_gate_test)
 
+# An operator-intent verb a backend does not implement refuses visibly, once
+# per intent per session (#5263, HERMES §17). Fake backends; no sockets.
+add_executable(backend_intent_refusal_test tests/backend_intent_refusal_test.cpp)
+target_include_directories(backend_intent_refusal_test PRIVATE src tests)
+target_link_libraries(backend_intent_refusal_test PRIVATE aethercore Qt6::Core)
+add_test(NAME backend_intent_refusal_test COMMAND backend_intent_refusal_test)
+
 # Socket-free frequency control: a recording engine backend and normalized
 # observations exercise the production target/service. LocalControlServer
 # instances only test startup binding; neither listens or opens an endpoint.
@@ -6664,6 +6671,7 @@ set(AETHER_SETTINGS_CONSUMERS
     radio_setup_region_field_test
     radio_setup_label_theme_token_test
     atu_seam_gate_test
+    backend_intent_refusal_test
     backend_capability_revision_test
     radio_capacity_declaration_test
     extension_namespace_gate_test

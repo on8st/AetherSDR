@@ -1973,6 +1973,18 @@ void RadioModel::wireBackendReceiverState()
                              << sliceId << reason;
         emit sliceLifecycleFailed(operation, sliceId, reason);
     });
+
+    // An intent verb the backend does not implement (IRadioBackend::
+    // refuseUnimplementedIntent). The backend already latches once per intent
+    // per session, so this relays every emission; the backend's own qWarning
+    // carries the log line.
+    connect(m_backend.get(), &IRadioBackend::intentUnsupported, this,
+            [this, generation](const QString& intent, const QString& message) {
+        if (generation != m_backendReceiverGeneration) {
+            return;
+        }
+        emit backendIntentUnsupported(intent, message);
+    });
 }
 
 void RadioModel::teardownBackend()

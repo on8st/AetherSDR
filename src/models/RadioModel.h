@@ -1360,6 +1360,10 @@ signals:
     void sliceCreateFailed(int limit, const QString& model);
     void sliceLifecycleFailed(const QString& operation, int sliceId,
                               const QString& reason);
+    // An operator intent reached a backend verb it does not implement; nothing
+    // was sent. Relayed from IRadioBackend::intentUnsupported, at most once per
+    // intent per connect session. `message` is operator-facing.
+    void backendIntentUnsupported(const QString& intent, const QString& message);
     // Emitted when a pan needs xpixels/ypixels pushed (after profile change, reconnect, etc.)
     void panDimensionsNeeded(const QString& panId);
     // Emitted when the radio reports its antenna list (e.g. "ANT1,ANT2,RX_A,RX_B").
