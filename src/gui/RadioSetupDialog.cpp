@@ -41,6 +41,8 @@
 #include "core/CallsignLookupService.h"
 #include "core/QrzLookupSettings.h"
 #include "models/AntennaGeniusModel.h"
+#include "gui/ControlAvailabilityRegistry.h"
+#include "gui/RadioSetupControlGate.h"
 
 #include <QCloseEvent>
 #include <QTabWidget>
@@ -1718,6 +1720,7 @@ QWidget* RadioSetupDialog::buildRadioTab()
         grid->addWidget(makeInfoField(QStringLiteral("Station Name:"), stationEdit,
                                       kInfoRightLabelWidth),
                         1, 1);
+        gateOnRadio(RadioSetupControl::StationName, {stationEdit});
         connect(stationEdit, &QLineEdit::editingFinished, this, [this, stationEdit] {
             auto& s = AppSettings::instance();
             s.setValue("StationName", stationEdit->text());
@@ -2666,6 +2669,40 @@ QWidget* RadioSetupDialog::buildGpsTab()
     vbox->addStretch(1);
     return page;
 }
+ControlAvailabilityRegistry& RadioSetupDialog::controlAvailability()
+{
+    // Built on first use rather than in the constructor so the order in which
+    // pages are built cannot matter. ONE registry for the whole dialog: it
+    // subscribes to capabilitiesChanged once and applies at registration, so a
+    // page built lazily after connect is correct without a second push.
+    if (!m_controlAvailability) {
+        m_controlAvailability = new ControlAvailabilityRegistry(*m_model, this);
+    }
+    return *m_controlAvailability;
+}
+
+void RadioSetupDialog::gateOnRadio(RadioSetupControl control, const QList<QWidget*>& widgets)
+{
+    const QString reason = radioSetupControlUnavailableReason(control);
+    for (QWidget* widget : widgets) {
+        if (!widget) {
+            continue;
+        }
+        // The engaged predicate is always true ON PURPOSE. A setting has no
+        // "supported but not engaged" state of its own: where the radio honours
+        // it, it is simply live, and rendering it Inactive would grey every
+        // working setting on a Flex. So these controls are Unavailable (dimmed,
+        // with the reason) or Active (unchanged) — and Inactive only while no
+        // radio is connected, which the registry decides.
+        controlAvailability().registerWidget(
+            widget, reason,
+            [control](bool, const RadioCapabilities& caps) {
+                return radioSetupControlAvailable(control, caps);
+            },
+            [] { return true; });
+    }
+}
+
 QWidget* RadioSetupDialog::buildTxTab()
 {
     auto& tx = m_model->transmitModel();
@@ -2690,14 +2727,17 @@ QWidget* RadioSetupDialog::buildTxTab()
         auto* grid = new QGridLayout(group);
         grid->setSpacing(6);
 
+        QList<QWidget*> timingWidgets;
         auto addTimingField = [&](int row, int col, const QString& label, int value) {
             auto* lbl = new QLabel(label);
             applyLabelStyle(lbl);
+            timingWidgets << lbl;
             grid->addWidget(lbl, row, col * 2);
             auto* edit = new QLineEdit(QString::number(value));
             applyEditStyle(edit);
             edit->setFixedWidth(60);
             grid->addWidget(edit, row, col * 2 + 1);
+            timingWidgets << edit;
             return edit;
         };
 
@@ -2739,6 +2779,8 @@ QWidget* RadioSetupDialog::buildTxTab()
 
         auto* tx3Edit = addTimingField(3, 0, "RCA TX3:", tx.tx3Delay());
         connectTimingField(tx3Edit, "tx3_delay");
+        gateOnRadio(RadioSetupControl::InterlockTimings, timingWidgets);
+        gateOnRadio(RadioSetupControl::TxProfile, {profCmb});
 
         // TX Band Settings button
         auto* bandSetBtn = new QPushButton("TX Band Settings");
@@ -2750,6 +2792,14 @@ QWidget* RadioSetupDialog::buildTxTab()
             emit txBandSettingsRequested();
         });
         grid->addWidget(bandSetBtn, 3, 2, 1, 2);
+        // The button only triggers MainWindow's m_txBandAction, and QAction::
+        // trigger() on a disabled action does nothing — so this asks exactly
+        // what MainWindow asks before enabling that action
+        // (RadioModel::hasCommandPlane(), MainWindow::applyCapabilitiesToUi).
+        // One condition, so the button and the menu entry cannot disagree.
+        controlAvailability().registerWidget(bandSetBtn, txBandSettingsUnavailableReason(),
+            [this](bool, const RadioCapabilities&) { return m_model->hasCommandPlane(); },
+            [] { return true; });
 
         for (auto* lbl : group->findChildren<QLabel*>())
             if (lbl->styleSheet().isEmpty()) applyLabelStyle(lbl);
@@ -2782,6 +2832,12 @@ QWidget* RadioSetupDialog::buildTxTab()
         AetherSDR::applyComboStyle(accCmb);
         grid->addWidget(accCmb, 0, 3);
 
+        // KNOWN, NOT FIXED HERE: neither combo is connected to anything, on any
+        // radio — choosing a polarity sends nothing even to a Flex (ui
+        // inventory 2026-09-29). Dimming them where the radio has no TX REQ
+        // inputs is honest regardless; wiring them for Flex is its own change.
+        gateOnRadio(RadioSetupControl::InterlockPolarity, {rcaLbl, rcaCmb, accLbl, accCmb});
+
         vbox->addWidget(group);
     }
 
@@ -2813,6 +2869,7 @@ QWidget* RadioSetupDialog::buildTxTab()
         mpRow->addStretch(1);
         grid->addLayout(mpRow, 0, 1);
 
+        gateOnRadio(RadioSetupControl::MaxPower, {mpLbl, mpEdit, mpUnit});
         connect(mpEdit, &QLineEdit::editingFinished, this, [this, mpEdit] {
             int val = qBound(0, mpEdit->text().toInt(), 100);
             mpEdit->setText(QString::number(val));
@@ -2837,6 +2894,7 @@ QWidget* RadioSetupDialog::buildTxTab()
                 QString("transmit set show_tx_in_waterfall=%1").arg(on ? 1 : 0));
         });
         grid->addWidget(swBtn, 1, 1);
+        gateOnRadio(RadioSetupControl::ShowTxInWaterfall, {swLbl, swBtn});
 
         // Slice–TX Follow Mode (#441, #1351) — mutually exclusive toggles
         auto* followLbl = new QLabel("Slice/TX Follow:");
@@ -2947,6 +3005,7 @@ QWidget* RadioSetupDialog::buildPhoneCwTab()
             button->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
             grid->addWidget(label, row, 0);
             grid->addWidget(button, row, 1);
+            return label;
         };
 
         auto* biasBtn = mkTogBtn("BIAS", tx.micBias());
@@ -2963,9 +3022,11 @@ QWidget* RadioSetupDialog::buildPhoneCwTab()
             m_model->sendCommand(QString("transmit set met_in_rx=%1").arg(on ? 1 : 0));
         });
 
-        addMicRow(0, "Mic Bias Voltage:", biasBtn);
-        addMicRow(1, "Mic +20 dB Boost:", boostBtn);
-        addMicRow(2, "Level Meter During Receive:", metBtn);
+        auto* biasLbl = addMicRow(0, "Mic Bias Voltage:", biasBtn);
+        auto* boostLbl = addMicRow(1, "Mic +20 dB Boost:", boostBtn);
+        auto* metLbl = addMicRow(2, "Level Meter During Receive:", metBtn);
+        gateOnRadio(RadioSetupControl::MicBiasBoost, {biasLbl, biasBtn, boostLbl, boostBtn});
+        gateOnRadio(RadioSetupControl::MeterInReceive, {metLbl, metBtn});
 
         vbox->addWidget(group);
     }
@@ -3037,6 +3098,11 @@ QWidget* RadioSetupDialog::buildPhoneCwTab()
         });
         grid->addWidget(cwuBtn, 1, 1);
         grid->addWidget(cwlBtn, 1, 2);
+        // Not merely dead where the radio lacks it: setCwlEnabled() still flips
+        // the local flag, and zero-beat reads that flag as well as the slice
+        // mode (MainWindow_Wiring.cpp), so a CWL press here on a radio that
+        // takes the sideband from the mode would mirror a CWU zero-beat.
+        gateOnRadio(RadioSetupControl::CwSideband, {sbLbl, cwuBtn, cwlBtn});
 
         // CWX: Sync
         auto* cwxLbl = new QLabel("CWX:");
@@ -3047,6 +3113,7 @@ QWidget* RadioSetupDialog::buildPhoneCwTab()
             m_model->sendCommand(QString("cw synccwx %1").arg(on ? 1 : 0));
         });
         grid->addWidget(syncBtn, 1, 5);
+        gateOnRadio(RadioSetupControl::CwxSync, {cwxLbl, syncBtn});
 
         // CW Decode — independent RX / TX toggles (#2417).  RX keeps the
         // legacy behaviour of decoding the received CW slice; TX decodes
@@ -3091,6 +3158,7 @@ QWidget* RadioSetupDialog::buildPhoneCwTab()
                 "radio set rtty_mark_default=" + markEdit->text());
         });
         grid->addWidget(markEdit, 0, 1);
+        gateOnRadio(RadioSetupControl::RttyMarkDefault, {markLbl, markEdit});
 
         // RTTY Decode — the operator's explicit "I want the decoder pane"
         // state (#5353).  The pane's own ✕ clears this flag, and before it
@@ -3298,6 +3366,10 @@ QWidget* RadioSetupDialog::buildRxTab()
         offsetGrid->addWidget(ppbUnitLbl, 1, 2);
         offsetGrid->setColumnStretch(3, 1);
         gvb->addLayout(offsetGrid);
+        // The header line is gated too: "calibration available" is exactly the
+        // claim that is false on a radio without radio-side calibration.
+        gateOnRadio(RadioSetupControl::FrequencyOffset,
+                    {lbl, calLbl, calEdit, startBtn, calStatus, ppbLbl, ppbEdit, ppbUnitLbl});
 
         connect(m_model, &RadioModel::infoChanged, this, [this, calEdit, ppbEdit] {
             if (!calEdit->hasFocus())
@@ -3378,6 +3450,7 @@ QWidget* RadioSetupDialog::buildRxTab()
                 "radio oscillator " + srcCmb->itemData(i).toString());
         });
         grid->addWidget(srcCmb, 0, 1);
+        gateOnRadio(RadioSetupControl::OscillatorSource, {srcLbl, srcCmb});
 
         // Lock status
         auto* lockLbl = new QLabel(oscillatorStatusText(m_model));
@@ -3407,7 +3480,7 @@ QWidget* RadioSetupDialog::buildRxTab()
         grid->setSpacing(6);
 
         auto addToggle = [&](int row, const QString& label, bool checked,
-                              const QString& cmd) {
+                              const QString& cmd) -> QList<QWidget*> {
             auto* lbl = new QLabel(label);
             applyLabelStyle(lbl);
             grid->addWidget(lbl, row, 0);
@@ -3421,12 +3494,16 @@ QWidget* RadioSetupDialog::buildRxTab()
                     QString("%1=%2").arg(cmd).arg(on ? 1 : 0));
             });
             grid->addWidget(btn, row, 1);
+            return {lbl, btn};
         };
 
-        addToggle(0, "Mute local audio when remote:", m_model->muteLocalWhenRemote(),
-                  "radio set mute_local_audio_when_remote");
-        addToggle(1, "Binaural audio:", m_model->binauralRx(),
-                  "radio set binaural_rx");
+        gateOnRadio(RadioSetupControl::MuteLocalWhenRemote,
+                    addToggle(0, "Mute local audio when remote:",
+                              m_model->muteLocalWhenRemote(),
+                              "radio set mute_local_audio_when_remote"));
+        gateOnRadio(RadioSetupControl::BinauralReceive,
+                    addToggle(1, "Binaural audio:", m_model->binauralRx(),
+                              "radio set binaural_rx"));
 
         vbox->addLayout(grid);
     }
@@ -4665,6 +4742,9 @@ QWidget* RadioSetupDialog::buildAudioTab()
         m_model->setHeadphoneGain(v);
     });
     connect(hpMute, &QPushButton::toggled, m_model, &RadioModel::setHeadphoneMute);
+    gateOnRadio(RadioSetupControl::RadioAudioOutputs,
+                {lineoutLabel, lineoutSlider, lineoutValue, lineoutMute,
+                 hpLabel, hpSlider, hpValue, hpMute});
 
     // Front Speaker (mute only) — only on M-suffix models with built-in speaker
     // M-suffix models have a built-in front speaker (6400M, 6600M, 8400M, 8600M, AU-510M, AU-520M)
@@ -4794,6 +4874,7 @@ QWidget* RadioSetupDialog::buildAudioTab()
             }
         });
         vbox->addWidget(plcCheck);
+        gateOnRadio(RadioSetupControl::PacketLossConcealment, {plcCheck});
     }
 
     // ── Prevent Sleep ───────────────────────────────────────────────────
@@ -5086,6 +5167,10 @@ QWidget* RadioSetupDialog::buildAudioTab()
 
         modeRow->addWidget(radioSideBtn);
         modeRow->addWidget(clientSideBtn);
+        // Only the Radio Side choice is gated: Client Side records on this
+        // computer and works with every radio. A radio-side REC is a slice
+        // command that only a command plane carries.
+        gateOnRadio(RadioSetupControl::RadioSideRecording, {radioSideBtn});
         modeRow->addStretch();
         recLayout->addLayout(modeRow);
 
@@ -5492,6 +5577,7 @@ QWidget* RadioSetupDialog::buildXvtrTab()
             });
     });
     addVb->addWidget(addBtn, 0, Qt::AlignCenter);
+    gateOnRadio(RadioSetupControl::TransverterCreate, {addBtn});
     addVb->addStretch(1);
     xvtrTabs->addTab(addPage, "+");
 

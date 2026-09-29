@@ -26,6 +26,8 @@ namespace AetherSDR {
 
 class RadioModel;
 class AudioEngine;
+class ControlAvailabilityRegistry;
+enum class RadioSetupControl;
 class FirmwareUploader;
 class FirmwareStager;
 class TgxlConnection;
@@ -186,6 +188,12 @@ private:
 
     RadioModel*  m_model;
     AudioEngine* m_audio{nullptr};
+
+    // Three-state gating for controls the connected radio cannot honour
+    // (gui/RadioSetupControlGate.h). Dimmed with a reason, never hidden.
+    ControlAvailabilityRegistry& controlAvailability();
+    void gateOnRadio(RadioSetupControl control, const QList<QWidget*>& widgets);
+    ControlAvailabilityRegistry* m_controlAvailability{nullptr};
     TgxlConnection*    m_tgxl{nullptr};
     PgxlConnection*    m_pgxl{nullptr};
     AntennaGeniusModel* m_ag{nullptr};

@@ -5052,6 +5052,22 @@ add_test(NAME control_availability_registry_test COMMAND control_availability_re
 set_tests_properties(control_availability_registry_test PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+# Radio Setup controls a radio cannot honour are dimmed with a stated reason,
+# not left live and silent (gui/RadioSetupControlGate.h). Pins the HL2's
+# declaration against the real backends, the gate over every gated control, and
+# the registry treatment a dimmed control gets. Socket-free: backends are only
+# asked for capabilities(); the widget layer uses an injected backend double.
+add_executable(radio_setup_capability_gating_test
+    tests/radio_setup_capability_gating_test.cpp
+    src/gui/ControlAvailabilityRegistry.cpp
+    ${THEME_TEST_RESOURCES})
+target_include_directories(radio_setup_capability_gating_test PRIVATE src tests)
+target_link_libraries(radio_setup_capability_gating_test PRIVATE aethercore Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Network Qt6::Test)
+set_target_properties(radio_setup_capability_gating_test PROPERTIES AUTOMOC ON)
+add_test(NAME radio_setup_capability_gating_test COMMAND radio_setup_capability_gating_test)
+set_tests_properties(radio_setup_capability_gating_test PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
 # #5262 M1: family-specific verbs gate on the declared extension namespace, not
 # on the family string. Socket-free.
 add_executable(extension_namespace_gate_test tests/extension_namespace_gate_test.cpp)
@@ -6668,6 +6684,7 @@ set(AETHER_SETTINGS_CONSUMERS
     radio_capacity_declaration_test
     extension_namespace_gate_test
     control_availability_registry_test
+    radio_setup_capability_gating_test
     offline_health_registry_test
     tx_operation_integration_test
     tx_audio_context_test
