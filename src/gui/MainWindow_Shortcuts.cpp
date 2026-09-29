@@ -1272,7 +1272,7 @@ void MainWindow::registerShortcutActions()
                     qCWarning(lcDevices)
                         << "split_toggle ignored: this backend takes no Flex"
                         << "slice-create command";
-                    showUnsupportedControlNotice();
+                    showUnsupportedControlNotice(tr("Split"));
                     return;
                 }
                 if (m_radioModel.slices().size() >= m_radioModel.maxSlices()) return;
@@ -1752,7 +1752,7 @@ void MainWindow::togglePanZoomModeForPan(const QString& panId, bool segmentZoom)
     // qCWarning + notice pairing as the split_toggle gate above and the
     // VfoWidget::splitToggled gate in MainWindow_Wiring.cpp; see
     // MainWindow::showUnsupportedControlNotice()'s own comment for the rule
-    // and for the shared one-per-session latch. Only this rung announces --
+    // and for the per-control session ledger. Only this rung announces --
     // NotConnected and NoPan were silent early returns before and stay silent,
     // so this restores exactly what the gate took away and nothing more.
     auto* pan = panId.isEmpty() ? nullptr : m_radioModel.panadapter(panId);
@@ -1764,7 +1764,7 @@ void MainWindow::togglePanZoomModeForPan(const QString& panId, bool segmentZoom)
         qCWarning(lcDevices)
             << (segmentZoom ? "segment zoom" : "band zoom")
             << "ignored: this radio declares no band/segment zoom";
-        showUnsupportedControlNotice();
+        showUnsupportedControlNotice(segmentZoom ? tr("Segment zoom") : tr("Band zoom"));
         return;
     }
     if (refusal != PanZoomModeRefusal::None) {
@@ -1833,7 +1833,7 @@ void MainWindow::setPanZoomMode(bool segmentZoom, bool enable)
         qCWarning(lcDevices)
             << (segmentZoom ? "segment zoom" : "band zoom")
             << "ignored: this radio declares no band/segment zoom";
-        showUnsupportedControlNotice();
+        showUnsupportedControlNotice(segmentZoom ? tr("Segment zoom") : tr("Band zoom"));
         return;
     }
     auto* s = activeSlice();

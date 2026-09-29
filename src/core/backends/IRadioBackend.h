@@ -421,8 +421,9 @@ public:
     {
         Q_UNUSED(sliceId);
         Q_UNUSED(antenna);
+        declineIntent();
     }
-    virtual void setRadioDialLock(bool locked) { Q_UNUSED(locked); }
+    virtual void setRadioDialLock(bool locked) { Q_UNUSED(locked); declineIntent(); }
 
     // How often the operator wants panadapter frames, in frames per second.
     //
@@ -492,16 +493,19 @@ public:
     {
         Q_UNUSED(sliceId);
         Q_UNUSED(mute);
+        declineIntent();
     }
     virtual void setSliceAudioGain(int sliceId, int gainPercent)
     {
         Q_UNUSED(sliceId);
         Q_UNUSED(gainPercent);
+        declineIntent();
     }
     virtual void setSliceAudioPan(int sliceId, int panPercent)
     {
         Q_UNUSED(sliceId);
         Q_UNUSED(panPercent);
+        declineIntent();
     }
 
     // Move transmit to this slice. A radio with one transmitter and several
@@ -509,7 +513,7 @@ public:
     // rather than set a per-slice flag, so this is a verb and not a setter with
     // a bool. There is no "stop being the TX slice": transmit always lives
     // somewhere, and it is cleared only by another slice taking it.
-    virtual void setTxSlice(int sliceId) { Q_UNUSED(sliceId); }
+    virtual void setTxSlice(int sliceId) { Q_UNUSED(sliceId); declineIntent(); }
 
     // Make this the ACTIVE slice — the one the client's shared controls act on.
     // Distinct from setTxSlice: listening on one slice while transmitting on
@@ -520,7 +524,7 @@ public:
     // there. A backend with no such echo has to clear the old one itself, or
     // every slice ever selected stays active and "the active slice" stops being
     // a single answer.
-    virtual void setActiveSlice(int sliceId) { Q_UNUSED(sliceId); }
+    virtual void setActiveSlice(int sliceId) { Q_UNUSED(sliceId); declineIntent(); }
 
     // ---- ordinary receive-slice lifecycle ----
     // panId is backend-owned and opaque; frequencyHz is absolute RF in Hz.
@@ -798,14 +802,17 @@ public:
     virtual void setSliceNoiseReduction(int sliceId, bool on, int level)
     {
         Q_UNUSED(sliceId); Q_UNUSED(on); Q_UNUSED(level);
+        declineIntent();
     }
     virtual void setSliceNoiseBlanker(int sliceId, bool on, int level)
     {
         Q_UNUSED(sliceId); Q_UNUSED(on); Q_UNUSED(level);
+        declineIntent();
     }
     virtual void setSliceAutoNotch(int sliceId, bool on)
     {
         Q_UNUSED(sliceId); Q_UNUSED(on);
+        declineIntent();
     }
     // The radio's single operator-placed notch — capabilities().hasManualNotch.
     //
@@ -822,10 +829,12 @@ public:
     virtual void setSliceManualNotch(int sliceId, bool on, int position)
     {
         Q_UNUSED(sliceId); Q_UNUSED(on); Q_UNUSED(position);
+        declineIntent();
     }
     virtual void setSliceSquelch(int sliceId, bool on, int level)
     {
         Q_UNUSED(sliceId); Q_UNUSED(on); Q_UNUSED(level);
+        declineIntent();
     }
 
     // FM repeater controls.  These are separate radio registers on an Icom
@@ -837,27 +846,33 @@ public:
     virtual void setSliceFmToneMode(int sliceId, const QString& mode)
     {
         Q_UNUSED(sliceId); Q_UNUSED(mode);
+        declineIntent();
     }
     virtual void setSliceFmToneValue(int sliceId, double hz)
     {
         Q_UNUSED(sliceId); Q_UNUSED(hz);
+        declineIntent();
     }
     virtual void setSliceFmToneRxValue(int sliceId, double hz)
     {
         Q_UNUSED(sliceId); Q_UNUSED(hz);
+        declineIntent();
     }
     virtual void setSliceFmDtcs(int sliceId, int code, bool txReverse,
                                 bool rxReverse)
     {
         Q_UNUSED(sliceId); Q_UNUSED(code); Q_UNUSED(txReverse); Q_UNUSED(rxReverse);
+        declineIntent();
     }
     virtual void setSliceRepeaterOffsetDir(int sliceId, const QString& direction)
     {
         Q_UNUSED(sliceId); Q_UNUSED(direction);
+        declineIntent();
     }
     virtual void setSliceFmRepeaterOffset(int sliceId, double hz)
     {
         Q_UNUSED(sliceId); Q_UNUSED(hz);
+        declineIntent();
     }
     virtual void setSliceFmRepeater(int sliceId, const QString& direction,
                                     double offsetHz, const QString& toneMode,
@@ -888,9 +903,9 @@ public:
     // radio-wide selected-VFO state, not a memory/slice parameter.
     virtual void setTransmitFrequencyCheck(bool on) { Q_UNUSED(on); }
 
-    virtual void setRitEnabled(bool on) { Q_UNUSED(on); }
-    virtual void setXitEnabled(bool on) { Q_UNUSED(on); }
-    virtual void setRitOffset(int hz) { Q_UNUSED(hz); }
+    virtual void setRitEnabled(bool on) { Q_UNUSED(on); declineIntent(); }
+    virtual void setXitEnabled(bool on) { Q_UNUSED(on); declineIntent(); }
+    virtual void setRitOffset(int hz) { Q_UNUSED(hz); declineIntent(); }
 
     // The TRANSMIT offset, separately from the receive one.
     //

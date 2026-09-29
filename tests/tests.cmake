@@ -6094,6 +6094,12 @@ add_executable(command_drop_receipt_test tests/command_drop_receipt_test.cpp)
 target_include_directories(command_drop_receipt_test PRIVATE src tests)
 target_link_libraries(command_drop_receipt_test PRIVATE aethercore Qt6::Core Qt6::Test)
 add_test(NAME command_drop_receipt_test COMMAND command_drop_receipt_test)
+# Socket-free: non-Flex slice drops are accounted, and each dropped control is
+# named and announced once per session.
+add_executable(dropped_control_announce_test tests/dropped_control_announce_test.cpp)
+target_include_directories(dropped_control_announce_test PRIVATE src tests)
+target_link_libraries(dropped_control_announce_test PRIVATE aethercore Qt6::Core Qt6::Test)
+add_test(NAME dropped_control_announce_test COMMAND dropped_control_announce_test)
 # Socket-free bridge diagnostics: injected backend and meter model, no server/peer.
 add_executable(automation_persist_diagnostics_test tests/automation_persist_diagnostics_test.cpp)
 target_include_directories(automation_persist_diagnostics_test PRIVATE src tests)

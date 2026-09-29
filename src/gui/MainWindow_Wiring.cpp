@@ -7354,7 +7354,7 @@ void MainWindow::enterSplit(int rxSliceId, std::optional<double> offsetMhz)
         qCWarning(lcDevices)
             << "Split entry ignored: this backend takes no Flex"
             << "slice-create command";
-        showUnsupportedControlNotice();
+        showUnsupportedControlNotice(tr("Split"));
         return;
     }
     // Entering split: this slice becomes RX, create a new TX slice

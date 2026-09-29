@@ -583,10 +583,12 @@ private:
     // split yet, enters one at RX + N on rxSliceId (the active slice if -1).
     void applySplitOffsetKHz(double offsetKHz, int rxSliceId = -1);
     void showSplitBadgeMenu(int sliceId, const QPoint& globalPos);
-    // One status-bar notice per connect session for a control this radio
-    // cannot honor. Shared by the commandDropped path and by the
-    // capability gates that refuse BEFORE the send (M0, #5263).
-    void showUnsupportedControlNotice();
+    // One status-bar notice per DISTINCT control per connect session for a
+    // control this radio cannot honor, naming it. Shared by the commandDropped
+    // path and by the capability gates that refuse BEFORE the send (M0,
+    // #5263). An empty name is the generic, unnamed notice.
+    void showUnsupportedControlNotice(const QString& controlName = {});
+    void flushUnsupportedControlNotice();
     // Constructor wiring blocks extracted per #3351 Phase 2 — each runs once
     // from the constructor, in original order, defined in its subject TU.
     void wireModemAudioCompletion(); // MainWindow_Wiring.cpp
@@ -1787,7 +1789,13 @@ private:
     bool m_paCurrentStatusPreferred{false};
     float m_lastPaTempC{0.0f};
     bool m_userDisconnected{false};  // true after explicit disconnect, blocks auto-connect
-    bool m_commandDroppedNoticeShown{false};  // one status-bar notice per connect session (M0, #5263)
+    // Controls already announced this connect session (M0 #5263, per control
+    // since the notice names them), and those first seen in the current
+    // event-loop turn, merged into one status-bar line by
+    // flushUnsupportedControlNotice().
+    DroppedControlAnnouncements m_droppedControlAnnouncements;
+    QStringList m_unsupportedControlsPending;
+    bool m_unsupportedNoticeFlushQueued{false};
     // Slice lifecycle refusals already shown this connect session, keyed
     // "<operation>\n<reason>": one notice per distinct refusal, so a control
     // that re-requests (rigctl split on every set_split_vfo) cannot spam the bar.

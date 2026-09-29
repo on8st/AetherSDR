@@ -1822,19 +1822,23 @@ void RadioModel::wireBackendReceiverState()
                 if (m_backend) m_backend->setSliceMode(s->sliceId(), mode);
             });
             // Tuning and filter intents route through the seam too. A non-Flex
-            // backend never sees SliceModel::commandReady (that carries Flex
-            // wire text through the Flex-only slice sink), so without these the
+            // backend never RECEIVES SliceModel::commandReady (that carries Flex
+            // wire text, which only drop accounting below sees), so without these the
             // operator's tune/filter changes update the UI and are then dropped.
             // Both signals are OPERATOR-issued only — radio-status application
             // does not emit them — so echoing radio state back as a command
             // cannot happen (Principle II).
             connect(s, &SliceModel::frequencyCommandIssued, this,
                     [this, s](double mhz) {
-                if (m_backend) m_backend->setSliceFrequency(s->sliceId(), mhz * 1.0e6);
+                deliverIntent(ControlIntent::SliceFrequency, [s, mhz](IRadioBackend& b) {
+                    b.setSliceFrequency(s->sliceId(), mhz * 1.0e6);
+                });
             });
             connect(s, &SliceModel::filterCommandIssued, this,
                     [this, s](int lowHz, int highHz) {
-                if (m_backend) m_backend->setSliceFilter(s->sliceId(), lowHz, highHz);
+                deliverIntent(ControlIntent::SliceFilter, [s, lowHz, highHz](IRadioBackend& b) {
+                    b.setSliceFilter(s->sliceId(), lowHz, highHz);
+                });
             });
             // AGC is the same shape: the RX applet's mode combo and threshold
             // slider drive SliceModel, whose Flex wire text a non-Flex backend
@@ -1842,7 +1846,9 @@ void RadioModel::wireBackendReceiverState()
             // the DSP keeps whatever it was opened with — a dead slider.
             connect(s, &SliceModel::agcCommandIssued, this,
                     [this, s](const QString& mode, int thresholdDb) {
-                if (m_backend) m_backend->setSliceAgc(s->sliceId(), mode, thresholdDb);
+                deliverIntent(ControlIntent::SliceAgc, [s, mode, thresholdDb](IRadioBackend& b) {
+                    b.setSliceAgc(s->sliceId(), mode, thresholdDb);
+                });
             });
             // Receive DSP the radio runs. Same reasoning as AGC above: the
             // applet toggles drive SliceModel, whose Flex wire text a non-Flex
@@ -1850,14 +1856,20 @@ void RadioModel::wireBackendReceiverState()
             // radio's own NR/NB/notch/squelch keep whatever state they had.
             connect(s, &SliceModel::noiseReductionCommandIssued, this,
                     [this, s](bool on, int level) {
-                if (m_backend) m_backend->setSliceNoiseReduction(s->sliceId(), on, level);
+                deliverIntent(ControlIntent::SliceNoiseReduction, [s, on, level](IRadioBackend& b) {
+                    b.setSliceNoiseReduction(s->sliceId(), on, level);
+                });
             });
             connect(s, &SliceModel::noiseBlankerCommandIssued, this,
                     [this, s](bool on, int level) {
-                if (m_backend) m_backend->setSliceNoiseBlanker(s->sliceId(), on, level);
+                deliverIntent(ControlIntent::SliceNoiseBlanker, [s, on, level](IRadioBackend& b) {
+                    b.setSliceNoiseBlanker(s->sliceId(), on, level);
+                });
             });
             connect(s, &SliceModel::autoNotchCommandIssued, this, [this, s](bool on) {
-                if (m_backend) m_backend->setSliceAutoNotch(s->sliceId(), on);
+                deliverIntent(ControlIntent::SliceAutoNotch, [s, on](IRadioBackend& b) {
+                    b.setSliceAutoNotch(s->sliceId(), on);
+                });
             });
             connect(s, &SliceModel::manualNotchCommandIssued, this,
                     [this, s](bool on, int position) {
@@ -1865,7 +1877,9 @@ void RadioModel::wireBackendReceiverState()
             });
             connect(s, &SliceModel::squelchCommandIssued, this,
                     [this, s](bool on, int level) {
-                if (m_backend) m_backend->setSliceSquelch(s->sliceId(), on, level);
+                deliverIntent(ControlIntent::SliceSquelch, [s, on, level](IRadioBackend& b) {
+                    b.setSliceSquelch(s->sliceId(), on, level);
+                });
             });
             // FM repeater controls are distinct neutral intents. Flex
             // continues to use SliceModel's wire text; every other backend gets
@@ -1873,15 +1887,15 @@ void RadioModel::wireBackendReceiverState()
             // updating only the widgets.
             connect(s, &SliceModel::fmToneModeCommandIssued, this,
                     [this, s](const QString& mode) {
-                if (m_backend) {
-                    m_backend->setSliceFmToneMode(s->sliceId(), mode);
-                }
+                deliverIntent(ControlIntent::SliceFmToneMode, [s, mode](IRadioBackend& b) {
+                    b.setSliceFmToneMode(s->sliceId(), mode);
+                });
             });
             connect(s, &SliceModel::fmToneValueCommandIssued, this,
                     [this, s](double hz) {
-                if (m_backend) {
-                    m_backend->setSliceFmToneValue(s->sliceId(), hz);
-                }
+                deliverIntent(ControlIntent::SliceFmToneValue, [s, hz](IRadioBackend& b) {
+                    b.setSliceFmToneValue(s->sliceId(), hz);
+                });
             });
             connect(s, &SliceModel::fmToneRxValueCommandIssued, this,
                     [this, s](double hz) {
@@ -1898,15 +1912,16 @@ void RadioModel::wireBackendReceiverState()
             });
             connect(s, &SliceModel::repeaterOffsetDirCommandIssued, this,
                     [this, s](const QString& direction) {
-                if (m_backend) {
-                    m_backend->setSliceRepeaterOffsetDir(s->sliceId(), direction);
-                }
+                deliverIntent(ControlIntent::SliceRepeaterOffsetDir,
+                              [s, direction](IRadioBackend& b) {
+                    b.setSliceRepeaterOffsetDir(s->sliceId(), direction);
+                });
             });
             connect(s, &SliceModel::fmRepeaterOffsetCommandIssued, this,
                     [this, s](double hz) {
-                if (m_backend) {
-                    m_backend->setSliceFmRepeaterOffset(s->sliceId(), hz);
-                }
+                deliverIntent(ControlIntent::SliceRepeaterOffset, [s, hz](IRadioBackend& b) {
+                    b.setSliceFmRepeaterOffset(s->sliceId(), hz);
+                });
             });
             connect(s, &SliceModel::fmRepeaterRecallCommandIssued, this,
                     [this, s](const QString& direction, double offsetHz,
@@ -1918,18 +1933,34 @@ void RadioModel::wireBackendReceiverState()
             });
             // RIT / XIT. The control already existed in VfoWidget and drove
             // SliceModel; only the last hop to the seam was missing.
+            // One receipt for both verbs: either one declining leaves the
+            // receipt unearned, so a half-implemented RIT is still announced.
             connect(s, &SliceModel::ritCommandIssued, this, [this](bool on, int hz) {
-                if (!m_backend) return;
-                m_backend->setRitEnabled(on);
-                m_backend->setRitOffset(hz);
+                deliverIntent(ControlIntent::SliceRit, [on, hz](IRadioBackend& b) {
+                    b.setRitEnabled(on);
+                    b.setRitOffset(hz);
+                });
             });
             connect(s, &SliceModel::xitCommandIssued, this, [this](bool on, int hz) {
-                if (!m_backend) return;
-                m_backend->setXitEnabled(on);
-                // The TRANSMIT offset verb, which defaults to the receive one
-                // for a radio with a single shared register (Icom) and is
-                // overridable by a radio with two (Flex).
-                m_backend->setXitOffset(hz);
+                deliverIntent(ControlIntent::SliceXit, [on, hz](IRadioBackend& b) {
+                    b.setXitEnabled(on);
+                    // The TRANSMIT offset verb, which defaults to the receive one
+                    // for a radio with a single shared register (Icom) and is
+                    // overridable by a radio with two (Flex).
+                    b.setXitOffset(hz);
+                });
+            });
+            // The slice's own Flex text. Nothing on this path has a sink for
+            // it — that is why every intent above exists — and until now it
+            // was not connected at all, so a control with no intent (APF, NRL,
+            // DAX channel, …) moved, changed the model and reached nothing,
+            // without so much as a log line. It goes through the same drop
+            // accounting as sendCmd's no-command-plane path: quiet when the
+            // intent beside it was applied, announced when it was not. Never
+            // sent: a backend on this path that does own a command plane (the
+            // demo) was never sent slice text here either.
+            connect(s, &SliceModel::commandReady, this, [this](const QString& cmd) {
+                accountDroppedCommand(cmd);
             });
 
             wireSliceAudioIntentsToBackend(s);
@@ -10047,7 +10078,7 @@ void RadioModel::accountDroppedCommand(const QString& command)
 void RadioModel::reportUnappliedDrop(const QString& command)
 {
     qCWarning(lcProtocol).noquote()
-        << "RadioModel: no command plane for this backend, dropping" << command;
+        << "RadioModel: no command plane or slice sink reaches the radio, dropping" << command;
     emit commandDropped(command);
 }
 
@@ -10293,25 +10324,39 @@ void RadioModel::wireSliceAudioIntentsToBackend(SliceModel* s)
     // receiver on this host has to apply them in its own mixer.
     connect(s, &SliceModel::audioMuteCommandIssued, this,
             [this, s](bool mute) {
-        if (m_backend) m_backend->setSliceAudioMute(s->sliceId(), mute);
+        deliverIntent(ControlIntent::SliceAudioMute, [s, mute](IRadioBackend& b) {
+            b.setSliceAudioMute(s->sliceId(), mute);
+        });
     });
     connect(s, &SliceModel::audioGainCommandIssued, this,
             [this, s](int gainPercent) {
-        if (m_backend) m_backend->setSliceAudioGain(s->sliceId(), gainPercent);
+        deliverIntent(ControlIntent::SliceAudioGain, [s, gainPercent](IRadioBackend& b) {
+            b.setSliceAudioGain(s->sliceId(), gainPercent);
+        });
     });
     connect(s, &SliceModel::audioPanCommandIssued, this,
             [this, s](int panPercent) {
-        if (m_backend) m_backend->setSliceAudioPan(s->sliceId(), panPercent);
+        deliverIntent(ControlIntent::SliceAudioPan, [s, panPercent](IRadioBackend& b) {
+            b.setSliceAudioPan(s->sliceId(), panPercent);
+        });
     });
     connect(s, &SliceModel::rxAntennaCommandIssued, this,
             [this, s](const QString& antenna) {
         if (m_backend && !usesFlexCommandPlane())
-            m_backend->setSliceRxAntenna(s->sliceId(), antenna);
+            deliverIntent(ControlIntent::SliceRxAntenna, [s, antenna](IRadioBackend& b) {
+                b.setSliceRxAntenna(s->sliceId(), antenna);
+            });
     });
     connect(s, &SliceModel::lockCommandIssued, this,
             [this](bool locked) {
         if (m_backend && backendCapabilities().hasRadioDialLock) {
-            m_backend->setRadioDialLock(locked);
+            deliverIntent(ControlIntent::SliceLock,
+                          [locked](IRadioBackend& b) { b.setRadioDialLock(locked); });
+        } else {
+            // No dial lock on the radio: SliceModel enforces the lock itself
+            // (setFrequency refuses and reports tuneBlockedByLock while
+            // locked), so the model holding the flag IS the delivery.
+            noteIntentApplied(ControlIntent::SliceLock);
         }
     });
     // "Make this the transmit slice." On a radio with one transmitter the
@@ -10320,7 +10365,8 @@ void RadioModel::wireSliceAudioIntentsToBackend(SliceModel* s)
     // is assumed here about the outcome.
     connect(s, &SliceModel::txSliceCommandIssued, this,
             [this, s]() {
-        if (m_backend) m_backend->setTxSlice(s->sliceId());
+        deliverIntent(ControlIntent::SliceTxSlice,
+                      [s](IRadioBackend& b) { b.setTxSlice(s->sliceId()); });
     });
     // Selecting a slice. Distinct from taking transmit: the operator listens on
     // one slice while transmitting on another routinely, so this must not drag
@@ -10328,7 +10374,8 @@ void RadioModel::wireSliceAudioIntentsToBackend(SliceModel* s)
     // a Flex arrives as a status echo and here has no other way of happening.
     connect(s, &SliceModel::activeSliceCommandIssued, this,
             [this, s]() {
-        if (m_backend) m_backend->setActiveSlice(s->sliceId());
+        deliverIntent(ControlIntent::SliceActive,
+                      [s](IRadioBackend& b) { b.setActiveSlice(s->sliceId()); });
     });
 }
 

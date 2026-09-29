@@ -88,6 +88,7 @@
 #include <QPointer>
 #include <QThread>
 #include <QTimer>
+#include <utility>
 
 #include <algorithm>
 #include <cmath>
@@ -796,20 +797,24 @@ void MainWindow::wireRadioModel()
         updateExperimentalRadioSupport(true);
     });
 
-    // Loud drop (M0, #5263): RadioModel emits commandDropped on every
-    // Flex-syntax command it discards for lack of a command plane (HL2, Icom).
-    // The qCWarning in RadioModel carries each occurrence; the operator gets
-    // ONE status-bar notice per connect session, so a single unconverted
-    // surface cannot spam the bar while still never failing silently.
+    // Loud drop (M0, #5263): RadioModel emits commandDropped for every
+    // Flex-syntax command it discards for lack of a command plane (HL2, Icom)
+    // whose control was not applied another way. The qCWarning in RadioModel
+    // carries each occurrence; the operator gets ONE status-bar notice per
+    // DISTINCT control per connect session, naming it, so a control dragged
+    // end to end cannot spam the bar and a second dead control is never
+    // hidden behind the first.
     connect(&m_radioModel, &RadioModel::connectionStateChanged,
             this, [this](bool connected) {
         if (connected) {
-            m_commandDroppedNoticeShown = false;
+            m_droppedControlAnnouncements.reset();
             m_sliceLifecycleNoticesShown.clear();
         }
     });
     connect(&m_radioModel, &RadioModel::commandDropped,
-            this, [this](const QString&) { showUnsupportedControlNotice(); });
+            this, [this](const QString& command) {
+        showUnsupportedControlNotice(controlNameForCommand(command));
+    });
     // Slice Link: disconnect teardown never emits sliceRemoved (stale slices
     // are staged for reconnect reclaim), so dissolve the link explicitly.
     // Both transitions dissolve — a link never crosses a session boundary
@@ -3025,23 +3030,46 @@ void MainWindow::applyTxAudioCapabilities(bool connected, const RadioCapabilitie
 // invisible now. A gate calls this so a refused control says exactly what a
 // dropped one says.
 //
-// The latch is now SHARED between two producers: this helper's gate callers and
-// the commandDropped path. One refusal per connect session therefore consumes
-// the notice for both, so an operator who trips a capability gate first sees
-// nothing for a genuinely dropped command later in the same session. That is
-// the pre-existing one-shot semantics extended to a second producer rather than
-// a new rule, and the message is deliberately generic enough to stand for
-// either cause — but it is a real consequence and is recorded here rather than
-// left to be rediscovered.
-void MainWindow::showUnsupportedControlNotice()
+// PER CONTROL, NOT PER SESSION. This used to be a single latch shared by the
+// gate callers and the commandDropped path, so whichever control dropped first
+// used up the session's only notice and every later one — gate or drop — went
+// unannounced. On an HL2 the first drop was usually a control that had worked
+// (RF power, mic gain), which is how a working control came to be reported as
+// unsupported while the dead ones stayed quiet. The ledger is now keyed by the
+// control's name: each distinct control is announced once per connect session,
+// the same control repeated is not re-announced, and the controls first seen
+// in one event-loop turn (a profile load, a band change) share one line.
+void MainWindow::showUnsupportedControlNotice(const QString& controlName)
 {
-    if (m_commandDroppedNoticeShown)
+    const QString key = controlName.isEmpty() ? QStringLiteral("\n(generic)") : controlName;
+    if (!m_droppedControlAnnouncements.firstThisSession(key))
         return;
-    m_commandDroppedNoticeShown = true;
-    statusBar()->showMessage(
-        tr("This radio doesn't support that control — nothing was sent to "
-           "the radio. Further unsupported controls are logged."),
-        8000);
+    m_unsupportedControlsPending.append(controlName);
+    if (m_unsupportedNoticeFlushQueued)
+        return;
+    m_unsupportedNoticeFlushQueued = true;
+    QTimer::singleShot(0, this, [this] { flushUnsupportedControlNotice(); });
+}
+
+void MainWindow::flushUnsupportedControlNotice()
+{
+    m_unsupportedNoticeFlushQueued = false;
+    const QStringList pending = std::exchange(m_unsupportedControlsPending, {});
+    QStringList named;
+    for (const QString& name : pending) {
+        if (!name.isEmpty())
+            named.append(name);
+    }
+    if (named.isEmpty()) {
+        if (pending.isEmpty())
+            return;
+        statusBar()->showMessage(
+            tr("This radio doesn't support that control — nothing was sent to "
+               "the radio."),
+            8000);
+        return;
+    }
+    statusBar()->showMessage(droppedControlNotice(named), 8000);
 }
 
 } // namespace AetherSDR
