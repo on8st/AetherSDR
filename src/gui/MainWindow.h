@@ -584,7 +584,7 @@ private:
     void applySplitOffsetKHz(double offsetKHz, int rxSliceId = -1);
     void showSplitBadgeMenu(int sliceId, const QPoint& globalPos);
     // One status-bar notice per DISTINCT control per connect session for a
-    // control this radio cannot honor, naming it. Shared by the commandDropped
+    // control this radio cannot honor, naming it. Shared by the controlUnavailable
     // path and by the capability gates that refuse BEFORE the send (M0,
     // #5263). An empty name is the generic, unnamed notice.
     void showUnsupportedControlNotice(const QString& controlName = {});

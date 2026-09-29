@@ -261,6 +261,40 @@ public:
     // override that silently ignores its input can mislead, which is a bug in
     // that override whatever this receipt says.
     //
+    // A DECLINE IS ALSO THE ANNOUNCEMENT for an intent that has no wire twin
+    // (manual notch, DTCS, preamp, notch filters, …): on a connected backend
+    // with no command plane, RadioModel reports a declined intent that nothing
+    // else applied in the same turn as an unavailable control, by name,
+    // through the same per-control notice as a dropped wire command. There is
+    // no second path: no signal of its own, no latch in the backend.
+    //
+    // WHICH DEFAULTS DECLINE, AND WHICH ARE DELIBERATELY SILENT. Every
+    // operator-intent verb whose default writes nothing declines. These do not,
+    // and each is a classification rather than an oversight:
+    //   - applyRestoredState, currentOperatingState, setOfflineHealthSource,
+    //     setTransmitContext: lifecycle plumbing, not an operator asking;
+    //   - setPanFrameRate/Average/WeightedAverage/PixelWidth: display hints a
+    //     host-computed backend is documented to answer with fixed behaviour;
+    //   - setTxSlice, setActiveSlice: selection bookkeeping the model already
+    //     holds; a one-transmitter radio does not LACK it;
+    //   - createSlice/removeSlice/createPanadapter/removePanadapter,
+    //     sendCwText: they refuse through their return value;
+    //   - setTune, setAtu, setCwKeying, stopIndependentTx, abortCwText: the
+    //     keying class, refused by the TX gate above the seam with a
+    //     completion a notice cannot discharge;
+    //   - setTxAudioMonitor: a certification diagnostic, not a control;
+    //   - setTransmitFrequencyCheck: its OFF edge is release cleanup sent
+    //     unconditionally, and ON is capability-gated in RadioModel;
+    //   - refreshMemories: a documented no-op for push-only/host memories;
+    //   - submitTxAudio, finishTxAudio: the data plane.
+    // setSpeechProcessor DOES decline: on a host-modulating radio the client
+    // compressor that is PROC receipts the intent itself
+    // (RadioModel::noteIntentApplied), so a decline there is never announced,
+    // and on a radio with neither it is the truth. The slice audio mix
+    // (mute/gain/pan) declines too: every seam backend that mixes does it in
+    // its own DSP (Hl2Backend, RtlSdrBackend), so one that does not override
+    // them has a dead AF control.
+    //
     // Owner thread only, like every other verb on this interface.
     void beginIntentReceipt() { m_intentDeclined = false; }
     bool intentDeclined() const { return m_intentDeclined; }
@@ -295,11 +329,12 @@ public:
     // remains exclusively a resize/reposition intent; keeping the two verbs
     // distinct prevents a width that happens to equal a preset from changing
     // slots. Empty RadioCapabilities::rxFilterControl.presets means callers
-    // never invoke this default no-op.
+    // never invoke this default; one that does is declined, not ignored.
     virtual void setSliceFilterPreset(int sliceId, int presetId)
     {
         Q_UNUSED(sliceId);
         Q_UNUSED(presetId);
+        declineIntent();
     }
     // Receive AGC. mode is the neutral vocabulary the slice model uses —
     // "off" / "slow" / "med" / "fast"; thresholdDb is the operator's 0..100
@@ -356,13 +391,14 @@ public:
     // panCenterBandwidthChanged. Callers must not assume the requested value was
     // taken — that assumption is what this verb exists to remove.
     //
-    // Default no-op: a Flex radio owns its pan geometry and is driven by
+    // Default declines: a Flex radio owns its pan geometry and is driven by
     // "display pan set … bandwidth=" wire text, so FlexBackend has nothing to do
-    // here.
+    // here and RadioModel does not route it through the seam there.
     virtual void setPanBandwidth(const QString& panId, double hz)
     {
         Q_UNUSED(panId);
         Q_UNUSED(hz);
+        declineIntent();
     }
 
     // Receive RF gain for a panadapter, in dB.
@@ -380,12 +416,13 @@ public:
     // a value that stops moving. What the hardware took comes back on
     // panRfGainChanged.
     //
-    // Default no-op: a Flex radio takes rfgain as wire text, so FlexBackend has
-    // nothing to do here.
+    // Default declines: a Flex radio takes rfgain as wire text, so FlexBackend
+    // has nothing to do here.
     virtual void setPanRfGain(const QString& panId, int gainDb)
     {
         Q_UNUSED(panId);
         Q_UNUSED(gainDb);
+        declineIntent();
     }
 
     // The backend's own automatic receive-gain control, or nullptr when it has
@@ -404,18 +441,21 @@ public:
     // backend published; a backend clamps rather than refuses, exactly as
     // setPanRfGain does.
     //
-    // Default no-op AND no capability flag: the empty label list a backend
-    // publishes by default already hides the control, so a family without these
-    // stages needs no declaration and cannot be asked for one.
+    // No capability flag: the empty label list a backend publishes by default
+    // already hides the control, so a family without these stages needs no
+    // declaration and cannot be asked for one. If it is asked anyway, the
+    // default declines rather than letting a visible control lie.
     virtual void setPanPreamp(const QString& panId, int step)
     {
         Q_UNUSED(panId);
         Q_UNUSED(step);
+        declineIntent();
     }
     virtual void setPanAttenuator(const QString& panId, int step)
     {
         Q_UNUSED(panId);
         Q_UNUSED(step);
+        declineIntent();
     }
     virtual void setSliceRxAntenna(int sliceId, const QString& antenna)
     {
@@ -513,7 +553,11 @@ public:
     // rather than set a per-slice flag, so this is a verb and not a setter with
     // a bool. There is no "stop being the TX slice": transmit always lives
     // somewhere, and it is cleared only by another slice taking it.
-    virtual void setTxSlice(int sliceId) { Q_UNUSED(sliceId); declineIntent(); }
+    //
+    // Deliberately does NOT decline (see beginIntentReceipt()): selection
+    // bookkeeping the model already holds, not a feature a one-transmitter
+    // radio lacks, so its dropped `slice set N tx=1` is not a dead control.
+    virtual void setTxSlice(int sliceId) { Q_UNUSED(sliceId); }
 
     // Make this the ACTIVE slice — the one the client's shared controls act on.
     // Distinct from setTxSlice: listening on one slice while transmitting on
@@ -524,7 +568,9 @@ public:
     // there. A backend with no such echo has to clear the old one itself, or
     // every slice ever selected stays active and "the active slice" stops being
     // a single answer.
-    virtual void setActiveSlice(int sliceId) { Q_UNUSED(sliceId); declineIntent(); }
+    //
+    // Deliberately does NOT decline, for the same reason as setTxSlice().
+    virtual void setActiveSlice(int sliceId) { Q_UNUSED(sliceId); }
 
     // ---- ordinary receive-slice lifecycle ----
     // panId is backend-owned and opaque; frequencyHz is absolute RF in Hz.
@@ -587,13 +633,14 @@ public:
     // every later edit. Requiring the caller to pick would force it to guess
     // what the radio will do, and two clients on the same Flex would collide.
     //
-    // Default no-ops. A backend with no notch engine declares
-    // capabilities().maxNotchFilters = 0 and the UI does not offer the control
-    // at all, so these are never reached rather than silently doing nothing.
+    // A backend with no notch engine declares capabilities().maxNotchFilters =
+    // 0 and the UI does not offer the control at all, so these defaults are
+    // never reached — and if one is, it declines rather than doing nothing.
     virtual void createNotch(double centerHz, double widthHz)
     {
         Q_UNUSED(centerHz);
         Q_UNUSED(widthHz);
+        declineIntent();
     }
     // Move, resize, or otherwise change an existing notch. A delta rather than
     // a fixed argument list for two reasons: it PERMITS a centre+width change
@@ -605,16 +652,19 @@ public:
     {
         Q_UNUSED(notchId);
         Q_UNUSED(delta);
+        declineIntent();
     }
     virtual void removeNotch(int notchId)
     {
         Q_UNUSED(notchId);
+        declineIntent();
     }
     // Global bypass for every notch at once, the equivalent of a Flex
     // tnf_enabled. Individual notches keep their own active flag underneath.
     virtual void setNotchesEnabled(bool on)
     {
         Q_UNUSED(on);
+        declineIntent();
     }
 
     // TX keying intent. The decision to allow keying is made ABOVE this seam by
@@ -714,8 +764,8 @@ public:
     // panadapter's CW passband draws a whole pitch away from the marker while
     // the transmitter keys on the marker itself.
     //
-    // Default no-op: a Flex owns its own DSP and takes `cw pitch` as text from
-    // TransmitModel, so this seam would be a second, redundant opinion.
+    // Default declines: a Flex owns its own DSP and takes `cw pitch` as text
+    // from TransmitModel, so this seam would be a second, redundant opinion.
     virtual void setCwPitch(int hz) { Q_UNUSED(hz); declineIntent(); }
 
     // Radio-resident text keyer. Unlike setCwKeying(), this hands printable
@@ -742,9 +792,9 @@ public:
     // That shape is FlexRadio's, and it is not universal. On a radio with its
     // own compressor the two halves are SEPARATE registers — an Icom wants
     // 16 44 for the enable and 14 0E for how hard — so a backend receives both
-    // together and decides how to spend them. Default no-op: Flex takes this as
-    // text from TransmitModel, and a host-modulating backend runs its own
-    // compressor in our DSP instead.
+    // together and decides how to spend them. Default declines: Flex takes this
+    // as text from TransmitModel, and a host-modulating backend runs its own
+    // compressor in our DSP instead, which receipts the intent itself.
     virtual void setSpeechProcessor(bool on, int level)
     {
         Q_UNUSED(on);
@@ -760,7 +810,7 @@ public:
     // IC-705 has 16 46 for the enable and 14 16 / 14 17 for level and delay; a
     // radio with fewer ignores what it does not have.
     //
-    // Default no-op: a Flex takes VOX as text from TransmitModel.
+    // Default declines: a Flex takes VOX as text from TransmitModel.
     virtual void setVox(bool on, int level, int delayMs)
     {
         Q_UNUSED(on); Q_UNUSED(level); Q_UNUSED(delayMs);

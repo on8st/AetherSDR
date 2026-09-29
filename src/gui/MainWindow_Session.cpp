@@ -797,13 +797,14 @@ void MainWindow::wireRadioModel()
         updateExperimentalRadioSupport(true);
     });
 
-    // Loud drop (M0, #5263): RadioModel emits commandDropped for every
-    // Flex-syntax command it discards for lack of a command plane (HL2, Icom)
-    // whose control was not applied another way. The qCWarning in RadioModel
-    // carries each occurrence; the operator gets ONE status-bar notice per
-    // DISTINCT control per connect session, naming it, so a control dragged
-    // end to end cannot spam the bar and a second dead control is never
-    // hidden behind the first.
+    // Loud drop (M0, #5263): RadioModel emits controlUnavailable, naming the
+    // control, for every Flex-syntax command it discards for lack of a command
+    // plane (HL2, Icom, ANAN, RTL) whose control was not applied another way,
+    // and for every typed intent the backend declined that nothing else
+    // applied. One signal, one ledger: the qCWarning in RadioModel carries each
+    // occurrence; the operator gets ONE status-bar notice per DISTINCT control
+    // per connect session, so a control dragged end to end cannot spam the bar
+    // and a second dead control is never hidden behind the first.
     connect(&m_radioModel, &RadioModel::connectionStateChanged,
             this, [this](bool connected) {
         if (connected) {
@@ -811,9 +812,9 @@ void MainWindow::wireRadioModel()
             m_sliceLifecycleNoticesShown.clear();
         }
     });
-    connect(&m_radioModel, &RadioModel::commandDropped,
-            this, [this](const QString& command) {
-        showUnsupportedControlNotice(controlNameForCommand(command));
+    connect(&m_radioModel, &RadioModel::controlUnavailable,
+            this, [this](const QString& controlName) {
+        showUnsupportedControlNotice(controlName);
     });
     // Slice Link: disconnect teardown never emits sliceRemoved (stale slices
     // are staged for reconnect reclaim), so dissolve the link explicitly.
@@ -1014,7 +1015,7 @@ void MainWindow::wireRadioModel()
             QString("%1 supports a maximum of %2 panadapters")
                 .arg(model).arg(limit), 4000);
     });
-    // Same shape as the commandDropped notice above: RadioModel's qCWarning
+    // Same shape as the controlUnavailable notice above: RadioModel's qCWarning
     // carries every occurrence; the operator sees each distinct refusal once
     // per connect session.
     connect(&m_radioModel, &RadioModel::sliceLifecycleFailed, this,
@@ -3019,9 +3020,10 @@ void MainWindow::applyTxAudioCapabilities(bool connected, const RadioCapabilitie
     }
 }
 
-// One notice per connect session, latch reset on the connect edge (M0, #5263).
+// One notice per control per connect session, ledger reset on the connect edge
+// (M0, #5263).
 //
-// Held here rather than inline in the commandDropped lambda because a
+// Held here rather than inline in the controlUnavailable lambda because a
 // capability gate REFUSES BEFORE THE SEND: `sendCmd` is never reached, so
 // `commandDropped` never fires, and a control converted from "drops silently"
 // to "refuses" would otherwise have taken the operator's only feedback away
@@ -3031,7 +3033,7 @@ void MainWindow::applyTxAudioCapabilities(bool connected, const RadioCapabilitie
 // dropped one says.
 //
 // PER CONTROL, NOT PER SESSION. This used to be a single latch shared by the
-// gate callers and the commandDropped path, so whichever control dropped first
+// gate callers and the dropped-command path, so whichever control dropped first
 // used up the session's only notice and every later one — gate or drop — went
 // unannounced. On an HL2 the first drop was usually a control that had worked
 // (RF power, mic gain), which is how a working control came to be reported as

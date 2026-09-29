@@ -72,7 +72,13 @@ def main() -> int:
     )
     if "&SliceModel::fmDtcsCommandIssued" not in radio_model_source:
         fail("RadioModel no longer forwards normalized DTCS operator intent")
-    if "m_backend->setSliceFmDtcs(" not in radio_model_source:
+    # Either straight to the backend or through deliverIntent(), which makes the
+    # same seam call and also records whether the backend declined it (#5263).
+    through_receipt = (
+        "deliverIntent(ControlIntent::SliceFmDtcs" in radio_model_source
+        and "b.setSliceFmDtcs(" in radio_model_source
+    )
+    if "m_backend->setSliceFmDtcs(" not in radio_model_source and not through_receipt:
         fail("RadioModel no longer sends DTCS intent through IRadioBackend")
     mode_visibility_edge = re.compile(
         r"m_fmContainer->setVisible\(isFM\);\s*"

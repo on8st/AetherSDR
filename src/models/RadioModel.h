@@ -1474,6 +1474,14 @@ signals:
     // model emits its wire text and its intent in either order; every other
     // drop is emitted synchronously, exactly as before.
     void commandDropped(const QString& command);
+    // THE operator notice's one input (#5263): a control that moved and
+    // reached nothing, named for the operator ("APF", "VOX", "Manual notch").
+    // Emitted beside every commandDropped above, and also for an intent the
+    // backend DECLINED when no wire text was dropped for it — a control with
+    // no Flex twin (manual notch, DTCS, preamp, notch filters) is otherwise
+    // dead in silence. Every emission; per-control throttling is the
+    // consumer's job, as for commandDropped.
+    void controlUnavailable(const QString& controlName);
     // Emitted when global profile list or active profile changes.
     void globalProfilesChanged();
     void profileDatabaseImportingChanged(bool importing);
@@ -1989,6 +1997,7 @@ private:
     void scheduleDropAccountingFlush();
     void flushDropAccounting();
     quint64 m_intentsAppliedThisTurn{0};
+    quint64 m_intentsDeclinedThisTurn{0};
     QStringList m_twinnedDropsThisTurn;
     bool m_dropAccountingFlushQueued{false};
     // Bumped at every session end. Captured by deferred work (the multiFLEX

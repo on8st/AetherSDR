@@ -62,8 +62,20 @@ enum class ControlIntent : quint8 {
     SliceFmToneValue,
     SliceRepeaterOffsetDir,
     SliceRepeaterOffset,
+    // Intents with NO wire twin: nothing is dropped beside them, so the
+    // backend's decline is the only thing that can say the control is dead.
+    SliceFmToneRxValue,
+    SliceFmDtcs,
+    SliceFmRepeaterRecall,
+    SliceManualNotch,
+    SliceFilterPreset,
+    PanBandwidth,
+    PanRfGain,
+    PanPreamp,
+    PanAttenuator,
+    Notch,
 };
-static_assert(static_cast<int>(ControlIntent::SliceRepeaterOffset) < 64,
+static_assert(static_cast<int>(ControlIntent::Notch) < 64,
               "controlIntentBit() packs intents into a quint64");
 
 constexpr quint64 controlIntentBit(ControlIntent intent)
@@ -207,6 +219,80 @@ inline std::optional<ControlIntent> controlIntentForCommand(const QString& comma
         if (words[1] == QLatin1String("break_in_delay")) return ControlIntent::CwBreakInDelay;
     }
     return std::nullopt;
+}
+
+// ── A declined intent is a drop too ─────────────────────────────────────────
+//
+// An intent verb the backend does not implement DECLINES (IRadioBackend::
+// declineIntent). When a wire twin was dropped beside it, the drop carries the
+// announcement. When there was none — manual notch, DTCS, preamp, the notch
+// filters, a filter preset — the decline is the only evidence that the control
+// moved and reached nothing, so RadioModel announces the decline itself, by
+// the intent's name, through the same per-control notice.
+//
+// Only where nothing else carried the value: a backend with a command plane
+// (Flex, the demo) took the wire text the model emitted beside the intent, so
+// its declines are the "Flex takes this as text" defaults and not dead
+// controls; and nothing is announced while disconnected, when no operator
+// intent could have reached any radio.
+inline bool declinedIntentIsADrop(bool connected, bool hasCommandPlane)
+{
+    return connected && !hasCommandPlane;
+}
+
+// The operator-facing name of an intent: for a decline with no wire text to
+// name it, and for a dropped command that HAS a twin (RadioModel names those
+// by intent too). One control, one name — VOX's enable, level and delay keys
+// are all "VOX" — so a control announced once by either route is not
+// announced again under another label.
+inline QString controlIntentName(ControlIntent intent)
+{
+    switch (intent) {
+    case ControlIntent::TxPower: return QStringLiteral("RF power");
+    case ControlIntent::TunePower: return QStringLiteral("Tune power");
+    case ControlIntent::MicGain: return QStringLiteral("Mic gain");
+    case ControlIntent::TxFilter: return QStringLiteral("TX filter");
+    case ControlIntent::SpeechProcessor: return QStringLiteral("PROC");
+    case ControlIntent::Vox: return QStringLiteral("VOX");
+    case ControlIntent::TxMonitor: return QStringLiteral("MON");
+    case ControlIntent::CwPitch: return QStringLiteral("CW pitch");
+    case ControlIntent::CwSpeed: return QStringLiteral("CW speed");
+    case ControlIntent::CwBreakIn: return QStringLiteral("Break-in");
+    case ControlIntent::CwBreakInDelay: return QStringLiteral("Break-in delay");
+    case ControlIntent::TxEq: return QStringLiteral("TX EQ");
+    case ControlIntent::RxEq: return QStringLiteral("RX EQ");
+    case ControlIntent::SliceFrequency: return QStringLiteral("Tuning");
+    case ControlIntent::SliceFilter: return QStringLiteral("Filter");
+    case ControlIntent::SliceAgc: return QStringLiteral("AGC");
+    case ControlIntent::SliceNoiseReduction: return QStringLiteral("NR");
+    case ControlIntent::SliceNoiseBlanker: return QStringLiteral("NB");
+    case ControlIntent::SliceAutoNotch: return QStringLiteral("ANF");
+    case ControlIntent::SliceSquelch: return QStringLiteral("Squelch");
+    case ControlIntent::SliceRit: return QStringLiteral("RIT");
+    case ControlIntent::SliceXit: return QStringLiteral("XIT");
+    case ControlIntent::SliceRxAntenna: return QStringLiteral("RX antenna");
+    case ControlIntent::SliceLock: return QStringLiteral("Lock");
+    case ControlIntent::SliceTxSlice: return QStringLiteral("TX slice");
+    case ControlIntent::SliceActive: return QStringLiteral("Active slice");
+    case ControlIntent::SliceAudioMute: return QStringLiteral("Mute");
+    case ControlIntent::SliceAudioGain: return QStringLiteral("AF gain");
+    case ControlIntent::SliceAudioPan: return QStringLiteral("Audio pan");
+    case ControlIntent::SliceFmToneMode: return QStringLiteral("FM tone mode");
+    case ControlIntent::SliceFmToneValue: return QStringLiteral("FM tone");
+    case ControlIntent::SliceRepeaterOffsetDir: return QStringLiteral("Repeater offset direction");
+    case ControlIntent::SliceRepeaterOffset: return QStringLiteral("Repeater offset");
+    case ControlIntent::SliceFmToneRxValue: return QStringLiteral("FM RX tone");
+    case ControlIntent::SliceFmDtcs: return QStringLiteral("DTCS");
+    case ControlIntent::SliceFmRepeaterRecall: return QStringLiteral("FM repeater recall");
+    case ControlIntent::SliceManualNotch: return QStringLiteral("Manual notch");
+    case ControlIntent::SliceFilterPreset: return QStringLiteral("Filter preset");
+    case ControlIntent::PanBandwidth: return QStringLiteral("Panadapter zoom");
+    case ControlIntent::PanRfGain: return QStringLiteral("RF gain");
+    case ControlIntent::PanPreamp: return QStringLiteral("Preamp");
+    case ControlIntent::PanAttenuator: return QStringLiteral("Attenuator");
+    case ControlIntent::Notch: return QStringLiteral("Notch filters");
+    }
+    return QStringLiteral("“unnamed control”");
 }
 
 // ── Naming a dropped control, and announcing each one once ──────────────────

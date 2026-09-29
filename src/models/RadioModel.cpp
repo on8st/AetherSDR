@@ -1873,7 +1873,9 @@ void RadioModel::wireBackendReceiverState()
             });
             connect(s, &SliceModel::manualNotchCommandIssued, this,
                     [this, s](bool on, int position) {
-                if (m_backend) m_backend->setSliceManualNotch(s->sliceId(), on, position);
+                deliverIntent(ControlIntent::SliceManualNotch, [s, on, position](IRadioBackend& b) {
+                    b.setSliceManualNotch(s->sliceId(), on, position);
+                });
             });
             connect(s, &SliceModel::squelchCommandIssued, this,
                     [this, s](bool on, int level) {
@@ -1899,16 +1901,16 @@ void RadioModel::wireBackendReceiverState()
             });
             connect(s, &SliceModel::fmToneRxValueCommandIssued, this,
                     [this, s](double hz) {
-                if (m_backend) {
-                    m_backend->setSliceFmToneRxValue(s->sliceId(), hz);
-                }
+                deliverIntent(ControlIntent::SliceFmToneRxValue, [s, hz](IRadioBackend& b) {
+                    b.setSliceFmToneRxValue(s->sliceId(), hz);
+                });
             });
             connect(s, &SliceModel::fmDtcsCommandIssued, this,
                     [this, s](int code, bool txReverse, bool rxReverse) {
-                if (m_backend) {
-                    m_backend->setSliceFmDtcs(
-                        s->sliceId(), code, txReverse, rxReverse);
-                }
+                deliverIntent(ControlIntent::SliceFmDtcs,
+                              [s, code, txReverse, rxReverse](IRadioBackend& b) {
+                    b.setSliceFmDtcs(s->sliceId(), code, txReverse, rxReverse);
+                });
             });
             connect(s, &SliceModel::repeaterOffsetDirCommandIssued, this,
                     [this, s](const QString& direction) {
@@ -1926,10 +1928,13 @@ void RadioModel::wireBackendReceiverState()
             connect(s, &SliceModel::fmRepeaterRecallCommandIssued, this,
                     [this, s](const QString& direction, double offsetHz,
                               const QString& toneMode, double toneHz) {
-                if (m_backend) {
-                    m_backend->setSliceFmRepeater(s->sliceId(), direction, offsetHz,
-                                                  toneMode, toneHz);
-                }
+                // One receipt for the composite: its default reaches the
+                // leaves, and any leaf declining leaves the recall unearned.
+                deliverIntent(ControlIntent::SliceFmRepeaterRecall,
+                              [s, direction, offsetHz, toneMode, toneHz](IRadioBackend& b) {
+                    b.setSliceFmRepeater(s->sliceId(), direction, offsetHz,
+                                         toneMode, toneHz);
+                });
             });
             // RIT / XIT. The control already existed in VfoWidget and drove
             // SliceModel; only the last hop to the seam was missing.
@@ -2698,20 +2703,20 @@ RadioModel::RadioModel(QObject* parent)
         // that marker on the panadapter with nothing behind it: the mirror image
         // of the state-outliving-the-session bug, arriving from the other side.
         if (m_backend && isConnected())
-            m_backend->createNotch(centerHz, widthHz);
+            deliverIntent(ControlIntent::Notch, [centerHz, widthHz](IRadioBackend& b) {
+                b.createNotch(centerHz, widthHz);
+            });
     });
     connect(&m_tnfModel, &TnfModel::notchChangeRequested, this,
             [this](int id, const NotchDelta& delta){
-        if (m_backend)
-            m_backend->setNotch(id, delta);
+        deliverIntent(ControlIntent::Notch,
+                      [id, delta](IRadioBackend& b) { b.setNotch(id, delta); });
     });
     connect(&m_tnfModel, &TnfModel::notchRemoveRequested, this, [this](int id){
-        if (m_backend)
-            m_backend->removeNotch(id);
+        deliverIntent(ControlIntent::Notch, [id](IRadioBackend& b) { b.removeNotch(id); });
     });
     connect(&m_tnfModel, &TnfModel::notchesEnabledRequested, this, [this](bool on){
-        if (m_backend)
-            m_backend->setNotchesEnabled(on);
+        deliverIntent(ControlIntent::Notch, [on](IRadioBackend& b) { b.setNotchesEnabled(on); });
     });
     // No CWX text while TUNE is active (#5422): the radio keys it at TUNE power.
     m_cwxModel.setSendAvailability([this] { return m_transmitModel.admitsCwxSend(); });
@@ -4575,7 +4580,9 @@ void RadioModel::selectRadioFilterPreset(int sliceId, int presetId)
     if (!declared) {
         return;
     }
-    m_backend->setSliceFilterPreset(sliceId, presetId);
+    deliverIntent(ControlIntent::SliceFilterPreset, [sliceId, presetId](IRadioBackend& b) {
+        b.setSliceFilterPreset(sliceId, presetId);
+    });
 }
 
 bool RadioModel::hasRadioSideWaterfallAutoBlack() const
@@ -6735,8 +6742,12 @@ bool RadioModel::dispatchPanCenterBandwidth(const QString& panId,
         // an HL2 produced black bars: the span the operator asked for became the
         // view's span while the receiver kept sending its old, narrower window,
         // and the honest VITA-49 tiles left the difference unpainted.
-        if (hasBandwidth)
-            m_backend->setPanBandwidth(backendPanIdFor(panId), bandwidthMhz * 1.0e6);
+        if (hasBandwidth) {
+            const QString backendPan = backendPanIdFor(panId);
+            deliverIntent(ControlIntent::PanBandwidth, [&backendPan, bandwidthMhz](IRadioBackend& b) {
+                b.setPanBandwidth(backendPan, bandwidthMhz * 1.0e6);
+            });
+        }
         if (pan) {
             // Center only. The backend snaps a span REQUEST to a rate it can
             // actually run, so the resulting bandwidth is not ours to predict —
@@ -6959,7 +6970,10 @@ void RadioModel::setPanRfGainFor(const QString& panId, int gain)
     // Without this the HL2's RF Gain slider moved, persisted, and changed
     // nothing: lnaGainDb was applied once at connect and never again.
     if (!m_flexBackend && m_backend) {
-        m_backend->setPanRfGain(backendPanIdFor(panId), gain);
+        const QString backendPan = backendPanIdFor(panId);
+        deliverIntent(ControlIntent::PanRfGain, [&backendPan, gain](IRadioBackend& b) {
+            b.setPanRfGain(backendPan, gain);
+        });
         return;
     }
     sendCmd(QString("display pan set %1 rfgain=%2").arg(panId).arg(gain));
@@ -6973,13 +6987,17 @@ void RadioModel::setPanRfGainFor(const QString& panId, int gain)
 void RadioModel::setPanPreampFor(const QString& panId, int step)
 {
     if (panId.isEmpty() || !m_backend) return;
-    m_backend->setPanPreamp(backendPanIdFor(panId), step);
+    const QString backendPan = backendPanIdFor(panId);
+    deliverIntent(ControlIntent::PanPreamp,
+                  [&backendPan, step](IRadioBackend& b) { b.setPanPreamp(backendPan, step); });
 }
 
 void RadioModel::setPanAttenuatorFor(const QString& panId, int step)
 {
     if (panId.isEmpty() || !m_backend) return;
-    m_backend->setPanAttenuator(backendPanIdFor(panId), step);
+    const QString backendPan = backendPanIdFor(panId);
+    deliverIntent(ControlIntent::PanAttenuator,
+                  [&backendPan, step](IRadioBackend& b) { b.setPanAttenuator(backendPan, step); });
 }
 
 // ── Display controls — FFT ─────────────────────────────────────────────────
@@ -10037,6 +10055,15 @@ void RadioModel::logRemoteAudioRxSummary(const QString& reason) const
 // either order (setRfPower: wire first; setMicLevel: intent first), both
 // synchronously. Only a command that HAS a twin waits for the turn to finish;
 // everything else is reported on the spot, exactly as before.
+//
+// A DECLINE IS A DROP. An intent with no wire twin (manual notch, DTCS,
+// preamp, the notch filters) leaves nothing in sendCmd to be dropped, so a
+// backend that does not implement it used to be dead in silence. Its decline
+// is recorded here and, unless something applied the same intent in the same
+// turn or its twin's drop already said so, announced at the end of the turn
+// through the same controlUnavailable as a dropped command. One mechanism,
+// one notice: the receipt that keeps a delivered control quiet is the same
+// evidence that makes an undelivered one loud.
 template <typename Deliver>
 void RadioModel::deliverIntent(ControlIntent intent, Deliver&& deliver)
 {
@@ -10045,8 +10072,18 @@ void RadioModel::deliverIntent(ControlIntent intent, Deliver&& deliver)
     IRadioBackend& backend = *m_backend;
     backend.beginIntentReceipt();
     std::forward<Deliver>(deliver)(backend);
-    if (!backend.intentDeclined())
+    if (!backend.intentDeclined()) {
         noteIntentApplied(intent);
+        return;
+    }
+    if (!declinedIntentIsADrop(isConnected(), hasCommandPlane()))
+        return;
+    // Same exemption as the twin's drop in accountDroppedCommand(): host-read
+    // TX state is delivered by the model holding it.
+    if (controlIntentHeldForHostUse(intent) && backendCapabilities().hostModulates)
+        return;
+    m_intentsDeclinedThisTurn |= controlIntentBit(intent);
+    scheduleDropAccountingFlush();
 }
 
 void RadioModel::noteIntentApplied(ControlIntent intent)
@@ -10080,6 +10117,12 @@ void RadioModel::reportUnappliedDrop(const QString& command)
     qCWarning(lcProtocol).noquote()
         << "RadioModel: no command plane or slice sink reaches the radio, dropping" << command;
     emit commandDropped(command);
+    // A twinned command is named by its INTENT, so VOX's enable, level and
+    // delay are one control ("VOX"), announced once, and so a decline of the
+    // same intent in another turn cannot announce it a second time under a
+    // different label.
+    const std::optional<ControlIntent> twin = controlIntentForCommand(command);
+    emit controlUnavailable(twin ? controlIntentName(*twin) : controlNameForCommand(command));
 }
 
 void RadioModel::scheduleDropAccountingFlush()
@@ -10094,7 +10137,9 @@ void RadioModel::flushDropAccounting()
 {
     m_dropAccountingFlushQueued = false;
     const quint64 applied = std::exchange(m_intentsAppliedThisTurn, 0);
+    const quint64 declined = std::exchange(m_intentsDeclinedThisTurn, 0);
     const QStringList drops = std::exchange(m_twinnedDropsThisTurn, {});
+    quint64 announced = 0;
     for (const QString& command : drops) {
         const std::optional<ControlIntent> twin = controlIntentForCommand(command);
         if (twin && (applied & controlIntentBit(*twin))) {
@@ -10103,7 +10148,23 @@ void RadioModel::flushDropAccounting()
                 << command;
             continue;
         }
+        if (twin)
+            announced |= controlIntentBit(*twin);
         reportUnappliedDrop(command);
+    }
+    // Declines nothing applied and no dropped twin already announced. A host
+    // applier's receipt (noteIntentApplied) in the same turn wins: the client
+    // compressor that IS PROC on an HL2 makes setSpeechProcessor's decline moot.
+    const quint64 unannounced = declined & ~applied & ~announced;
+    for (int bit = 0; bit < 64; ++bit) {
+        if (!(unannounced & (quint64(1) << bit)))
+            continue;
+        const auto intent = static_cast<ControlIntent>(bit);
+        const QString name = controlIntentName(intent);
+        qCWarning(lcProtocol).noquote()
+            << "RadioModel: the backend declined" << name
+            << "and nothing else applied it — the control moved and nothing was sent";
+        emit controlUnavailable(name);
     }
 }
 
