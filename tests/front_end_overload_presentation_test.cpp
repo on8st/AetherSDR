@@ -102,6 +102,88 @@ int main(int argc, char** argv)
               "above the seam");
     }
 
+    // ── THE GAIN IN LEVELS, NEVER AS AN OFFSET (d168, 2026-09-30) ─────────
+    //
+    // The operator's bench case in its own numbers: a +48 baseline from his
+    // profile, the loop 26 dB down at +22 and still clipping, and the radio's
+    // own lowest gain -12. The indicator read "At floor  -26 dB" beside a
+    // slider reading "RF Gain: 22 dB" -- two numbers that read as two levels.
+    // Every string the operator can see or hear now carries LEVELS and no
+    // offset figure.
+    {
+        FrontEndOverload s;
+        s.level = FrontEndLevel::AtFloor;
+        s.autoArmed = true;
+        s.autoOffsetDb = 26;
+        s.gainScaleKnown = true;
+        s.settingDb = 48;
+        s.effectiveDb = 22;
+        s.minGainDb = -12;
+        s.reason = QStringLiteral("AT FLOOR and still clipping");
+
+        const QString line = shortText(s);
+        check(line == QStringLiteral("At limit  +22 dB (set +48 dB)"),
+              "d168: the line reads \"At limit  +22 dB (set +48 dB)\" -- the "
+              "running gain and the operator's setting, both as levels");
+        check(!line.contains(QStringLiteral("26")),
+              "and carries no offset figure at all");
+
+        const QString spoken = accessibleText(s);
+        check(spoken.contains(QStringLiteral("+22 dB"))
+                  && spoken.contains(QStringLiteral("+48 dB")),
+              "the spoken form names both levels too");
+        check(!spoken.contains(QStringLiteral("26")),
+              "and no offset figure either -- the tooltip is this same text");
+        check(spoken.contains(QStringLiteral("−12 dB"))
+                  && spoken.contains(QStringLiteral("by hand")),
+              "with native range still below the loop's limit it says the "
+              "radio can go lower and that RF gain is the remedy");
+        check(!spoken.contains(QStringLiteral("ttenuation")),
+              "and does NOT send the operator to buy an attenuator for a "
+              "problem the slider solves (a manual +8 was clean on d168)");
+
+        // At the radio's own bottom the old advice is the true one.
+        s.settingDb = 14;
+        s.effectiveDb = -12;
+        const QString bottom = accessibleText(s);
+        check(bottom.contains(QStringLiteral("ttenuation"))
+                  && bottom.contains(QStringLiteral("−12 dB")),
+              "at the radio's lowest gain it still says attenuation or a "
+              "filter ahead of the radio is needed");
+    }
+    {
+        FrontEndOverload s;
+        s.level = FrontEndLevel::Clean;
+        s.autoArmed = true;
+        s.autoOffsetDb = 26;
+        s.gainScaleKnown = true;
+        s.settingDb = 48;
+        s.effectiveDb = 22;
+        s.minGainDb = -12;
+        const QString line = shortText(s);
+        check(line == QStringLiteral("Clean  +22 dB (set +48 dB)"),
+              "ON8ST: \"the -26 indication next to 'clean' is plain confusing\" "
+              "-- a clean window with gain held reads in levels as well");
+        check(!line.contains(QStringLiteral("−")),
+              "no minus-sign offset on the visible line");
+        const QString spoken = accessibleText(s);
+        check(spoken.contains(QStringLiteral("+22 dB"))
+                  && spoken.contains(QStringLiteral("+48 dB"))
+                  && !spoken.contains(QStringLiteral("26")),
+              "spoken: running gain and setting, no offset");
+
+        s.autoOffsetDb = 0;
+        s.effectiveDb = 48;
+        check(shortText(s) == QStringLiteral("Clean"),
+              "nothing held: nothing to add to the line");
+
+        s.settingDb = 0;
+        s.effectiveDb = -6;
+        s.autoOffsetDb = 6;
+        check(shortText(s) == QStringLiteral("Clean  −6 dB (set 0 dB)"),
+              "a negative LEVEL carries its sign and unit, zero is plain 0");
+    }
+
     // ── WHAT IS WORTH INTERRUPTING A SCREEN READER FOR ───────────────────
     //
     // The inputs move at 10 Hz. A polite announcement on every window would

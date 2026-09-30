@@ -539,6 +539,40 @@ int main(int argc, char** argv)
         checkSeam(seam, "spoken");
     }
 
+    // ---- THE FRONT-END INDICATOR CARRIES THE GAIN AS LEVELS (d168) --------
+    //
+    // The presentation can only say "+22 dB (set +48 dB)" if the backend hands
+    // it both levels on the scale the slider shows. Driven from a baseline the
+    // loop arms on today (+10) so the check does not depend on the arming
+    // ceiling, with the loop's attenuation stood in by the wire offset.
+    {
+        Session s(rememberedGain());
+        AetherSDR::FrontEndOverload last;
+        int published = 0;
+        QObject::connect(&s.backend, &IRadioBackend::frontEndOverloadChanged,
+                         &s.backend, [&](const AetherSDR::FrontEndOverload& st) {
+            last = st;
+            ++published;
+        });
+        s.backend.setPanRfGain(s.panId, 10);
+        s.backend.setAutoRfGain(true);
+        check(s.backend.autoRfGainEnabled(), "precondition: armed at +10");
+        s.backend.setLnaAutoOffsetDb(9);
+        check(published > 0,
+              "a gain change republishes the indicator at once, not on the next "
+              "telemetry window");
+        check(last.gainScaleKnown, "the HL2 supplies a gain scale");
+        check(last.settingDb == 10,
+              "the operator's own setting is carried as a level (+10)");
+        check(last.effectiveDb == 1 && last.effectiveDb == s.backend.lnaEffectiveDb(),
+              "the running gain is carried as a level (+1), the same number the "
+              "slider is echoed");
+        check(last.minGainDb == kMin,
+              "and the radio's own lowest gain, -12, so the indicator can tell "
+              "the loop's limit from the radio's");
+        s.backend.setAutoRfGain(false);
+    }
+
     if (failures == 0) {
         std::printf("\nALL PASS\n");
         return 0;

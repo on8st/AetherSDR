@@ -38,16 +38,56 @@ enum class LampColour { Dark, Green, Amber, Red };
     return LampColour::Dark;
 }
 
+// A gain level as the operator reads it: "+48", "−6", "0". The sign is explicit
+// on purpose, so that a LEVEL can never be mistaken for an OFFSET.
+[[nodiscard]] inline QString signedNumberText(int db)
+{
+    if (db > 0) {
+        return QStringLiteral("+%1").arg(db);
+    }
+    if (db < 0) {
+        return QStringLiteral("−%1").arg(-db);
+    }
+    return QStringLiteral("0");
+}
+
+[[nodiscard]] inline QString signedDbText(int db)
+{
+    return signedNumberText(db) + QStringLiteral(" dB");
+}
+
 // THE REGULATOR'S ACTION, as a short suffix, or empty when there is none to
-// report. "-6 dB" is the whole point of the second half of #5535's condition:
-// the operator must be able to see that something moved their gain.
+// report. The operator must be able to see that something moved their gain --
+// the second half of #5535's condition.
+//
+// WITH A GAIN SCALE IT IS SAID IN LEVELS ONLY: "+22 dB (set +48 dB)", where the
+// gain the radio is running comes first and the operator's own setting second.
+// No offset figure. A bare "−26 dB" beside "RF Gain: 22 dB" reads as a second
+// level that disagrees with the first; on 2026-09-30 the operator read it that
+// way and could not see that his own setting was +48, which the slider -- it
+// shows the running gain -- no longer showed anywhere.
+//
+// Without a gain scale the family has given nothing to say it in, and the
+// offset is all there is.
 [[nodiscard]] inline QString offsetText(const FrontEndOverload& s)
 {
     if (!s.autoArmed || s.autoOffsetDb <= 0) {
         return {};
     }
+    if (s.gainScaleKnown) {
+        return QCoreApplication::translate("FrontEndOverload", "%1 (set %2)")
+            .arg(signedDbText(s.effectiveDb), signedDbText(s.settingDb));
+    }
     return QCoreApplication::translate("FrontEndOverload", "−%1 dB")
         .arg(s.autoOffsetDb);
+}
+
+// Whether the loop's limit is also the radio's. At the floor with native range
+// still below it, the fix is the operator's hand on RF Gain, not a filter, and
+// saying "attenuation ahead of the radio" there sends them the wrong way.
+[[nodiscard]] inline bool radioHasGainBelow(const FrontEndOverload& s)
+{
+    return s.gainScaleKnown && s.effectiveDb > s.minGainDb;
 }
 
 // The line beside the lamp. Deliberately short -- it sits next to the RF Gain
@@ -63,7 +103,11 @@ enum class LampColour { Dark, Green, Amber, Red };
     case FrontEndLevel::Clean:      head = tr_("Clean");          break;
     case FrontEndLevel::Marginal:   head = tr_("Clipping");       break;
     case FrontEndLevel::Hot:        head = tr_("Clipping hard");  break;
-    case FrontEndLevel::AtFloor:    head = tr_("At floor");       break;
+    // "limit", not "floor": the floor is an offset below the operator's
+    // setting, and beside a gain readout the word reads as a level.
+    case FrontEndLevel::AtFloor:
+        head = s.gainScaleKnown ? tr_("At limit") : tr_("At floor");
+        break;
     }
     const QString off = offsetText(s);
     return off.isEmpty() ? head : QStringLiteral("%1  %2").arg(head, off);
@@ -94,11 +138,32 @@ enum class LampColour { Dark, Green, Amber, Red };
         out = tr_("Front end clipping most of the time");
         break;
     case FrontEndLevel::AtFloor:
-        out = tr_("Front end still clipping at the automatic gain floor. "
-                  "Attenuation or a filter ahead of the radio is needed.");
+        if (!s.gainScaleKnown) {
+            out = tr_("Front end still clipping at the automatic gain floor. "
+                      "Attenuation or a filter ahead of the radio is needed.");
+        } else if (radioHasGainBelow(s)) {
+            out = tr_("Front end still clipping at RF gain %1, the lowest the "
+                      "automatic gain may go from your setting of %2. The radio "
+                      "can go down to %3: lower the RF gain by hand")
+                      .arg(signedDbText(s.effectiveDb), signedDbText(s.settingDb),
+                           signedDbText(s.minGainDb));
+        } else {
+            out = tr_("Front end still clipping at RF gain %1, the lowest this "
+                      "radio has. Attenuation or a filter ahead of the radio is "
+                      "needed")
+                      .arg(signedDbText(s.effectiveDb));
+        }
         break;
     }
-    if (s.autoArmed && s.autoOffsetDb > 0) {
+    if (s.gainScaleKnown && s.autoArmed && s.autoOffsetDb > 0) {
+        // In levels. At the limit the sentence above has already said both.
+        if (s.level != FrontEndLevel::AtFloor) {
+            out += QStringLiteral(". ")
+                + tr_("Automatic gain is running the RF gain at %1; your own "
+                      "setting is %2")
+                      .arg(signedDbText(s.effectiveDb), signedDbText(s.settingDb));
+        }
+    } else if (s.autoArmed && s.autoOffsetDb > 0) {
         out += QStringLiteral(". ")
             + tr_("Automatic gain is holding %1 dB below your setting")
                   .arg(s.autoOffsetDb);

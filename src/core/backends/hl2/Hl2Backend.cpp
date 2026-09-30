@@ -6598,6 +6598,15 @@ void Hl2Backend::publishFrontEndOverload()
     s.autoArmed = m_autoRfGainEnabled;
     s.autoOffsetDb = m_autoGainState.offsetDb;
     s.reason = QString::fromUtf8(autoGainReasonText(m_autoGainReason));
+    // THE GAIN AS LEVELS, on the same -12..+48 scale the RF Gain slider shows.
+    // The offset alone, beside a slider that shows the EFFECTIVE gain, reads as
+    // a second level -- and the operator's own baseline is shown nowhere else
+    // while the loop holds gain down (d168: "At floor -26 dB" beside "RF Gain:
+    // 22 dB", with a +48 baseline nobody could see).
+    s.gainScaleKnown = true;
+    s.settingDb = m_lnaGainDb;
+    s.effectiveDb = lnaEffectiveDb();
+    s.minGainDb = kLnaGainMinDb;
 
     if (s == m_lastFrontEndOverload) {
         return;
@@ -8526,14 +8535,32 @@ void Hl2Backend::stepAutoGain(const Hl2Telemetry& t)
     m_autoGainReason = a.reason;
     publishFrontEndOverload();
     if (a.warnFloorOnce) {
-        qWarning().noquote()
-            << QStringLiteral(
-                   "Hl2Backend: auto RF gain is at its floor (%1 dB below your "
-                   "setting) and the converter is STILL clipping. No amount of LNA "
-                   "will fix this — the front end needs attenuation ahead of the "
-                   "radio, or a band-pass filter for whatever is outside the "
-                   "passband.")
-                   .arg(m_autoGainState.offsetDb);
+        // TWO DIFFERENT SITUATIONS, and only one of them wants hardware. The
+        // loop's floor is an offset below the operator's baseline, so from a
+        // high baseline it stops with native range still below it (d168: a +48
+        // baseline, the loop stopped at +22, a manual +8 was clean). Telling
+        // that operator "no amount of LNA will fix this" sends them to buy an
+        // attenuator for a problem the RF Gain slider solves.
+        const int effective = lnaEffectiveDb();
+        if (effective > kLnaGainMinDb) {
+            qWarning().noquote()
+                << QStringLiteral(
+                       "Hl2Backend: auto RF gain has reached its limit, RF gain %1 "
+                       "dB (%2 dB below your setting of %3 dB), and the converter "
+                       "is STILL clipping. The radio can go down to %4 dB: lower "
+                       "RF Gain by hand.")
+                       .arg(effective).arg(m_autoGainState.offsetDb)
+                       .arg(m_lnaGainDb).arg(kLnaGainMinDb);
+        } else {
+            qWarning().noquote()
+                << QStringLiteral(
+                       "Hl2Backend: auto RF gain is at the radio's lowest gain "
+                       "(%1 dB) and the converter is STILL clipping. No amount of "
+                       "LNA will fix this — the front end needs attenuation ahead "
+                       "of the radio, or a band-pass filter for whatever is "
+                       "outside the passband.")
+                       .arg(effective);
+        }
     }
     if (a.deltaDb != 0) {
         setLnaAutoOffsetDb(m_autoGainState.offsetDb);
@@ -8583,6 +8610,11 @@ void Hl2Backend::pushEffectiveLnaGain()
     // does an operator whose gain is being held down by an automatic control.
     for (const auto& ids : m_ids.all())
         emit panRfGainChanged(ids.panId, effective);
+    // The front-end indicator states the gain in levels, so it moves when the
+    // gain does rather than on the next telemetry window. Change-gated inside.
+    // Armed covers the loop's own steps; connected covers the operator's.
+    if (m_connected || m_autoRfGainEnabled)
+        publishFrontEndOverload();
 }
 
 void Hl2Backend::rememberCurrentBandState()

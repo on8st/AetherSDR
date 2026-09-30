@@ -66,10 +66,27 @@ struct FrontEndOverload {
     // open to argument from the bench.
     QString reason;
 
+    // THE GAIN AS LEVELS, when the family has an RF-gain scale in dB. An offset
+    // alone ("-26 dB") shown beside a gain readout ("RF Gain: 22 dB") reads as a
+    // second level, and an operator cannot tell from it whether the loop's limit
+    // is also the radio's. With these the indicator says both in absolute dB:
+    // where the gain IS, the operator's own setting it is measured from, and the
+    // lowest gain this radio can be set to at all.
+    //
+    // All three in the dB the RF Gain control shows. gainScaleKnown false means
+    // the family did not supply them, and the indicator falls back to the
+    // offset alone.
+    bool gainScaleKnown = false;
+    int settingDb = 0;     // the operator's own RF gain setting
+    int effectiveDb = 0;   // what the radio is running, after the loop's offset
+    int minGainDb = 0;     // the lowest RF gain this radio can be set to
+
     [[nodiscard]] bool operator==(const FrontEndOverload& o) const
     {
         return level == o.level && autoArmed == o.autoArmed
-            && autoOffsetDb == o.autoOffsetDb && reason == o.reason;
+            && autoOffsetDb == o.autoOffsetDb && reason == o.reason
+            && gainScaleKnown == o.gainScaleKnown && settingDb == o.settingDb
+            && effectiveDb == o.effectiveDb && minGainDb == o.minGainDb;
     }
     [[nodiscard]] bool operator!=(const FrontEndOverload& o) const { return !(*this == o); }
 };
