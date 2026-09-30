@@ -1642,15 +1642,19 @@ bool runFilterTapsGroupDelayTest()
                          "partition") && result;
     }
 
-    // Transmit has none of the six cores RXASetNC and RXASetMP address.
+    // Transmit has none of the six cores RXASetNC addresses, and its tap count
+    // is an open()-time choice (TXASetNC there), so the runtime setter stays
+    // receive-only. setMinimumPhase is NOT: on a transmit channel it calls
+    // TXASetMP (#6052), and what that does to the emitted IQ is measured, not
+    // read back, in hl2_tx_latency_test.
     WdspChannel::Config txConfig;
     txConfig.direction = WdspChannel::Direction::Transmit;
     std::unique_ptr<WdspChannel> tx = WdspChannel::create(txConfig);
     if (require(tx != nullptr, "the transmit channel did not open")) {
         result = require(!tx->setFilterTaps(8192),
                          "setFilterTaps was accepted on a transmit channel") && result;
-        result = require(!tx->setMinimumPhase(true),
-                         "setMinimumPhase was accepted on a transmit channel") && result;
+        result = require(tx->setMinimumPhase(true),
+                         "setMinimumPhase was refused on a transmit channel") && result;
     } else {
         result = false;
     }

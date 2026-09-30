@@ -436,7 +436,10 @@ accessor set, two channel-state fixes, and one performance change:
     `create_minphase()`'s four plans (`FFTW_ESTIMATE` since patch 12). FFTW
     planning is not thread-safe. Both callers of `RXASetMP()` hold the setup
     mutex: `WdspChannel::open()`, and `WdspChannel::setMinimumPhase()`, which
-    `Hl2RxDsp` calls on a mode change into or out of CW (#5498).
+    `Hl2RxDsp` calls on a mode change into or out of CW (#5498). Since #6052
+    the same two sites also call `TXASetMP()` on a transmit channel, under the
+    same mutex -- `Hl2TxDsp` switches phase when the mode moves between
+    USB/LSB and everything else.
     **Anything that toggles minimum phase outside that mutex is the line to
     revisit.** Raised by the reviewer on #5697 and recorded here rather than
     left in a review thread.

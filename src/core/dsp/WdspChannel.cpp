@@ -821,9 +821,6 @@ bool WdspChannel::setFilterTaps(int taps) noexcept
 
 bool WdspChannel::setMinimumPhase(bool on) noexcept
 {
-    if (m_config.direction != Direction::Receive) {
-        return false;
-    }
     if (on == m_config.minimumPhase) {
         return true;
     }
@@ -834,8 +831,15 @@ bool WdspChannel::setMinimumPhase(bool on) noexcept
         // RXASetMP does not stop the channel, but it does run every mask
         // through mp_imp_exec, which plans and executes FFTs at nc * pfactor.
         // Same planner, same lock.
+        // TXASetMP, the transmit counterpart, is the same shape: it re-runs
+        // the transmit bandpasses and FM filters through the same conversion
+        // and does not stop the channel either.
         const std::scoped_lock setupLock(g_setupMutex);
-        RXASetMP(m_channelId, on ? 1 : 0);
+        if (m_config.direction == Direction::Receive) {
+            RXASetMP(m_channelId, on ? 1 : 0);
+        } else {
+            TXASetMP(m_channelId, on ? 1 : 0);
+        }
     }
     m_config.minimumPhase = on;
     endControlOperation();
@@ -1092,17 +1096,17 @@ bool WdspChannel::validateConfig(const Config& config, std::string* error) noexc
         setError(error, "WDSP TX does not define a WBFM mode");
         return false;
     }
-    // Receive only: filterTaps reaches WDSP solely through open()'s RXASetNC
-    // and is read only by minimumNotchWidthHz(), both of which are RX-side. A
-    // transmit channel has none of the six cores RXASetNC addresses, so
-    // constraining it there would refuse geometries nothing can be hurt by.
+    // BOTH DIRECTIONS. filterTaps reaches WDSP through open()'s RXASetNC on a
+    // receive channel and its TXASetNC on a transmit one, and fircore has the
+    // same partitioning requirement behind both. This used to be receive-only
+    // because no transmit call existed -- a transmit channel ran create_txa's
+    // own max(2048, dsp_size) and never read this field (#6052).
     //
     // THIS IS THE SAME CLAUSE setFilterTaps() APPLIES, deliberately. Without it
     // here, create() and reconfigure() were a second door into exactly the
     // corruption the setter refuses -- see filterTapsArePartitionable() above
     // for the measured cost of walking through it.
-    if (config.direction == Direction::Receive &&
-        !filterTapsArePartitionable(config.filterTaps, config.dspBlockSize)) {
+    if (!filterTapsArePartitionable(config.filterTaps, config.dspBlockSize)) {
         setError(error,
                  "WDSP filter taps must be a power of two in [256, 16384] and "
                  "an exact multiple of the DSP block size");
@@ -1258,6 +1262,16 @@ void WdspChannel::open() noexcept
     } else {
         SetTXAMode(m_channelId, wdspMode(m_config.mode));
         SetTXABandpassFreqs(m_channelId, m_config.filterLowHz, m_config.filterHighHz);
+        // Filter length / phase mode, the transmit mirror of the two RXA calls
+        // above. Until these were made, Config::filterTaps and
+        // Config::minimumPhase were silently ignored on a transmit channel.
+        // With the defaults (2048, linear) this changes nothing: 2048 is what
+        // create_txa builds for any dsp size up to 2048 and TXASetNC compares
+        // against the stored nc before re-planning. TXASetNC's own stop is a
+        // no-op here for the same reason as RXASetNC's -- the channel is still
+        // stopped.
+        TXASetNC(m_channelId, m_config.filterTaps);
+        TXASetMP(m_channelId, m_config.minimumPhase ? 1 : 0);
     }
     // Cache what this open measured, right now, while we still hold the setup
     // lock -- a kill or a crash before exit must not throw the measurement away.

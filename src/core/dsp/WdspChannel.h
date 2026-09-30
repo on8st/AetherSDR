@@ -92,6 +92,9 @@ public:
         // own default (max(2048, dsp_size)), so this changes nothing on its own
         // — it makes the value explicit and tunable instead of implicit.
         // pihpsdr runs 8192 by comparison.
+        //
+        // Both reach a TRANSMIT channel too, since #6052 (TXASetNC/TXASetMP in
+        // open()); before that a transmit channel ignored them.
         int filterTaps = 2048;
         bool minimumPhase = false;
         // FM detector deviation in Hz — the receiver's ASSUMPTION about how
@@ -404,8 +407,14 @@ public:
     // only re-runs the mask through the cepstral conversion -- but it does
     // rebuild all six masks, so it is control-path work for the same reason.
     //
-    // Both are receive-only: RXASetNC and RXASetMP have no transmit
-    // counterpart and a TX channel has none of the six cores they address.
+    // setFilterTaps() is receive-only. setMinimumPhase() is not: on a transmit
+    // channel it calls TXASetMP, which reaches the TXA bandpasses and FM
+    // filters the same way and, like RXASetMP, does not stop the channel. That
+    // is what lets a transmitter pick its phase mode per operating mode
+    // (Hl2TxDsp::txMinimumPhaseFor) without a reconfigure. A transmit tap
+    // count is chosen at open() only -- TXASetNC exists but nothing needs it
+    // at runtime, and its stop/restart has the cost setFilterTaps()
+    // documents above.
     // Control-path work, guarded exactly like setMode(); neither may be called
     // from the processIq() callback. Both are idempotent at the WDSP level --
     // RXANBPSetNC and RXANBPSetMP compare against the stored value first -- but

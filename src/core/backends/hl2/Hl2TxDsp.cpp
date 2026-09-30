@@ -131,6 +131,10 @@ WdspChannel::Config Hl2TxDsp::modulatorChannelConfig(const Config& config)
     // 25 ms slew after it is WdspChannel::Config's and is kept -- that half is
     // the de-click. Receive channels are opened elsewhere and are untouched.
     c.muteDelayUpSec = kTxMuteDelayUpSec;
+    // The bandpass: create_txa's length, made explicit, and minimum phase in
+    // the voice modes. See kTxFilterTaps and txMinimumPhaseFor().
+    c.filterTaps = kTxFilterTaps;
+    c.minimumPhase = txMinimumPhaseFor(config.mode);
     // blockForOutput = false is WdspChannel::Config's default and is the
     // setting every figure quoted above was measured at. Do not flip it to
     // silence an underrun: with it set, fexchange2's `*error += -2` branch is
@@ -210,6 +214,13 @@ void Hl2TxDsp::applyModeAndFilter()
 
     if (!m_channel->setMode(m_config.mode)) {
         qCWarning(lcTxMod) << "HL2 TXA modulator: mode change refused";
+    }
+    // The phase mode follows the operating mode (txMinimumPhaseFor), so a
+    // switch between USB and DIGU on an open channel has to carry it too --
+    // open() only saw the mode the channel was built with. A no-op when it
+    // already matches.
+    if (!m_channel->setMinimumPhase(txMinimumPhaseFor(m_config.mode))) {
+        qCWarning(lcTxMod) << "HL2 TXA modulator: phase-mode change refused";
     }
     if (!m_channel->setFilter(lowHz, highHz)) {
         qCWarning(lcTxMod) << "HL2 TXA modulator: passband change refused,"
