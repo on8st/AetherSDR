@@ -22,6 +22,7 @@
 #include "core/backends/hl2/MetisProtocol.h"
 
 #include <QCoreApplication>
+#include <QElapsedTimer>
 #include <QEventLoop>
 #include <QHostAddress>
 #include <QNetworkDatagram>
@@ -48,7 +49,11 @@ static void check(bool cond, const char* what)
 // A minimal valid EP6 packet: header plus both frame SYNCs. The samples are zero
 // because what is asserted here is the block GEOMETRY — how many receivers the
 // round decodes into — not any sample value.
-static QByteArray fakeEp6(std::uint32_t seq)
+//
+// A MARKER packet carries one non-zero sample (RX1 I, first slot of frame A). It
+// is otherwise identical and in sequence, so the client's loss accounting cannot
+// tell it apart -- only the test's own iqBlocksReady handler can.
+static QByteArray fakeEp6(std::uint32_t seq, bool marker = false)
 {
     QByteArray p(static_cast<int>(kUsbPacketSize), 0);
     auto* b = reinterpret_cast<std::uint8_t*>(p.data());
@@ -57,6 +62,8 @@ static QByteArray fakeEp6(std::uint32_t seq)
     b[6] = static_cast<std::uint8_t>(seq >> 8);  b[7] = static_cast<std::uint8_t>(seq);
     b[8] = b[9] = b[10] = 0x7F;                                         // frame A SYNC
     b[8 + kFrameSize] = b[9 + kFrameSize] = b[10 + kFrameSize] = 0x7F;  // frame B SYNC
+    if (marker)
+        b[16] = 0x40;   // frame A: 8 header + 3 SYNC + 5 C&C, then RX1 I (24-bit BE)
     return p;
 }
 
@@ -81,6 +88,9 @@ int main(int argc, char** argv)
     int stopsSeen = 0;
     int startsToDrop = 0;   // pretend this many metis-start datagrams never arrived
     std::uint32_t nextEp6Seq = 0;
+    // Set to make the radio put ONE marked EP6 on the wire on its next C&C and
+    // then fall silent -- see drainInFlightEp6() below.
+    bool sendMarkerThenStop = false;
     // ---- two ways a radio can come back, and the client must tell them apart ----
     //
     // The silence-recovery path deliberately does NOT reset m_haveRxSeq, and the
@@ -123,8 +133,14 @@ int main(int argc, char** argv)
             }
             // C&C (EP2). A started radio answers each one with an EP6 packet,
             // which is what keeps the ping-pong going; a stopped one says nothing.
-            if (streaming)
+            if (sendMarkerThenStop) {
+                sendMarkerThenStop = false;
+                streaming = false;
+                radio.writeDatagram(fakeEp6(nextEp6Seq++, /*marker=*/true),
+                                    dg.senderAddress(), dg.senderPort());
+            } else if (streaming) {
                 radio.writeDatagram(fakeEp6(nextEp6Seq++), dg.senderAddress(), dg.senderPort());
+            }
         }
     });
 
@@ -134,11 +150,41 @@ int main(int argc, char** argv)
     QSignalSpy downSpy(&client, &MetisClient::linkDown);
     int blocksSeen = 0;
     int lastBlockCount = 0;
+    bool markerSeen = false;
     QObject::connect(&client, &MetisClient::iqBlocksReady, &client,
                      [&](const std::vector<std::vector<std::complex<float>>>& blocks) {
                          ++blocksSeen;
                          lastBlockCount = static_cast<int>(blocks.size());
+                         if (!blocks.empty())
+                             for (const auto& s : blocks[0])
+                                 if (s != std::complex<float>{}) { markerSeen = true; break; }
                      });
+
+    // WEDGE THE RADIO, AND WAIT FOR WHAT IT ALREADY SENT.
+    //
+    // Stopping the fake radio stops it WRITING; it does not empty the client's
+    // socket. EP6 already on the wire -- one or two in a healthy loop, more when
+    // the machine is loaded and this thread is late to drain -- still arrives
+    // after `streaming = false`, and a test that zeroes blocksSeen at that moment
+    // and asserts it stays zero is asserting on scheduling. MetisClient's own
+    // restart path says the same of its socket ("it cannot catch a packet still
+    // in flight"). That check failed 2 runs in 50 with eight cores busy, and at
+    // ctest -j8, while passing serially.
+    //
+    // So the radio's LAST act is one marked EP6, and the wedge begins once the
+    // client has decoded it. Both ends are one socket pair on loopback, which
+    // delivers in order: when the marker is seen, nothing the radio sent before
+    // it is still to come. The bound is generous and only guards a hang.
+    auto drainInFlightEp6 = [&](const char* what) {
+        markerSeen = false;
+        sendMarkerThenStop = true;
+        QElapsedTimer t;
+        t.start();
+        while (!markerSeen && t.elapsed() < 1000)
+            spin(5);
+        check(markerSeen, what);
+        check(!streaming, "the radio stopped after its marker");
+    };
 
     MetisClient::Params p;
     p.host = QHostAddress::LocalHost;
@@ -250,8 +296,9 @@ int main(int argc, char** argv)
         const std::uint32_t lostAcrossTheSilence = 761;
         seqBumpOnStart = lostAcrossTheSilence;
 
-        // The radio wedges: it stops streaming and never says so.
-        streaming = false;
+        // The radio wedges: it stops streaming and never says so. The clock
+        // for the silence starts at the marker, the last EP6 the client gets.
+        drainInFlightEp6("the radio's last EP6 before the first silence was received");
         blocksSeen = 0;
         spin(1500);   // inside kSilenceTimeoutMs (2000) -- nothing should happen yet
         check(client.linkCounters().silenceRecoveryAttempts == 0,
