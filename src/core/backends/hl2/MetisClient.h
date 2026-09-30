@@ -675,6 +675,16 @@ public:
     void setTxTestTone(double offsetHz, double amplitude, const TxCoordinator::Operation& operation);
     [[nodiscard]] bool txTestToneEnabled() const noexcept { return m_toneAmp > 0.0; }
 
+    // A TWO-TONE test signal: two equal tones at offset1Hz and offset2Hz from
+    // the carrier whose envelope PEAKS at peakAmplitude (0..1) -- each tone at
+    // half of it, so the PEP is the same as a single tone of peakAmplitude and
+    // the average power is half of it (-3.01 dB). Same generator, pacing,
+    // handedness and fencing as setTxTestTone(); setTxTestTone() (including
+    // the amplitude-0 clear) ends it. Opt-in only, like the single tone.
+    void setTxTwoTone(double offset1Hz, double offset2Hz, double peakAmplitude,
+                      const TxCoordinator::Operation& operation);
+    [[nodiscard]] bool txTwoToneEnabled() const noexcept { return m_toneAmp > 0.0 && m_tone2Amp > 0.0; }
+
 signals:
     void linkUp();                                                  // first EP6 seen
     void linkDown();                                               // stopped
@@ -1027,6 +1037,9 @@ private:
     double m_toneHz = 0.0;
     double m_toneAmp = 0.0;
     double m_tonePhase = 0.0;   // radians, carried across packets
+    double m_tone2Hz = 0.0;     // second tone of a two-tone; amp 0 = single tone
+    double m_tone2Amp = 0.0;
+    double m_tone2Phase = 0.0;
     bool m_cwMode = false;      // while true, CW owns TX IQ (silence between elements)
     bool m_cwKeyDown = false;
     double m_cwEnvelope = 0.0;  // 0..1 raised-cosine ramp position

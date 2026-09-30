@@ -4942,6 +4942,13 @@ target_include_directories(hl2_vox_test PRIVATE src tests)
 target_link_libraries(hl2_vox_test PRIVATE aethercore Qt6::Core Qt6::Network)
 add_test(NAME hl2_vox_test COMMAND hl2_vox_test)
 
+# Two-tone TUNE on the HL2, measured offline on the EP2 bytes the packet
+# builder produces: tone offsets, equal amplitude, PEP. No socket, no radio.
+add_executable(hl2_two_tone_test tests/hl2_two_tone_test.cpp)
+target_include_directories(hl2_two_tone_test PRIVATE src tests)
+target_link_libraries(hl2_two_tone_test PRIVATE aethercore Qt6::Core Qt6::Network)
+add_test(NAME hl2_two_tone_test COMMAND hl2_two_tone_test)
+
 # HL2 RQST/ACK state machine (docs/HERMES.md §13 item 13, oracle §5) — pure
 # policy, standalone (no Qt, no socket, no radio). The clock is EP6 frames.
 add_executable(hl2_rqst_ack_test

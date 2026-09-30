@@ -2482,6 +2482,13 @@ RadioModel::RadioModel(QObject* parent)
             [this](bool on, int level, int delayMs) {
         if (m_backend) m_backend->setVox(on, level, delayMs);
     });
+    // The tune waveform crosses the seam for every family: a Flex already has
+    // it as wire text and inherits the no-op; a backend that builds its own
+    // TUNE carrier needs to know which one. Selecting never keys.
+    connect(&m_transmitModel, &TransmitModel::tuneModeCommandIssued, this,
+            [this](bool twoTone) {
+        if (m_backend) m_backend->setTuneTwoTone(twoTone);
+    });
     connect(&m_transmitModel, &TransmitModel::monitorCommandIssued, this,
             [this](bool on, int level) {
         if (m_backend && !usesFlexCommandPlane())

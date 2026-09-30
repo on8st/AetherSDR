@@ -1434,8 +1434,36 @@ void MetisClient::setTxTestTone(double offsetHz, double amplitude, const TxCoord
     m_toneOperation = operation;
     m_toneHz = offsetHz;
     m_toneAmp = amplitude < 0.0 ? 0.0 : (amplitude > 1.0 ? 1.0 : amplitude);
+    // A single tone, or off: either way no second tone survives this call.
+    m_tone2Amp = 0.0;
+    m_tone2Phase = 0.0;
     if (m_toneAmp == 0.0)
         m_tonePhase = 0.0;
+}
+
+void MetisClient::setTxTwoTone(double offset1Hz, double offset2Hz, double peakAmplitude,
+                               const TxCoordinator::Operation& operation)
+{
+    // !(x > 0) rather than x <= 0 so a NaN peak is refused here too, instead of
+    // reaching the packet builder (see the NaN note on its keyed arm).
+    if (!(peakAmplitude > 0.0)) {
+        setTxTestTone(0.0, 0.0, operation);
+        return;
+    }
+    if (!TxCoordinator::Command{operation, true}.permitsDispatch(TxCoordinator::monotonicMs())) {
+        return;
+    }
+    const double peak = peakAmplitude > 1.0 ? 1.0 : peakAmplitude;
+    m_toneOperation = operation;
+    m_toneHz = offset1Hz;
+    m_tone2Hz = offset2Hz;
+    // Equal halves: |a e^{jx} + a e^{jy}| peaks at 2a when the phases align,
+    // which they do every 1/|f2 - f1| seconds, so the envelope reaches `peak`
+    // exactly and never exceeds it -- no clamp is ever engaged.
+    m_toneAmp = 0.5 * peak;
+    m_tone2Amp = 0.5 * peak;
+    m_tonePhase = 0.0;
+    m_tone2Phase = 0.0;
 }
 
 void MetisClient::flushTxIq()
@@ -1483,6 +1511,8 @@ std::array<std::uint8_t, kUsbPacketSize> MetisClient::buildNextControlPacket()
     if (!m_toneOperation.permitsDispatch(now)) {
         m_toneAmp = 0.0;
         m_tonePhase = 0.0;
+        m_tone2Amp = 0.0;
+        m_tone2Phase = 0.0;
     }
     if (!m_txIqContext.permitsDispatch(TxCoordinator::monotonicMs())) {
         m_txIq.clear();
@@ -1581,7 +1611,21 @@ std::array<std::uint8_t, kUsbPacketSize> MetisClient::buildNextControlPacket()
         // EP2 is clocked at a fixed 48 kHz regardless of the RX sample rate.
         std::vector<std::complex<float>> block(kTxSamplesPerPacket);
         const double dphi = 2.0 * 3.14159265358979323846 * m_toneHz / kEp2AudioRateHz;
+        const double dphi2 = 2.0 * 3.14159265358979323846 * m_tone2Hz / kEp2AudioRateHz;
+        const bool twoTone = m_tone2Amp > 0.0;
         for (int n = 0; n < kTxSamplesPerPacket; ++n) {
+            if (twoTone) {
+                // The second tone rides the same conjugated convention, so both
+                // land on the side of the carrier their signed offsets name.
+                block[static_cast<std::size_t>(n)] = {
+                    static_cast<float>(m_toneAmp * std::cos(m_tonePhase)
+                                       + m_tone2Amp * std::cos(m_tone2Phase)),
+                    static_cast<float>(-m_toneAmp * std::sin(m_tonePhase)
+                                       - m_tone2Amp * std::sin(m_tone2Phase))};
+                m_tonePhase += dphi;
+                m_tone2Phase += dphi2;
+                continue;
+            }
             // Negative sine: the HPSDR wire has the opposite handedness to the
             // standard analytic convention, so this is the conjugate — the same
             // correction Hl2TxDsp applies. ONE convention for both transmit
@@ -1594,8 +1638,8 @@ std::array<std::uint8_t, kUsbPacketSize> MetisClient::buildNextControlPacket()
             m_tonePhase += dphi;
         }
         // Keep the accumulator bounded without introducing a phase step.
-        while (m_tonePhase > 2.0 * 3.14159265358979323846)
-            m_tonePhase -= 2.0 * 3.14159265358979323846;
+        m_tonePhase = std::remainder(m_tonePhase, 2.0 * 3.14159265358979323846);
+        m_tone2Phase = std::remainder(m_tone2Phase, 2.0 * 3.14159265358979323846);
         ep2WriteTxIq(pkt, block);
     } else if (keyed) {
         // JUST `keyed`, NOT `keyed && !m_cwMode && m_toneAmp <= 0.0`. The two

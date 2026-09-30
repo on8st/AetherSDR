@@ -667,6 +667,17 @@ public:
     Q_UNUSED(completion);
     }
 
+    // WHAT THE NEXT TUNE TRANSMITS: a single carrier (false) or a two-tone
+    // test signal (true). The TUNE button's right-click "Mono Tone / Two Tone"
+    // and `txtest twotone`. Selecting never keys -- setTune() does, behind the
+    // same TX gate as before -- and a backend that implements this declares
+    // RadioCapabilities::twoToneGenerator, which is what lets `txtest twotone`
+    // through rather than certifying a carrier as a two-tone.
+    //
+    // Default no-op: a Flex takes `transmit set tune_mode=` as text from
+    // TransmitModel and generates the two tones on the radio.
+    virtual void setTuneTwoTone(bool twoTone) { Q_UNUSED(twoTone); }
+
     // Transmit power as a percentage, 0..100.
     //
     // Flex takes this as a text command from TransmitModel, so FlexBackend has

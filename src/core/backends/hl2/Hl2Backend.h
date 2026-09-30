@@ -178,6 +178,15 @@ public:
     // Baseband TX test tone, offsetHz from the carrier, amplitude 0..1.
     // Opt-in only — never enabled by a default.
     void setTxTestTone(double offsetHz, double amplitude, const TxCoordinator::Operation& operation);
+    // TUNE's waveform. Stored for the next setTune(true); never keys, and a
+    // TUNE already on the air keeps the waveform it started with.
+    void setTuneTwoTone(bool twoTone) override;
+    // The two tones' offsets from the carrier for the transmit slice's
+    // sideband: +700/+1900 Hz on the upper, -700/-1900 on the lower.
+    [[nodiscard]] std::pair<double, double> twoToneOffsetsHz() const;
+    // The two-tone equivalent of setTxTestTone(), with the same gate.
+    void setTxTwoTone(double offset1Hz, double offset2Hz, double peakAmplitude,
+                      const TxCoordinator::Operation& operation);
 
     void invokeExtension(const QString& ns, const QString& verb, quint64 requestId,
                          const QVariant& arg) override;
@@ -1497,6 +1506,15 @@ private:
     // sets it; scaling here as well would make the power control non-linear for
     // no reason.
     static constexpr double kTuneCarrierAmplitude = 1.0;
+    // THE TWO-TONE TUNE. The classic ARRL pair, 700 and 1900 Hz: both inside
+    // every SSB passband this backend runs (300..2700 voice), not harmonically
+    // related, and 1200 Hz apart so the third-order products (-500 and 3100 Hz
+    // from the carrier on USB) fall clear of both tones. Each tone is half of
+    // kTuneCarrierAmplitude, so the envelope PEAKS at the single-carrier TUNE
+    // level: same PEP as TUNE at the same TUNE power, half the average power.
+    static constexpr double kTwoToneLowHz = 700.0;
+    static constexpr double kTwoToneHighHz = 1900.0;
+    bool m_tuneTwoTone = false;
     int m_lastFwdRaw = -1;
 
     // ---- Meter pacing / ballistics ----

@@ -419,6 +419,7 @@ void TransmitModel::setTuneMode(const QString& mode)
         return;
     }
     emit commandReady("transmit set tune_mode=" + mode);
+    emit tuneModeCommandIssued(mode == QLatin1String("two_tone"));
 }
 
 void TransmitModel::setTuneAvailable(bool available)

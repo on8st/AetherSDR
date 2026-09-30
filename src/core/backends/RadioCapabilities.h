@@ -558,8 +558,8 @@ struct RadioCapabilities {
     // This is a capability and not a family check because the question is about
     // the tune generator behind the verb, not the vendor: a Flex takes
     // `transmit set tune_mode=two_tone` and synthesises two tones on-radio,
-    // while every other backend today drives the same button into a single
-    // carrier — the HL2's built-in test tone at zero offset, Icom's setTune().
+    // the HL2 synthesises them on the host after IRadioBackend::setTuneTwoTone,
+    // and Icom's setTune() drives the same button into a single carrier.
     //
     // Absent makes `txtest twotone` REFUSE rather than key. That refusal exists
     // for evidence integrity, not RF safety: a single carrier recorded as a

@@ -1063,10 +1063,11 @@ native unit and age; `swAlc` is a legacy conversion and must not be labeled
 physical Icom dBFS.
 
 `txtest twotone` is refused whenever the connected backend does not declare a
-`twoToneGenerator` record. That is a capability, not a family check: only Flex has a
-two-tone route (`transmit set tune_mode=two_tone`), while Icom's `setTune()` and
-the HL2's built-in test tone at zero offset both produce a single carrier, so
-accepting the verb there would certify two-tone RF that was never on the air.
+`twoToneGenerator` record. That is a capability, not a family check: Flex has an
+on-radio two-tone route (`transmit set tune_mode=two_tone`) and the HL2 generates
+700 + 1900 Hz on the host (`IRadioBackend::setTuneTwoTone`, TUNE's PEP), while
+Icom's `setTune()` produces a single carrier, so accepting the verb there would
+certify two-tone RF that was never on the air.
 The refusal comes before the TX gate — it is about what the evidence would
 claim, so it applies even when `AETHER_AUTOMATION_ALLOW_TX=1`. Ordinary TUNE
 remains available in supported modes.

@@ -498,6 +498,10 @@ signals:
     // back at the radio as a command is how a control starts fighting itself.
     void voxCommandIssued(bool on, int level, int delayMs);
     void monitorCommandIssued(bool on, int level);
+    // The tune waveform the operator selected (Mono Tone / Two Tone), for a
+    // backend that generates TUNE itself. Same rule as the two above: emitted
+    // from setTuneMode() only, never from applyStatus().
+    void tuneModeCommandIssued(bool twoTone);
     void rfPowerCommandIssued(int percent);
     void atuCommandIssued(bool start);
     // Fires only when cwPitch actually changes. Use this instead of

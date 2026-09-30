@@ -1957,9 +1957,12 @@ RadioCapabilities Hl2Backend::capabilities() const
     c.txPowerBands = {};
     c.declaredBandRanges = {};
     c.family = QStringLiteral("hl2");
-    // setTune() is the built-in test tone at ZERO offset — a single carrier
-    // exactly on the TX NCO. Nothing here can produce a second tone.
-    c.twoToneGenerator = std::nullopt;
+    // setTune() raises either the single carrier (the test tone at ZERO offset)
+    // or, after setTuneTwoTone(true), two equal tones at 700 + 1900 Hz with the
+    // TUNE carrier's PEP -- generated in MetisClient's EP2 packet builder. That
+    // is a real two-tone on the air, so `txtest twotone` may certify it.
+    c.twoToneGenerator = RadioCapabilities::TwoToneGenerator{
+        QStringLiteral("IRadioBackend::setTuneTwoTone -> MetisClient::setTxTwoTone (700 + 1900 Hz)")};
     // setVox() implements the hang: Hl2VoxDetector counts it in mic samples.
     c.hasVoxDelay = true;
     c.manufacturer = QStringLiteral("Hermes-Lite");
@@ -5706,6 +5709,47 @@ void Hl2Backend::setTxTestTone(double offsetHz, double amplitude, const TxCoordi
     }, Qt::QueuedConnection);
 }
 
+void Hl2Backend::setTxTwoTone(double offset1Hz, double offset2Hz, double peakAmplitude,
+                              const TxCoordinator::Operation& operation)
+{
+    // setTxTestTone()'s gate, verbatim in effect: the operation must permit
+    // dispatch, and nothing is generated while transmit is not allowed.
+    if (!TxCoordinator::Command{operation, peakAmplitude > 0.0}.permitsDispatch(TxCoordinator::monotonicMs())) {
+        return;
+    }
+    if (!m_metis)
+        return;
+    m_toneFromTune = false;
+    if (peakAmplitude > 0.0 && !m_txAllowed) {
+        qWarning() << "Hl2Backend: two-tone refused — transmit not available";
+        return;
+    }
+    QMetaObject::invokeMethod(m_metis, [metis = m_metis, offset1Hz, offset2Hz, peakAmplitude, operation] {
+        metis->setTxTwoTone(offset1Hz, offset2Hz, peakAmplitude, operation);
+    }, Qt::QueuedConnection);
+}
+
+std::pair<double, double> Hl2Backend::twoToneOffsetsHz() const
+{
+    const Receiver* r = rx(m_txDdc);
+    const QString u = r ? r->mode.toUpper() : QString();
+    const bool lower = u == QLatin1String("LSB") || u == QLatin1String("DIGL")
+        || u == QLatin1String("CWL");
+    const double sign = lower ? -1.0 : 1.0;
+    return {sign * kTwoToneLowHz, sign * kTwoToneHighHz};
+}
+
+void Hl2Backend::setTuneTwoTone(bool twoTone)
+{
+    m_tuneTwoTone = twoTone;
+    // Echo it: this radio reports no tune_mode, so without this the TUNE
+    // right-click's check marks would show TransmitModel's construction
+    // default rather than what the next TUNE will transmit.
+    TransmitDelta delta;
+    delta.tuneMode = twoTone ? QStringLiteral("two_tone") : QStringLiteral("single_tone");
+    emit transmitChanged(delta);
+}
+
 void Hl2Backend::setTxAudioMonitor(bool on)
 {
     m_txMonitor = on;
@@ -5916,8 +5960,16 @@ void Hl2Backend::setTune(bool on, int tunePowerPercent, const AetherSDR::TxCoord
         // would overwrite the saved RF power we have to restore on release.
         if (tunePowerPercent >= 0)
             applyDrive(tunePowerPercent);
-        setTxTestTone(0.0, kTuneCarrierAmplitude, operation);
-        m_toneFromTune = true;   // set AFTER: setTxTestTone clears the flag
+        if (m_tuneTwoTone) {
+            // The operator picked Two Tone (right-click, the shortcut, or the
+            // bridge's `txtest twotone`). Same drive, same key, same fences:
+            // only the waveform the EP2 packet builder synthesises changes.
+            const auto [f1, f2] = twoToneOffsetsHz();
+            setTxTwoTone(f1, f2, kTuneCarrierAmplitude, operation);
+        } else {
+            setTxTestTone(0.0, kTuneCarrierAmplitude, operation);
+        }
+        m_toneFromTune = true;   // set AFTER: setTxTestTone/setTxTwoTone clear the flag
         setKeying(true, operation, completion);
     } else {
         setKeying(false, operation, completion);   // clears m_tuning and restores the operator's RF power
