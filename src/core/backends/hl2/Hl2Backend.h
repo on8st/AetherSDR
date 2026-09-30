@@ -22,6 +22,7 @@
 #include "core/backends/hl2/Hl2TelemetryService.h"  // borrowed, owned by RadioModel
 #include "core/backends/hl2/Hl2TelemetrySource.h"   // the shared attribution rule
 #include "core/backends/hl2/Hl2RateCommit.h"
+#include "core/backends/hl2/Hl2TxMonitor.h"
 #include "core/backends/hl2/Hl2Receivers.h"
 #include "core/backends/hl2/MetisProtocol.h"   // Hl2Telemetry
 
@@ -164,6 +165,9 @@ public:
     // call site passes it explicitly.
     void setTune(bool on, int tunePowerPercent, const AetherSDR::TxCoordinator::Operation& operation, const AetherSDR::TxCoordinator::Completion& completion = {}) override;
     void setTxAudioMonitor(bool on) override;
+    // The operator's MON switch and level: the post-ALC transmit audio mixed
+    // into this computer's receive output while keyed. See Hl2TxMonitor.h.
+    void setTxMonitor(bool on, int level) override;
     void setTxFrequency(double hz);
     void setTxDriveLevel(int level);
     // Baseband TX test tone, offsetHz from the carrier, amplitude 0..1.
@@ -366,6 +370,10 @@ private:
     friend struct Hl2PcmTestAccess;
     friend struct Hl2TxGateTestAccess;
     friend struct Hl2UnkeyHoldTestAccess;
+    // The host-side transmit controls (MON, VOX, two-tone TUNE): injects the
+    // key state, the TX receiver's mode and a live PCM session, with no
+    // transport and no radio. Reaches nothing else.
+    friend struct Hl2HostTxTestAccess;
     // Delivers one bandscope block through MetisClient's own signal and lets
     // the mirror age, so the converter rows' expiry can be exercised without a
     // radio, a socket or an EP4 stream. Reaches nothing else.
@@ -845,6 +853,12 @@ private:
     // is the only thing that can make the answer single-valued.
     int m_activeDdc = 0;
 
+    // The transmit slice's mode is CW. The modulator is fed from the mic in
+    // voice modes only; CW carriers are built in MetisClient.
+    [[nodiscard]] bool txModeIsCw() const;
+    // Deliver one post-ALC block to the operator's MON (Hl2TxMonitor), on this
+    // thread, judged by the state at delivery.
+    void deliverTxMonitorAudio(const std::vector<float>& postAlcMono);
     [[nodiscard]] Receiver* rx(int ddc);
     [[nodiscard]] const Receiver* rx(int ddc) const;
     // Resolve a seam slice id / pan id to a DDC index, or -1. Callers must
@@ -1317,6 +1331,10 @@ private:
     TxCoordinator::Operation m_lastTxOperation;
     TxCoordinator::Completion m_cwHangCompletion;
     bool m_txMonitor = false;
+    // The OPERATOR's MON, which is not m_txMonitor above: that one is the
+    // diagnostic receive-during-TX gate, and it silences this one while it is
+    // on so a measurement's capture carries only the demodulated signal.
+    hl2::Hl2TxMonitor m_operatorMonitor;
     // ONE flag for the receive-audio hold, read by mixReceiverAudio() and
     // mirrored to every Hl2RxDsp by applyRxAudioMute(). It is NOT a mirror of
     // (m_keyed && !m_txMonitor) any more: on the key-UP edge it stays true for

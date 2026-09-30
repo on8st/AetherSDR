@@ -5,6 +5,7 @@
 
 #include <QObject>
 
+#include <atomic>
 #include <complex>
 #include <cstddef>
 #include <memory>
@@ -173,6 +174,14 @@ public:
     [[nodiscard]] unsigned long long modulatorFaultBlocks() const noexcept;
     [[nodiscard]] unsigned long long modulatorBlocks() const noexcept;
 
+    // Whether monitorAudio() is emitted. Callable from ANY thread: it is one
+    // atomic flag, set by Hl2Backend on its own thread and read here on the
+    // I/O thread, so the operator's MON switch does not have to queue behind
+    // transmit audio to take effect. Off by default, so a transmission with
+    // MON off does not ship a copy of every block across threads for nothing.
+    void setMonitorTap(bool on) noexcept { m_monitorTap.store(on, std::memory_order_relaxed); }
+    [[nodiscard]] bool monitorTap() const noexcept { return m_monitorTap.load(std::memory_order_relaxed); }
+
 public slots:
     // Mono TX audio at inputSampleRateHz.
     //
@@ -278,6 +287,11 @@ signals:
     // moves opposite to alcGain (the harder the ALC works on a quiet mic, the
     // closer to full scale this sits).
     void alcPeak(float dbfs);
+    // The levelled block itself -- post mic gain, post ALC, post clamp, at
+    // inputSampleRateHz, mono -- which is exactly what modulate() is handed.
+    // The operator's MON hears this (Hl2TxMonitor.h). Emitted only while
+    // setMonitorTap(true), and only for blocks that were modulated.
+    void monitorAudio(const std::vector<float>& postAlcMono);
     // Echoed back from setMicGain, so a readout can report the gain THIS OBJECT
     // holds rather than the caller's copy of what it asked for.
     //
@@ -322,6 +336,7 @@ private:
     // across calls so the real-time path does not allocate per block.
     std::vector<float> m_levelled;
     std::vector<std::complex<float>> m_iq;
+    std::atomic<bool> m_monitorTap{false};
 
 #if AETHER_HL2_TX_TXA
     // ── WDSP TXA ──────────────────────────────────────────────

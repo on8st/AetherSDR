@@ -4927,6 +4927,13 @@ target_include_directories(hl2_unkey_hold_test PRIVATE src)
 target_link_libraries(hl2_unkey_hold_test PRIVATE aethercore Qt6::Core Qt6::Network)
 add_test(NAME hl2_unkey_hold_test COMMAND hl2_unkey_hold_test)
 
+# The operator's MON on the HL2: post-ALC TX audio into the receive output at
+# the MON level, only while keyed. No WDSP transport, no socket, no radio.
+add_executable(hl2_tx_monitor_test tests/hl2_tx_monitor_test.cpp)
+target_include_directories(hl2_tx_monitor_test PRIVATE src tests)
+target_link_libraries(hl2_tx_monitor_test PRIVATE aethercore Qt6::Core Qt6::Network)
+add_test(NAME hl2_tx_monitor_test COMMAND hl2_tx_monitor_test)
+
 # HL2 RQST/ACK state machine (docs/HERMES.md §13 item 13, oracle §5) — pure
 # policy, standalone (no Qt, no socket, no radio). The clock is EP6 frames.
 add_executable(hl2_rqst_ack_test

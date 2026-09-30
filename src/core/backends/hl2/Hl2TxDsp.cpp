@@ -760,6 +760,12 @@ void Hl2TxDsp::processAudioBlock(const std::vector<float>& mono,
     // level policies to keep in step -- which is the same failure shape as two
     // runtime transmit paths, one level down.
     modulate(std::span<const float>(m_levelled.data(), consumed));
+    if (m_monitorTap.load(std::memory_order_relaxed)) {
+        // A COPY of the consumed span, not m_levelled: the member is reused
+        // across calls and may be longer than this block.
+        emit monitorAudio(std::vector<float>(m_levelled.begin(),
+            m_levelled.begin() + static_cast<std::ptrdiff_t>(consumed)));
+    }
 
     m_inBuffer.erase(m_inBuffer.begin(),
                      m_inBuffer.begin() + static_cast<std::ptrdiff_t>(consumed));

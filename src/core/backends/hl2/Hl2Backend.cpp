@@ -636,6 +636,14 @@ Hl2Backend::Hl2Backend(QObject* parent) : IRadioBackend(parent)
             [this](const std::vector<std::complex<float>>& iq, const TxCoordinator::Context& context) {
         m_metis->queueTxIq(iq, context);
     });
+    // THE OPERATOR'S MON. Hl2TxDsp lives on the I/O thread and this object on
+    // its own, so this is a queued hop: the block is judged by the key state
+    // when it ARRIVES, which is what keeps a block levelled just before the
+    // unkey from playing after it.
+    connect(m_txDsp, &Hl2TxDsp::monitorAudio, this,
+            [this](const std::vector<float>& postAlcMono) {
+        deliverTxMonitorAudio(postAlcMono);
+    });
     connect(m_txDsp, &Hl2TxDsp::micPeak, this,
             [this](float dbfs) {
         emit meterUpdate(QStringLiteral("TX:MICPEAK"), dbfs);
@@ -5751,6 +5759,42 @@ void Hl2Backend::setTxAudioMonitor(bool on)
     }
 }
 
+void Hl2Backend::setTxMonitor(bool on, int level)
+{
+    m_operatorMonitor.setMonitor(on, level);
+    // The tap is an atomic on Hl2TxDsp, so this reaches the I/O thread without
+    // queueing behind transmit audio. Off means Hl2TxDsp stops copying blocks
+    // across threads at all, not merely that this side drops them.
+    if (m_txDsp) {
+        m_txDsp->setMonitorTap(on);
+    }
+    qCInfo(lcHl2) << "HL2: MON" << (on ? "on" : "off") << "level" << m_operatorMonitor.levelPercent();
+}
+
+bool Hl2Backend::txModeIsCw() const
+{
+    const Receiver* r = rx(m_txDdc);
+    if (!r) {
+        return false;
+    }
+    const QString u = r->mode.toUpper();
+    return u == QLatin1String("CW") || u == QLatin1String("CWL") || u == QLatin1String("CWU");
+}
+
+void Hl2Backend::deliverTxMonitorAudio(const std::vector<float>& postAlcMono)
+{
+    const std::vector<float> stereo = m_operatorMonitor.render(
+        postAlcMono, m_keyed, m_txMonitor, txModeIsCw());
+    if (stereo.empty()) {
+        return;
+    }
+    // The same publisher the receive mix uses, so MON comes out wherever the
+    // operator's receive audio does. Receive audio is muted for the whole over
+    // (m_rxAudioMuted), so this is the only thing on that path while keyed and
+    // nothing is summed with it.
+    publishLegacyAudio(floatBytes(stereo));
+}
+
 void Hl2Backend::setTune(bool on, int tunePowerPercent, const AetherSDR::TxCoordinator::Operation& operation, const AetherSDR::TxCoordinator::Completion& completion)
 {
     if (!TxCoordinator::Command{operation, on}.permitsDispatch(TxCoordinator::monotonicMs())) {
@@ -8928,6 +8972,19 @@ void Hl2Backend::pushInitialState()
     applyRxAudioMute(false);
     // A fresh transport starts unkeyed by construction; an old connection's
     // stop must not be queued into it with a newly acquired operation.
+
+    // THE HOST-SIDE TRANSMIT CONTROLS SAY WHAT STATE THEY ARE IN. A Flex
+    // reports its own MON state on connect; this radio has none to report, and
+    // the TransmitModel may still be showing a MON lit from an earlier session
+    // on another radio. The backend is authoritative for what it is running, so
+    // it echoes that rather than letting the button claim a monitor nobody
+    // switched on here. The LEVEL is left alone: it travels with the next MON
+    // press (monitorCommandIssued carries it).
+    {
+        TransmitDelta delta;
+        delta.sbMonitor = m_operatorMonitor.enabled();
+        emit transmitChanged(delta);
+    }
 }
 
 void Hl2Backend::defineMeters()
