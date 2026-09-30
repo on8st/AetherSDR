@@ -14,6 +14,12 @@
 //      keys once and releases once. VOX off in the model, a pan TX inhibit, a
 //      receive-only mode or a receive-only backend: NOTHING reaches setKeying.
 //      And it never stacks on, or unkeys, an operator's own MOX.
+//   D. Anti-VOX (d167 D-vox chatter, hl2-lab d167-vox-chatter.md): the
+//      reference input to Hl2VoxDetector::feed gates NEW keys only; Hl2AntiVox
+//      holds VOX off for kRestartHoldMs after our output restarts, and carries
+//      an opt-in level term. Through the real backend: after our receive audio
+//      resumes, d167's re-key levels are held off, while speech at the
+//      operator's own measured -21.1 dBFS still keys once the hold ends.
 
 #include "TestSettingsProfile.h"
 #include "core/backends/hl2/Hl2Backend.h"
@@ -30,6 +36,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstdio>
+#include <limits>
 #include <memory>
 #include <vector>
 
@@ -46,6 +53,10 @@ struct Hl2HostTxTestAccess {
     static void setMode(Hl2Backend& backend, const QString& txMode) { backend.m_rx[0].mode = txMode; }
     static void setTxAllowed(Hl2Backend& backend, bool allowed) { backend.m_txAllowed = allowed; }
     static void setTuning(Hl2Backend& backend, bool tuning) { backend.m_tuning = tuning; }
+    // The receive-audio hold's own writer: true at key-down, false when the
+    // unkey hold runs out and our receive output resumes.
+    static void muteRx(Hl2Backend& backend, bool muted) { backend.applyRxAudioMute(muted); }
+    static std::uint64_t antiVoxSuppressed(const Hl2Backend& backend) { return backend.m_vox.antiVoxSuppressed(); }
     static void finish(Hl2Backend& backend)
     {
         backend.m_rx.clear();
@@ -360,6 +371,149 @@ void model()
 }
 } // namespace
 
+// ── D. Anti-VOX ─────────────────────────────────────────────────────────────
+constexpr std::int64_t kMs = 1'000'000;   // ns
+
+void antiVoxDetector()
+{
+    const double inf = std::numeric_limits<double>::infinity();
+    Hl2VoxDetector v;
+    v.configure(true, 50, 5);   // -30 dBFS, 100 ms = 5 blocks
+    check(v.feed(fromDb(-20), kBlock, kRate, true, inf) == Edge::None && v.antiVoxSuppressed() == 1,
+          "reference +inf: a block 10 dB over the threshold does not key, and is counted");
+    check(!v.holding(), "a suppressed block starts no hold");
+    check(v.feed(fromDb(-20), kBlock, kRate, true, fromDb(-20)) == Edge::None,
+          "a block EQUAL to the reference does not key (it must exceed it)");
+    check(v.feed(fromDb(-20), kBlock, kRate, true, fromDb(-25)) == Edge::Key,
+          "a block over both threshold and reference keys");
+    // THE HOLD IS UNTOUCHED: renewal and release ignore the reference.
+    check(v.feed(fromDb(-20), kBlock, kRate, true, inf) == Edge::None && v.holding(),
+          "inside a hold, reference +inf neither releases nor re-keys");
+    int releasedAt = -1;
+    for (int i = 1; i <= 10 && releasedAt < 0; ++i) {
+        if (v.feed(fromDb(-60), kBlock, kRate, true, inf) == Edge::Release) {
+            releasedAt = i;
+        }
+    }
+    check(releasedAt == 5, "the hang runs exactly as without anti-VOX: it can neither lengthen nor cut an over");
+    check(v.feed(fromDb(-40), kBlock, kRate, true, 0.0) == Edge::None && v.antiVoxSuppressed() == 2,
+          "below the threshold is not an anti-VOX suppression (count unchanged)");
+}
+
+void antiVoxClass()
+{
+    const double inf = std::numeric_limits<double>::infinity();
+    Hl2AntiVox a;
+    check(a.referenceLinear(0) == 0.0 && !a.levelOn(), "fresh: no reference, level term off");
+    const std::int64_t t0 = 1'000 * kMs;
+    a.noteOutputRestart(t0);
+    check(a.referenceLinear(t0) == inf, "restart: +inf at once");
+    check(a.referenceLinear(t0 + (Hl2AntiVox::kRestartHoldMs - 1) * kMs) == inf,
+          "still +inf 1 ms before the hold ends");
+    check(a.referenceLinear(t0 + Hl2AntiVox::kRestartHoldMs * kMs) == 0.0, "0 when the hold ends");
+    // The unkey edge, then the resume 70 ms later: the later one governs.
+    Hl2AntiVox b;
+    b.noteOutputRestart(t0);
+    b.noteOutputRestart(t0 + 70 * kMs);
+    check(b.referenceLinear(t0 + (70 + Hl2AntiVox::kRestartHoldMs - 1) * kMs) == inf,
+          "a second restart (the resume after the unkey hold) extends the hold");
+    b.noteOutputRestart(t0 + 10 * kMs);
+    check(b.referenceLinear(t0 + (70 + Hl2AntiVox::kRestartHoldMs - 1) * kMs) == inf,
+          "an earlier restart never shortens a hold already running");
+    check(Hl2AntiVox::kRestartHoldMs >= 356 - 70 + 530,
+          "the hold covers d167's latest re-key after resume (286 ms) plus its 0.53 s tail");
+
+    // LEVEL TERM: off by default -- output is not even remembered.
+    Hl2AntiVox c;
+    c.noteOutputPeak(0.5, t0);
+    check(c.referenceLinear(t0 + kMs) == 0.0, "level term off: our output sets no reference");
+    c.setLevelGainDb(0.0);
+    c.noteOutputPeak(0.1, t0);
+    c.noteOutputPeak(0.05, t0 + 400 * kMs);
+    check(std::fabs(c.referenceLinear(t0 + 500 * kMs) - 0.1) < 1e-12,
+          "level term at 0 dB: the loudest output of the window");
+    check(std::fabs(c.referenceLinear(t0 + 900 * kMs) - 0.05) < 1e-12,
+          "the loud block ages out after kLevelWindowMs; the quieter one is still live");
+    check(c.referenceLinear(t0 + 1300 * kMs) == 0.0, "all aged out: no reference");
+    c.setLevelGainDb(20.0);
+    c.noteOutputPeak(0.01, t0 + 2000 * kMs);
+    check(std::fabs(c.referenceLinear(t0 + 2000 * kMs) - 0.1) < 1e-9, "+20 dB gain scales the reference x10");
+    c.setLevelOff();
+    check(c.referenceLinear(t0 + 2000 * kMs) == 0.0 && !c.levelOn(), "level term off again forgets");
+}
+
+void antiVoxBackend()
+{
+    Hl2Backend b;
+    Hl2HostTxTestAccess::start(b, QStringLiteral("USB"));
+    Requests r;
+    r.attach(b);
+    b.setVox(true, 50, 5);   // -30 dBFS, 100 ms = 5 blocks
+
+    // POSITIVE CONTROL: with no output restart, d167's loudest re-key level
+    // keys at once. Whatever holds it off below is anti-VOX, not the level.
+    b.observeTxMicAudio(micBlock(-17.9), kRate);
+    check(r.edges == std::vector<bool>{true}, "control: -17.9 dBFS keys when our output has not restarted");
+    for (int i = 0; i < 5; ++i) {
+        b.observeTxMicAudio(micBlock(-60), kRate);
+    }
+    check(r.edges == std::vector<bool>({true, false}), "control: released after the hang");
+
+    // Our own over: the receive audio is muted while keyed, and resumes when
+    // the unkey hold runs out. That resume is the edge d167 re-keyed on.
+    r.edges.clear();
+    Hl2HostTxTestAccess::muteRx(b, true);
+    QElapsedTimer sinceResume;
+    Hl2HostTxTestAccess::muteRx(b, false);
+    sinceResume.start();
+    const auto before = Hl2HostTxTestAccess::antiVoxSuppressed(b);
+    // d167's chatter spanned -17.9 .. -27.1 dBFS at the key ask; feed 300 ms
+    // of each extreme -- the whole 246-356 ms re-key window and more.
+    for (int i = 0; i < 15; ++i) {
+        b.observeTxMicAudio(micBlock(-17.9), kRate);
+    }
+    for (int i = 0; i < 15; ++i) {
+        b.observeTxMicAudio(micBlock(-27.1), kRate);
+    }
+    const bool inside = sinceResume.elapsed() < Hl2AntiVox::kRestartHoldMs;
+    check(inside && r.edges.empty(),
+          "after our output restarts, d167's re-key levels (-17.9 and -27.1 dBFS) do NOT key");
+    check(Hl2HostTxTestAccess::antiVoxSuppressed(b) - before == 30,
+          "every one of those blocks was held off by anti-VOX, not missed by the threshold");
+
+    // SPEECH STILL KEYS. The operator's own d167 key asks were -21.1 and -22.5
+    // dBFS -- inside the chatter's range, which is why no level floor could
+    // do this. Speech that is still going when the hold ends keys then.
+    while (sinceResume.elapsed() <= Hl2AntiVox::kRestartHoldMs + 20) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+    }
+    b.observeTxMicAudio(micBlock(-21.1), kRate);
+    check(r.edges == std::vector<bool>{true},
+          "speech at the operator's measured -21.1 dBFS keys once the hold has ended");
+    for (int i = 0; i < 5; ++i) {
+        b.observeTxMicAudio(micBlock(-60), kRate);
+    }
+    check(r.edges == std::vector<bool>({true, false}), "and releases after the ordinary hang");
+
+    // ANTI-VOX FOLLOWS OUR OUTPUT, NOT THE DETECTOR'S OWN RELEASE: that release
+    // restarted nothing, so the next sentence keys at once.
+    b.observeTxMicAudio(micBlock(-22.5), kRate);
+    check(r.edges == std::vector<bool>({true, false, true}),
+          "a VOX release with no output restart does not hold the next key off");
+
+    // A restart DURING a hold (MON's unkey, say) cannot cut the over short.
+    Hl2HostTxTestAccess::muteRx(b, true);
+    Hl2HostTxTestAccess::muteRx(b, false);
+    for (int i = 0; i < 4; ++i) {
+        b.observeTxMicAudio(micBlock(-60), kRate);
+    }
+    check(r.edges.size() == 3, "a restart inside a hold leaves the hang running (4 of 5 quiet blocks)");
+    b.observeTxMicAudio(micBlock(-60), kRate);
+    check(r.edges == std::vector<bool>({true, false, true, false}), "released on the fifth, as ever");
+
+    Hl2HostTxTestAccess::finish(b);
+}
+
 int main(int argc, char** argv)
 {
     TestSettingsProfile profile(QStringLiteral("hl2-vox"));
@@ -370,6 +524,9 @@ int main(int argc, char** argv)
     detector();
     backend();
     model();
+    antiVoxDetector();
+    antiVoxClass();
+    antiVoxBackend();
     std::printf("%d failure(s)\n", failures);
     return failures == 0 ? 0 : 1;
 }

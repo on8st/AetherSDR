@@ -960,6 +960,9 @@ private:
     // on-radio mixer -- a Flex sums its slices and sends one stream -- so with
     // more than one slice open this is where they become one.
     void mixReceiverAudio(int ddc, const std::vector<float>& pcm);
+    // publishLegacyAudio() for every block of OUR OWN output (receive mix and
+    // MON), after showing it to anti-VOX's level term.
+    void publishOwnOutput(const std::vector<float>& stereo);
 
     // THE RECEIVE-AUDIO HOLD, as two calls rather than as open-coded loops.
     //
@@ -1356,6 +1359,11 @@ private:
     // on so a measurement's capture carries only the demodulated signal.
     hl2::Hl2TxMonitor m_operatorMonitor;
     hl2::Hl2VoxDetector m_vox;
+    // What our own output may be putting into the microphone; the reference
+    // m_vox's new keys must beat. See Hl2AntiVox in Hl2Vox.h for both terms
+    // and which one is on.
+    hl2::Hl2AntiVox m_antiVox;
+    std::uint64_t m_antiVoxLoggedRestart = 0;
     // THE BACKSTOP FOR AUDIO THAT STOPS. The detector's hang is counted in mic
     // samples, so a mic that goes away mid-hold would never run it out. This
     // single-shot is restarted by every mic block while holding and releases

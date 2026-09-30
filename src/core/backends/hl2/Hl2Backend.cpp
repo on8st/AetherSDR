@@ -1559,6 +1559,11 @@ static void hl2RequireBackendThread(const QObject* owner, const char* what)
 void Hl2Backend::applyRxAudioMute(bool muted)
 {
     hl2RequireBackendThread(this, "applyRxAudioMute");
+    if (m_rxAudioMuted && !muted) {
+        // Our receive audio restarts after a gap: anti-VOX's restart hold
+        // (Hl2AntiVox). This is the edge d167's VOX chatter was locked to.
+        m_antiVox.noteOutputRestart(hl2::steadyNowNs());
+    }
     m_rxAudioMuted = muted;
     // Record the moment sampling is asked to RESUME at the site that actually
     // asks for it, which since #5497 is HERE and not at the top of
@@ -1599,6 +1604,21 @@ void Hl2Backend::releaseRxAudioMuteAfterHold()
     // T/R turnaround to cover and inherits none of the elapsed time of the
     // first. The bench build this fix comes from did not coalesce them.
     m_unkeyUnmuteTimer->start(m_unkeyUnmuteHoldMs);
+}
+
+void Hl2Backend::publishOwnOutput(const std::vector<float>& stereo)
+{
+    // Every block this backend hands the speaker path -- the receive mix and
+    // MON -- passes here, so anti-VOX's level term sees exactly what we play.
+    // Cheap when that term is off: the peak is not even taken.
+    if (m_antiVox.levelOn()) {
+        float peak = 0.0f;
+        for (const float v : stereo) {
+            peak = std::max(peak, std::fabs(v));
+        }
+        m_antiVox.noteOutputPeak(static_cast<double>(peak), hl2::steadyNowNs());
+    }
+    publishLegacyAudio(floatBytes(stereo));
 }
 
 void Hl2Backend::mixReceiverAudio(int ddc, const std::vector<float>& pcm)
@@ -1666,7 +1686,7 @@ void Hl2Backend::mixReceiverAudio(int ddc, const std::vector<float>& pcm)
         // the reason the fast path exists — no remix or clamp. The PCM
         // adapter takes an owning copy for queued consumers.
         if (q.size() == pcm.size()) {
-            publishLegacyAudio(floatBytes(pcm));
+            publishOwnOutput(pcm);
             forwardSpeakerAudioToCodec(pcm);
             q.clear();
             return;
@@ -1684,7 +1704,7 @@ void Hl2Backend::mixReceiverAudio(int ddc, const std::vector<float>& pcm)
         // cannot swap the channels of what follows it.
         m_mixAccum.assign(q.cbegin(), q.cend());
         q.clear();
-        publishLegacyAudio(floatBytes(m_mixAccum));
+        publishOwnOutput(m_mixAccum);
         forwardSpeakerAudioToCodec(m_mixAccum);
         return;
     }
@@ -1760,7 +1780,7 @@ void Hl2Backend::mixReceiverAudio(int ddc, const std::vector<float>& pcm)
     for (float& s : m_mixAccum)
         s = std::clamp(s, -kMixCeiling, kMixCeiling);
 
-    publishLegacyAudio(floatBytes(m_mixAccum));
+    publishOwnOutput(m_mixAccum);
     forwardSpeakerAudioToCodec(m_mixAccum);
 }
 
@@ -4774,6 +4794,9 @@ void Hl2Backend::applyKeying(bool key, const TxCoordinator::Operation& operation
     // not log per block, and a per-block test would fire on every normal
     // transmission because the pauses between words sit far below the target.
     if (m_keyed && !key) {
+        // Anti-VOX: the unkey edge restarts our output (MON stops, receive
+        // resumes). The resume after the unmute hold restarts the hold again.
+        m_antiVox.noteOutputRestart(hl2::steadyNowNs());
         // HOW FAR BELOW THE TARGET COUNTS AS QUIET. Upper bound MEASURED;
         // the value inside it CHOSEN. Both halves are stated because they have
         // different standing.
@@ -5845,7 +5868,7 @@ void Hl2Backend::deliverTxMonitorAudio(const std::vector<float>& postAlcMono)
     // operator's receive audio does. Receive audio is muted for the whole over
     // (m_rxAudioMuted), so this is the only thing on that path while keyed and
     // nothing is summed with it.
-    publishLegacyAudio(floatBytes(stereo));
+    publishOwnOutput(stereo);
 }
 
 void Hl2Backend::setVox(bool on, int level, int delayRaw)
@@ -5898,7 +5921,20 @@ void Hl2Backend::observeTxMicAudio(const QByteArray& int16Stereo, int sampleRate
         peak = std::max(peak, std::fabs(0.5f * (l + r)));
     }
     const double level = static_cast<double>(peak) * micSliderToLinear(m_micLevel);
-    const auto edge = m_vox.feed(level, frames, sampleRateHz, voxMayKey());
+    const std::int64_t now = hl2::steadyNowNs();
+    const std::uint64_t suppressedBefore = m_vox.antiVoxSuppressed();
+    const auto edge = m_vox.feed(level, frames, sampleRateHz, voxMayKey(),
+                                 m_antiVox.referenceLinear(now));
+    if (m_vox.antiVoxSuppressed() != suppressedBefore
+        && m_antiVoxLoggedRestart != m_antiVox.restarts()) {
+        // Once per output restart, not per block: the evidence that anti-VOX,
+        // and not a quiet microphone, is why VOX did not key.
+        m_antiVoxLoggedRestart = m_antiVox.restarts();
+        qCInfo(lcHl2) << "HL2: anti-VOX held off a VOX key at"
+                      << 20.0 * std::log10(std::max(level, 1e-7)) << "dBFS,"
+                      << m_antiVox.restartHoldRemainingMs(now)
+                      << "ms left of the hold after our output restarted";
+    }
     if (edge == hl2::Hl2VoxDetector::Edge::Release) {
         // The detector has already let go (hang ran out, or VOX may no longer
         // key); stop the backstop and tell the engine, once.
@@ -7215,6 +7251,14 @@ IRadioBackend::HealthSnapshot Hl2Backend::healthSnapshot() const
     put("micGainDb", QStringLiteral("Mic gain requested (dB, continuous mapping)"),
         micSliderToGainDb(m_micLevel));
     put("micMuted", QStringLiteral("Mic muted (slider at 0)"), m_micLevel == 0);
+    // Host VOX as the DETECTOR holds it, not as TransmitModel's optimistic flag
+    // says: a disarm is proven when this row reads false.
+    put("voxEnabled", QStringLiteral("Host VOX armed (detector)"), m_vox.enabled());
+    put("voxHolding", QStringLiteral("Host VOX holding a key"), m_vox.holding());
+    put("antiVoxHoldMs", QStringLiteral("Anti-VOX restart hold remaining (ms)"),
+        static_cast<qlonglong>(m_antiVox.restartHoldRemainingMs(hl2::steadyNowNs())));
+    put("antiVoxSuppressed", QStringLiteral("VOX keys held off by anti-VOX"),
+        static_cast<qulonglong>(m_vox.antiVoxSuppressed()));
     // THE ROW THAT WOULD HAVE CAUGHT THE ORIGINAL BUG. Echoed by the modulator,
     // so it stays absent — "not reported" — if the push never arrived, however
     // confidently the row above claims a value.

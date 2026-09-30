@@ -689,6 +689,14 @@ popup at a time and only while it is open; an empty combo is refused up front
 > **sliders/combos** like `Tune power`, `RF power`, or `VOX level` are never
 > blocked — moving a value setter can't transmit.
 >
+> **VOX can be switched off, never on.** The Phone applet's
+> `VOX voice-operated transmit` button carries a disarm-only scoped action:
+> with `ALLOW_TX`, `invoke … setChecked false` is accepted and switches VOX off
+> in the transmit model whatever the button shows; `setChecked true`, `click`,
+> `toggle` and pointer gestures are refused. Without `ALLOW_TX` the guard still
+> refuses the invoke in both directions. Read the result back — the HL2's
+> `health` rows `voxEnabled` / `voxHolding` are the detector's own state.
+>
 > To deliberately drive a keying control (e.g. hardware-in-the-loop on a dummy
 > load), set `AETHER_AUTOMATION_ALLOW_TX=1` in the app's environment at launch.
 > Adding a new keying control? Call `markTxKeying(theButton)` — see
