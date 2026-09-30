@@ -136,8 +136,9 @@ public:
     void setFrontEndOverload(const AetherSDR::FrontEndOverload& state);
 
 private:
-    // The RF Gain slider is a readout while the loop owns the gain. See the
-    // definition for why leaving it live is not a cosmetic question.
+    // The RF Gain slider's description and tooltip, from its published range
+    // and whether Auto is on. The slider stays live under Auto: see the
+    // definition for why that is now safe.
     void applyAutoRfGainToSlider(bool autoOn);
 
 public:

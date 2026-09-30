@@ -573,6 +573,49 @@ int main(int argc, char** argv)
         s.backend.setAutoRfGain(false);
     }
 
+    // ---- THE OPERATOR TAKES THE GAIN WITH AUTO ON, AND AUTO STAYS ON -------
+    //
+    // Every caller of setPanRfGain reads its number off the slider or the pan,
+    // which show the EFFECTIVE gain. Taken as a new baseline with the loop's
+    // hold still subtracted, the operator asked for one gain and got another:
+    // a drag to +4 with 9 dB held ran -5, and "RF gain up" from a held +1 ran
+    // -7. RFC #5535's approved design is a manual override that is "not the same
+    // as switching it off", so the asked-for gain is what runs and the loop
+    // stays armed.
+    {
+        Session s(rememberedGain());
+        s.backend.setPanRfGain(s.panId, 10);
+        s.backend.setAutoRfGain(true);
+        check(s.backend.autoRfGainEnabled(), "override: precondition, armed at +10");
+        s.backend.setLnaAutoOffsetDb(9);
+        check(s.backend.lnaEffectiveDb() == 1 && s.echoedGain == 1,
+              "override: with 9 dB held the radio runs +1 and the slider shows +1");
+
+        // "RF gain up" from what the slider shows.
+        s.backend.setPanRfGain(s.panId, s.echoedGain + 1);
+        check(s.backend.lnaEffectiveDb() == 2 && s.echoedGain == 2,
+              "override: one step up from a held +1 runs +2, not -7");
+        check(s.backend.autoRfGainEnabled(),
+              "override: and the loop is still armed");
+        check(s.backend.lnaAutoOffsetDb() == 0 && s.healthOffset() == 0,
+              "override: its hold is released rather than re-applied below the "
+              "operator's number");
+        check(s.backend.lnaBaselineDb() == 2
+                  && bandGain(s.backend.currentOperatingState(),
+                              QStringLiteral("20m")) == 2,
+              "override: the operator's +2 is the baseline and what is stored");
+
+        // A drag straight to the number the slider already showed as the
+        // baseline: the baseline does not move, the hold still has to go.
+        s.backend.setLnaAutoOffsetDb(6);
+        check(s.backend.lnaEffectiveDb() == -4, "override: 6 dB held again, -4 runs");
+        s.backend.setPanRfGain(s.panId, 2);
+        check(s.backend.lnaEffectiveDb() == 2 && s.echoedGain == 2,
+              "override: asking for +2 with the baseline already +2 still runs +2");
+
+        s.backend.setAutoRfGain(false);
+    }
+
     if (failures == 0) {
         std::printf("\nALL PASS\n");
         return 0;

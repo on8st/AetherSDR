@@ -4200,6 +4200,33 @@ void Hl2Backend::setPanRfGain(const QString& panId, int gainDb)
         return;
     const int clamped = qBound(kLnaGainMinDb, gainDb, kLnaGainMaxDb);
 
+    // THE OPERATOR TAKES THE GAIN, AND THE LOOP STAYS ON. Every caller of this
+    // function reads the number off the slider or the pan, and both show the
+    // EFFECTIVE gain -- so the value asked for is a gain to RUN, on the same
+    // -12..+48 scale, not a new baseline for the loop to subtract its offset
+    // from again. Taken as a baseline, a drag to +12 with 11 dB held ran +1,
+    // and the keyboard "RF gain up" from a held +22 set the baseline to +23 and
+    // ran -3: asking for more gain delivered 25 dB less.
+    //
+    // RFC #5535's approved design: "a manual override in the UI ... Disagree
+    // with what it did, take it. That is not the same as switching it off."
+    // So the loop's hold is surrendered and it stays armed, working down from
+    // the operator's number if the converter still clips there.
+    if (m_autoRfGainEnabled
+        && (m_lnaAutoOffsetDb != 0 || m_autoGainState.offsetDb != 0)) {
+        m_autoGainState.offsetDb = 0;
+        m_autoGainState.atFloorHotMs = 0;
+        m_autoGainState.floorAlarmed = false;
+        m_lnaAutoOffsetDb = 0;
+        if (clamped == m_lnaGainDb) {
+            // Same baseline, so applyLnaGainDb below will not run; the wire
+            // still has to lose the offset.
+            pushEffectiveLnaGain();
+        }
+        qCInfo(lcHl2) << "HL2 auto RF gain: operator set" << clamped
+                      << "dB; the loop's hold is released and it stays armed";
+    }
+
     // ONLY the register write is redundant when the value has not moved. The
     // equality check used to return above everything below it, which made an
     // operator who set exactly the value already live invisible to the band

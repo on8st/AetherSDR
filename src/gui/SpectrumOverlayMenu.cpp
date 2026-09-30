@@ -2916,49 +2916,64 @@ void SpectrumOverlayMenu::layoutDisplayPanel()
 // WNB is a RADIO-side noise blanker: the toggle and level go to the radio's own
 // wideband blanker, so on a backend that has none the row would be a control
 // with nothing behind it. Hidden as a unit, button and slider together.
-// THE SLIDER IS AN INPUT AS WELL AS A DISPLAY, and that is why this exists.
+// THE SLIDER IS AN INPUT AS WELL AS A DISPLAY, and while Auto is on it is both.
 //
-// While the loop is armed the slider shows the EFFECTIVE gain -- the number the
-// radio is running, which is the operator's baseline minus whatever the loop is
-// holding down. That is the right thing to display: a gain change hidden from
-// the operator is its own defect.
+// It shows the EFFECTIVE gain -- the number the radio is running, on the
+// radio's own absolute scale (the HL2's -12..+48 dB) -- in manual and in Auto
+// alike, and moves when the loop moves it. A gain change hidden from the
+// operator is its own defect, and an offset shown beside it reads as a second
+// level (d168: "At floor -26 dB" beside "RF Gain: 22 dB").
 //
-// But the same widget is also how the operator SETS the gain, and the two roles
-// contradict each other the moment the loop holds anything. Drag it to 12 dB
-// with 11 dB held and the backend takes 12 as the new baseline, computes an
-// effective 1, echoes that back, and the slider lands on 1 -- the operator
-// asked for 12, watched it jump to 1, and the stored value is 12. Every reading
-// of that is wrong.
+// It USED TO GO READ-ONLY while Auto was on, because the backend took a dragged
+// value as a new baseline and subtracted the loop's hold from it again: drag to
+// 12 with 11 held and the slider landed on 1. The backend now takes the value
+// as the gain to RUN and releases the hold (Hl2Backend::setPanRfGain), which is
+// RFC #5535's approved "manual override in the UI ... not the same as switching
+// it off". So the slider stays live: moving it is the operator taking the gain,
+// and Auto stays on and works down from there if the converter still clips.
 //
-// So while the loop owns the gain, the slider is a READOUT and says so. To
-// change the ceiling, untick Auto, set it, tick Auto again. That is the
-// maintainer triage's own suggestion on #5354 ("when on, the slider goes
-// read-only"), reached here from the failure rather than from the suggestion.
+// THE RANGE IN THE TEXT IS THE SLIDER'S OWN, as the radio published it through
+// setRfGainRange. The old unarmed text was Flex's "-8 to +32 dB in 8 dB steps"
+// written over whatever the radio had said, on every Auto toggle.
 void SpectrumOverlayMenu::applyAutoRfGainToSlider(bool autoOn)
 {
     if (!m_rfGainSlider) {
         return;
     }
-    const bool armed = autoOn && m_autoRfGainCheck && m_autoRfGainCheck->isVisible();
-    m_rfGainSlider->setEnabled(!armed);
-    // THE REASON ON THE ACCESSIBLE CHANNEL FIRST, then the tooltip. A disabled
-    // control is exactly where an operator most needs to be told WHY, and a
-    // tooltip is the one channel a screen-reader user never gets (#5262 M3a
-    // doctrine, #4896). tools/check_a11y.py enforces the pairing within 12
-    // lines, which the two multi-line calls only satisfy in this order.
+    // isHidden(), not isVisible(): the checkbox lives in a popup panel, and
+    // whether that panel happens to be open says nothing about whether this
+    // radio has the loop.
+    const bool armed = autoOn && m_autoRfGainCheck && !m_autoRfGainCheck->isHidden();
+    m_rfGainSlider->setEnabled(true);
+    const auto signedText = [](int v) {
+        return v > 0 ? QStringLiteral("+%1").arg(v)
+             : v < 0 ? QStringLiteral("\u2212%1").arg(-v)
+                     : QStringLiteral("0");
+    };
+    const QString unit = m_rfGainUnitSuffix.trimmed().isEmpty()
+        ? QStringLiteral(" step") : m_rfGainUnitSuffix;
+    const QString range = tr("%1 to %2%3")
+        .arg(signedText(m_rfGainSlider->minimum()),
+             signedText(m_rfGainSlider->maximum()), unit);
+    const QString step = QStringLiteral("%1%2")
+        .arg(m_rfGainSlider->singleStep()).arg(unit);
+    // THE ACCESSIBLE CHANNEL FIRST, then the tooltip (#5262 M3a doctrine,
+    // #4896). tools/check_a11y.py enforces the pairing within 12 lines.
     m_rfGainSlider->setAccessibleDescription(
-        armed ? tr("Read-only while automatic RF gain is on. Shows what the "
-                   "radio is running: your setting minus whatever the "
-                   "automatic loop is holding down. Untick Auto to change it.")
-              : tr("RF gain, minus 8 to plus 32 dB in 8 dB steps."));
+        armed ? tr("RF gain, %1. Automatic RF gain is on: this shows the gain "
+                   "the radio is running and moves when the loop moves it. "
+                   "Moving it sets the gain yourself; automatic gain stays on "
+                   "and works down from there if the front end still clips.")
+                    .arg(range)
+              : tr("RF gain, %1 in %2 steps.").arg(range, step));
     m_rfGainSlider->setToolTip(
-        armed ? QStringLiteral(
-                    "RF Gain — read-only while Auto is on.\n"
-                    "This shows what the radio is running: your setting minus "
-                    "whatever Auto is holding down.\n"
-                    "Untick Auto to change it.")
-              : QStringLiteral("RF Gain: −8 to +32 dB (8 dB steps)\n"
-                               "Step size is determined by radio hardware."));
+        armed ? tr("RF Gain: %1 \u2014 Auto is on.\n"
+                   "Shows the gain the radio is running and follows the loop.\n"
+                   "Move it to set the gain yourself; Auto stays on.")
+                    .arg(range)
+              : tr("RF Gain: %1 (%2 steps)\n"
+                   "Range and step are reported by the radio.")
+                    .arg(range, step));
 }
 
 void SpectrumOverlayMenu::setAutoRfGainAvailable(bool available)
@@ -3133,12 +3148,9 @@ void SpectrumOverlayMenu::setRfGainRange(int low, int high, int step,
     m_rfGainSlider->setTickInterval(step);
     // The unit comes from the backend, so the tooltip cannot hardcode "dB"
     // either — it said "dB" over a control that was three preamp positions.
-    const QString unitWord = unitSuffix.trimmed().isEmpty()
-        ? QStringLiteral("step") : unitSuffix.trimmed();
-    m_rfGainSlider->setToolTip(
-        QString("RF Gain: %1%2 to %3%4%2 (%5%2 steps)\n"
-                "Range and step are reported by the radio.")
-            .arg(low).arg(unitWord).arg(high > 0 ? "+" : "").arg(high).arg(step));
+    // One writer for the slider's description and tooltip, so an Auto toggle
+    // and a range change can never disagree about the range.
+    applyAutoRfGainToSlider(m_autoRfGainCheck && m_autoRfGainCheck->isChecked());
     // Re-render the readout in the new unit, or the number keeps the previous
     // radio's suffix until the operator next moves the slider.
     if (m_rfGainLabel) {
