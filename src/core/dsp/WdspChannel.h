@@ -66,10 +66,22 @@ public:
         // Channel mute envelope, in seconds. WDSP applies these when a channel
         // starts and stops, and they are the anti-click mechanism: an abrupt DSP
         // mute clicks on every transition, which on a full-duplex radio means
-        // every T/R change. Values match both reference clients (Thetis
-        // cmaster.c, pihpsdr receiver.c) — leaving them at zero, as this did,
-        // disables the ramp entirely and is invisible until you go hunting for
-        // the click.
+        // every T/R change. Leaving them at zero, as this did, disables the
+        // ramp entirely and is invisible until you go hunting for the click.
+        //
+        // THESE ARE RECEIVE VALUES, and "they match both reference clients",
+        // which this used to say, was true of Thetis's receive channel only.
+        // Checked against each project's current source: Thetis cmaster.c
+        // opens RX at 0.010 / 0.025 / 0.000 / 0.010 (exactly these) and TX at
+        // 0.000 / 0.010 / 0.000 / 0.010; pihpsdr opens BOTH receiver.c and
+        // transmitter.c at 0.000 / 0.025 / 0.0 / 0.010. So the two agree on
+        // one thing about transmit: no delay before the up-ramp.
+        //
+        // The HL2 transmit channel follows them there and overrides the delay
+        // to 0 (Hl2TxDsp::kTxMuteDelayUpSec), because on a transmit channel the
+        // delay is not dead time: upslew0 zeroes the first delay x rate samples
+        // of REAL audio after the first non-zero input, i.e. the start of the
+        // first syllable of every over. Receive keeps 0.010 here unchanged.
         double muteDelayUpSec = 0.010;
         double muteSlewUpSec = 0.025;
         double muteDelayDownSec = 0.000;

@@ -159,6 +159,32 @@ public:
     [[nodiscard]] int wdspChannelId() const noexcept;
     [[nodiscard]] const WdspChannel::Config* channelConfig() const noexcept;
 
+#if AETHER_HL2_TX_TXA
+    // ── The TXA channel this stage opens, as a pure function of Config ────
+    //
+    // buildModulator() opens its channel with exactly this, so an offline
+    // instrument can open the SAME channel without a paced caller in front of
+    // it: tests/hl2_tx_latency_test.cpp feeds a step and an impulse through it
+    // and reads the delay off the emitted IQ. A second copy of this arithmetic
+    // in a test would agree with itself and not with the product.
+    [[nodiscard]] static WdspChannel::Config modulatorChannelConfig(const Config& config);
+
+    // The TX mute envelope's DELAY before its up-ramp, in seconds. ZERO on the
+    // transmit channel, where WdspChannel::Config's shared default is 10 ms,
+    // and what that default cost here was audio, not only time. WDSP's upslew0
+    // (iobuffs.c) holds its output at zero from the FIRST NON-ZERO INPUT
+    // SAMPLE for ndelup = delay x input rate samples, so the 10 ms delay
+    // REPLACED the first 240 samples (at 24 kHz) of every over's real audio
+    // with zeros before the ramp even began -- the first 10 ms of the first
+    // syllable, on every over (#6052). The 25 ms up-slew after it is the
+    // de-click and is kept: Config::muteSlewUpSec is not touched.
+    //
+    // Both reference clients open their TX channel with no delay: pihpsdr
+    // (transmitter.c) passes DelayUp 0.000 / SlewUp 0.025, Thetis (cmaster.c)
+    // 0.000 / 0.010. See the note on muteDelayUpSec in WdspChannel.h.
+    static constexpr double kTxMuteDelayUpSec = 0.0;
+#endif
+
     // Blocks the modulator could not place on the wire, since configure().
     //
     // ALWAYS 0 in the phasing build: that modulator is arithmetic and cannot
