@@ -183,6 +183,43 @@ public:
     // (transmitter.c) passes DelayUp 0.000 / SlewUp 0.025, Thetis (cmaster.c)
     // 0.000 / 0.010. See the note on muteDelayUpSec in WdspChannel.h.
     static constexpr double kTxMuteDelayUpSec = 0.0;
+
+    // ── The transmit bandpass: length kept, phase per mode ────────────────
+    //
+    // Until #6052 nothing configured this filter: WdspChannel never called
+    // TXASetNC / TXASetMP, so every over went through create_txa's own
+    // max(2048, dsp_size) = 2048-tap LINEAR-phase bandpass at 48 kHz, and its
+    // (2048 - 1) / 2 = 1023.5 samples of group delay (21.3 ms) sat between the
+    // microphone and the wire on every over.
+    //
+    // THE LENGTH STAYS 2048, because the length is the selectivity. Measured
+    // on emitted IQ (hl2_tx_latency_test, and a WDSP-level probe), 1024 taps
+    // would save 512 samples (10.7 ms) and costs the DIGU/DIGL low edge: the
+    // opposite-sideband image of a 150 Hz tone on {150, 3000} fell from 174.6
+    // to 135.6 dB. Both are far beyond the 16-bit EP2 wire, but the second is
+    // below the 140 dB floor hl2_txdsp_test holds the low edge to, and nothing
+    // about latency is worth moving the one figure the TXA migration was for.
+    static constexpr int kTxFilterTaps = 2048;
+
+    // MINIMUM PHASE IN THE VOICE MODES ONLY -- USB and LSB. Same taps, same
+    // magnitude response (the cepstral conversion keeps |H|), the energy
+    // front-loaded: the impulse peak moves 920 samples (19.2 ms) earlier on
+    // {300, 2700}, and the first syllable reaches the wire that much sooner.
+    //
+    // NOT in the digital modes, CW, AM, DSB or FM, and that is the
+    // conservative half of the choice. A minimum-phase filter's delay is not
+    // flat across the passband: measured through this channel on {300, 2700}
+    // it runs from 2567 samples mid-band to 2796 at 400 / 2600 Hz, a 4.78 ms
+    // bathtub, where the linear-phase filter's spread is 0.0 samples. A voice
+    // does not care; a wideband data modem might, and the operators of DIGU/DIGL are
+    // the ones whose timing is set by software outside this application. CW
+    // follows the receive-side maintainer ruling on #5498 (linear phase, for
+    // the keying edge). Receive runs minimum phase in every non-CW mode
+    // (Hl2RxDsp::rxMinimumPhaseFor); transmit is deliberately narrower.
+    [[nodiscard]] static constexpr bool txMinimumPhaseFor(WdspChannel::Mode mode) noexcept
+    {
+        return mode == WdspChannel::Mode::Usb || mode == WdspChannel::Mode::Lsb;
+    }
 #endif
 
     // Blocks the modulator could not place on the wire, since configure().

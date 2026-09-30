@@ -238,6 +238,19 @@ void SetRXAAGCHangThreshold(int channel, int hangThreshold);
 void SetRXAFMDeviation(int channel, double deviationHz);
 void SetTXAMode(int channel, int mode);
 void SetTXABandpassFreqs(int channel, double lowHz, double highHz);
+// Transmit filter length and minimum-phase mode -- the TXA counterparts of
+// RXASetNC / RXASetMP, and composites the same way (TXA.c). TXASetNC reaches
+// the three bandpasses (bp0, and bp1/bp2 behind the compressor and CESSB),
+// the FM pre-emphasis, the FM modulator's filter and the CFIR; like RXASetNC it
+// stops and restores the channel around the re-plan. `nc` must be a power of
+// two and >= the channel's DSP size (firmin.h). TXASetMP reaches the same
+// cores except the CFIR and does not stop the channel.
+//
+// Until these were declared, nothing in this tree could reach them: every TX
+// channel ran create_txa's own max(2048, dsp_size) linear-phase bandpass
+// whatever WdspChannel::Config::filterTaps / minimumPhase said (#6052).
+void TXASetNC(int channel, int nc);
+void TXASetMP(int channel, int mp);
 // RXA meter readouts. RXA_S_PK / RXA_S_AV are the real signal-strength
 // meters. RXA_ADC_PK / RXA_ADC_AV measure the POST-DDC slice, which is a
 // different question from the HL2's own pre-DDC full-spectrum clip
