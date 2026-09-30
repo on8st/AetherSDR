@@ -661,6 +661,14 @@ public:
     [[nodiscard]] std::uint64_t txUnderflowPackets() const noexcept { return m_txUnderflowPackets; }
     [[nodiscard]] std::uint64_t txUnderflowSamples() const noexcept { return m_txUnderflowSamples; }
     [[nodiscard]] std::uint64_t txOverflowSamples() const noexcept { return m_txOverflowSamples; }
+    // Empty-queue keyed silence at the head of the most recent over that
+    // carried queued IQ, in EP2 samples: txUnderflowSamples from MOX-on to the
+    // first queued sample. Logged at that moment under lcHl2Tx. Same THREAD
+    // CONTRACT as the three above.
+    [[nodiscard]] std::uint64_t lastKeyDownUnderflowSamples() const noexcept
+    {
+        return m_lastKeyDownUnderflowSamples;
+    }
 
     // A baseband test tone, offsetHz from the TX carrier, amplitude 0..1.
     // amplitude <= 0 disables it. Takes precedence over queued IQ.
@@ -1024,6 +1032,20 @@ private:
             / static_cast<std::uint64_t>(kTxSamplesPerPacket);
     std::uint64_t m_txUnderflowRunQuietPackets = 0;
     void reportTxUnderflowRun();
+    // ── The key-down edge, measured (#6052) ──────────────────────────────
+    //
+    // Armed on MOX's rising edge with the underflow total at that moment, and
+    // reported ONCE, on the first keyed packet that carries queued IQ: the
+    // difference is the keyed silence THIS QUEUE put at the head of the over
+    // (whole empty packets plus the short tail of the first one). Everything
+    // else in the leading silence the wire shows was delivered to the queue
+    // as zeros by the chain upstream of it -- and the voice processor's share
+    // of that is logged in the same line. CW and the test tone synthesise
+    // their own blocks and never reach the queued arm, so they log nothing.
+    bool m_keyDownReportPending = false;
+    std::uint64_t m_keyDownUnderflowBase = 0;
+    std::uint64_t m_lastKeyDownUnderflowSamples = 0;
+    void reportKeyDown();
     double m_toneHz = 0.0;
     double m_toneAmp = 0.0;
     double m_tonePhase = 0.0;   // radians, carried across packets
