@@ -442,6 +442,12 @@ Hl2Backend::Hl2Backend(QObject* parent) : IRadioBackend(parent)
         applyRxAudioMute(false);
     });
 
+    m_voxBackstop = new QTimer(this);
+    m_voxBackstop->setSingleShot(true);
+    connect(m_voxBackstop, &QTimer::timeout, this, [this] {
+        releaseVoxHold("no mic audio for longer than the hang");
+    });
+
     m_cwHangTimer = new QTimer(this);
     m_cwHangTimer->setSingleShot(true);
     connect(m_cwHangTimer, &QTimer::timeout, this, [this] {
@@ -1954,6 +1960,8 @@ RadioCapabilities Hl2Backend::capabilities() const
     // setTune() is the built-in test tone at ZERO offset — a single carrier
     // exactly on the TX NCO. Nothing here can produce a second tone.
     c.twoToneGenerator = std::nullopt;
+    // setVox() implements the hang: Hl2VoxDetector counts it in mic samples.
+    c.hasVoxDelay = true;
     c.manufacturer = QStringLiteral("Hermes-Lite");
     c.model = QStringLiteral("Hermes-Lite 2");
     // NO REPEATER DUPLEX AND NO TONE ENCODE, because this radio cannot key FM
@@ -3417,6 +3425,7 @@ void Hl2Backend::invalidateTxDspConfiguration()
 
 void Hl2Backend::disconnectRadio()
 {
+    releaseVoxHold("disconnect");
     retirePcmStreams();
     invalidateTxDspConfiguration();
     // Invalidate any DSP build still in flight. Without this, a disconnect
@@ -5793,6 +5802,77 @@ void Hl2Backend::deliverTxMonitorAudio(const std::vector<float>& postAlcMono)
     // (m_rxAudioMuted), so this is the only thing on that path while keyed and
     // nothing is summed with it.
     publishLegacyAudio(floatBytes(stereo));
+}
+
+void Hl2Backend::setVox(bool on, int level, int delayRaw)
+{
+    m_vox.configure(on, level, delayRaw);
+    if (!on) {
+        releaseVoxHold("VOX switched off");
+    }
+    qCInfo(lcHl2) << "HL2: VOX" << (on ? "on" : "off")
+                  << "threshold" << hl2::Hl2VoxDetector::thresholdDbfs(m_vox.levelPercent())
+                  << "dBFS hang" << m_vox.hangMs() << "ms";
+}
+
+bool Hl2Backend::voxMayKey() const
+{
+    // Every term is a refusal the engine would also make, asked here first so
+    // a gated VOX stays quiet instead of raising a refused press per syllable:
+    //   m_connected   -- no radio, nothing to key
+    //   m_txAllowed   -- the automation bridge without ALLOW_TX (setKeying()
+    //                    refuses the same condition below this)
+    //   !m_tuning     -- TUNE owns the carrier; VOX must not stack on it
+    //   !txModeIsCw() -- the mic is not the transmit source in CW
+    return m_connected && m_txAllowed && !m_tuning && !txModeIsCw();
+}
+
+void Hl2Backend::releaseVoxHold(const char* why)
+{
+    if (m_voxBackstop) {
+        m_voxBackstop->stop();
+    }
+    if (m_vox.drop() == hl2::Hl2VoxDetector::Edge::Release) {
+        qCInfo(lcHl2) << "HL2: VOX releases --" << why;
+        emit voxKeyingRequested(false);
+    }
+}
+
+void Hl2Backend::observeTxMicAudio(const QByteArray& int16Stereo, int sampleRateHz)
+{
+    if (!m_vox.enabled() && !m_vox.holding()) {
+        return;
+    }
+    // The level Hl2TxDsp::micPeak() reports: the same stereo-to-mono fold as
+    // submitTxAudio(), times this radio's mic gain, before the ALC.
+    const auto* pcm = reinterpret_cast<const qint16*>(int16Stereo.constData());
+    const int frames = static_cast<int>(int16Stereo.size() / static_cast<qsizetype>(sizeof(qint16))) / 2;
+    float peak = 0.0f;
+    for (int n = 0; n < frames; ++n) {
+        const float l = static_cast<float>(pcm[2 * n]) / 32768.0f;
+        const float r = static_cast<float>(pcm[2 * n + 1]) / 32768.0f;
+        peak = std::max(peak, std::fabs(0.5f * (l + r)));
+    }
+    const double level = static_cast<double>(peak) * micSliderToLinear(m_micLevel);
+    const auto edge = m_vox.feed(level, frames, sampleRateHz, voxMayKey());
+    if (edge == hl2::Hl2VoxDetector::Edge::Release) {
+        // The detector has already let go (hang ran out, or VOX may no longer
+        // key); stop the backstop and tell the engine, once.
+        if (m_voxBackstop) {
+            m_voxBackstop->stop();
+        }
+        qCInfo(lcHl2) << "HL2: VOX releases";
+        emit voxKeyingRequested(false);
+        return;
+    }
+    if (m_vox.holding() && m_voxBackstop) {
+        m_voxBackstop->start(m_vox.hangMs() + kVoxBackstopSlackMs);
+    }
+    if (edge == hl2::Hl2VoxDetector::Edge::Key) {
+        qCInfo(lcHl2) << "HL2: VOX asks to key at" << 20.0 * std::log10(std::max(level, 1e-7))
+                      << "dBFS";
+        emit voxKeyingRequested(true);
+    }
 }
 
 void Hl2Backend::setTune(bool on, int tunePowerPercent, const AetherSDR::TxCoordinator::Operation& operation, const AetherSDR::TxCoordinator::Completion& completion)
@@ -8983,6 +9063,10 @@ void Hl2Backend::pushInitialState()
     {
         TransmitDelta delta;
         delta.sbMonitor = m_operatorMonitor.enabled();
+        // VOX too, and here it is a safety property rather than a nicety: a
+        // VOX button left lit by another radio must not read as armed on one
+        // whose detector is off, nor be armed behind the operator's back.
+        delta.voxEnable = m_vox.enabled();
         emit transmitChanged(delta);
     }
 }

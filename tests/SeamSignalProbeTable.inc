@@ -28,6 +28,7 @@ AETHER_SEAM_PROBE(frontEndOverloadChanged);
 AETHER_SEAM_PROBE(autoRfGainArmSettled);
 AETHER_SEAM_PROBE(transmitChanged);
 AETHER_SEAM_PROBE(keyingStateConfirmed);
+AETHER_SEAM_PROBE(voxKeyingRequested);
 AETHER_SEAM_PROBE(amplifierChanged);
 AETHER_SEAM_PROBE(tunerChanged);
 AETHER_SEAM_PROBE(radioChanged);

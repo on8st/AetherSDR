@@ -23,6 +23,7 @@
 #include "core/backends/hl2/Hl2TelemetrySource.h"   // the shared attribution rule
 #include "core/backends/hl2/Hl2RateCommit.h"
 #include "core/backends/hl2/Hl2TxMonitor.h"
+#include "core/backends/hl2/Hl2Vox.h"
 #include "core/backends/hl2/Hl2Receivers.h"
 #include "core/backends/hl2/MetisProtocol.h"   // Hl2Telemetry
 
@@ -168,6 +169,10 @@ public:
     // The operator's MON switch and level: the post-ALC transmit audio mixed
     // into this computer's receive output while keyed. See Hl2TxMonitor.h.
     void setTxMonitor(bool on, int level) override;
+    // Host VOX: the enable, the sensitivity and TransmitModel's raw 0..100
+    // delay (x 20 ms). Detection only -- see Hl2Vox.h and voxKeyingRequested.
+    void setVox(bool on, int level, int delayRaw) override;
+    void observeTxMicAudio(const QByteArray& int16Stereo, int sampleRateHz) override;
     void setTxFrequency(double hz);
     void setTxDriveLevel(int level);
     // Baseband TX test tone, offsetHz from the carrier, amplitude 0..1.
@@ -859,6 +864,12 @@ private:
     // Deliver one post-ALC block to the operator's MON (Hl2TxMonitor), on this
     // thread, judged by the state at delivery.
     void deliverTxMonitorAudio(const std::vector<float>& postAlcMono);
+    // Whether VOX may ask to key AT ALL right now. Not the TX gate -- that is
+    // RadioModel's and setKeying()'s -- but the reasons this backend already
+    // knows it would refuse, so it does not ask on every syllable.
+    [[nodiscard]] bool voxMayKey() const;
+    // End any VOX hold now and tell the engine, if one was running.
+    void releaseVoxHold(const char* why);
     [[nodiscard]] Receiver* rx(int ddc);
     [[nodiscard]] const Receiver* rx(int ddc) const;
     // Resolve a seam slice id / pan id to a DDC index, or -1. Callers must
@@ -1335,6 +1346,13 @@ private:
     // diagnostic receive-during-TX gate, and it silences this one while it is
     // on so a measurement's capture carries only the demodulated signal.
     hl2::Hl2TxMonitor m_operatorMonitor;
+    hl2::Hl2VoxDetector m_vox;
+    // THE BACKSTOP FOR AUDIO THAT STOPS. The detector's hang is counted in mic
+    // samples, so a mic that goes away mid-hold would never run it out. This
+    // single-shot is restarted by every mic block while holding and releases
+    // the hold if none arrives for the hang plus kVoxBackstopSlackMs.
+    QTimer* m_voxBackstop = nullptr;
+    static constexpr int kVoxBackstopSlackMs = 250;
     // ONE flag for the receive-audio hold, read by mixReceiverAudio() and
     // mirrored to every Hl2RxDsp by applyRxAudioMute(). It is NOT a mirror of
     // (m_keyed && !m_txMonitor) any more: on the key-UP edge it stays true for

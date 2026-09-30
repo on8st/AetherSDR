@@ -1670,6 +1670,17 @@ void RadioModel::wireBackendReceiverState()
         return;
     }
     const quint64 generation = m_backendReceiverGeneration;
+    // HOST VOX: a backend's request, turned into an ordinary PTT press by
+    // onBackendVoxKeying(). Wired HERE, which both setupBackend() and the
+    // socket-free setBackendForTest() run, so the tests exercise the same
+    // connection production uses. Generation-guarded: a request queued by a
+    // backend that has since been replaced cannot key its successor.
+    connect(m_backend.get(), &IRadioBackend::voxKeyingRequested, this,
+            [this, generation](bool key) {
+                if (generation == m_backendReceiverGeneration) {
+                    onBackendVoxKeying(key);
+                }
+            });
     // aetherd RFC 2.3: the first converted touchpoint. The backend decodes the
     // universal pan center/bandwidth from Flex status and emits this normalized
     // signal; RadioModel drives the addressed PanadapterModel. (Template for the
@@ -1977,6 +1988,7 @@ void RadioModel::wireBackendReceiverState()
 
 void RadioModel::teardownBackend()
 {
+    retireVoxController();
     resetTxOperations();
     ++m_backendReceiverGeneration;
     if (m_backend) {
@@ -9673,6 +9685,71 @@ void RadioModel::submitTxAudio(const QByteArray& int16Stereo, int sampleRateHz,
     const TxCoordinator::Dispatch dispatch = context.beginDispatch(txMonotonicMs());
     if (dispatch && m_backend) {
         m_backend->submitTxAudio(int16Stereo, sampleRateHz, source, context);
+    }
+}
+
+void RadioModel::observeTxMicAudio(const QByteArray& int16Stereo, int sampleRateHz)
+{
+    if (m_backend && QThread::currentThread() == thread()) {
+        m_backend->observeTxMicAudio(int16Stereo, sampleRateHz);
+    }
+}
+
+// HOST VOX KEYS THROUGH THE SAME DOOR AS A PTT PRESS, and through no other.
+//
+// The backend only detects; this is where the request becomes intent, and it
+// becomes exactly the intent a footswitch or the PTT-hold key produces:
+// TxController::capture(Mox).start(), i.e. requestProducerPttOn() -- the TX
+// coordinator's admission, TransmitModel's PTT preflight (every inhibit, the
+// receive-only mode and backend refusals, interlocks), and the backend's own
+// setKeying() gate below the seam. Nothing here bypasses or pre-approves any
+// of them; a refused press is simply refused and the radio stays unkeyed.
+//
+// Two refusals are this site's own, both conservative:
+//   * the operator's VOX switch in TransmitModel must be ON. The backend holds
+//     its own copy; this is the second key on the lock, so a backend that
+//     misbehaves cannot key with VOX off in the model the operator sees;
+//   * VOX never STARTS while someone else is already transmitting. It does not
+//     stack a hold onto an operator's MOX, a TUNE, CW or a digital-mode over,
+//     so releasing one of those is never stretched by a VOX hang.
+// A release always goes through: it can only end VOX's own contribution.
+void RadioModel::onBackendVoxKeying(bool key)
+{
+    if (QThread::currentThread() != thread()) {
+        return;
+    }
+    if (!key) {
+        if (m_voxController) {
+            m_voxController->current(TxController::Activity::Mox).stop();
+        }
+        return;
+    }
+    if (!m_transmitModel.voxEnable()) {
+        qCInfo(lcProtocol) << "VOX key request ignored: VOX is off in the transmit model";
+        return;
+    }
+    // IDEMPOTENT INSIDE A HOLD: a repeated request is not a second press, so
+    // it neither re-dispatches the key nor renews anything. The backend asks
+    // on rising edges only; this makes that a property of the model too.
+    if (m_voxController && m_voxController->current(TxController::Activity::Mox).active()) {
+        return;
+    }
+    if (m_transmitModel.isTransmitting()) {
+        return;
+    }
+    if (!m_voxController || !m_voxController->valid()) {
+        m_voxController = std::make_shared<TxController>(this, TransmitModel::PttSource::Mox);
+    }
+    if (!m_voxController->capture(TxController::Activity::Mox).start()) {
+        qCInfo(lcProtocol) << "VOX key request refused by the transmit gate";
+    }
+}
+
+void RadioModel::retireVoxController()
+{
+    if (m_voxController) {
+        const std::shared_ptr<TxController> controller = std::exchange(m_voxController, {});
+        controller->invalidate();
     }
 }
 

@@ -735,6 +735,27 @@ public:
         Q_UNUSED(on); Q_UNUSED(level); Q_UNUSED(delayMs);
     }
 
+    // THE MICROPHONE, OBSERVED -- for a backend that runs VOX on the host.
+    //
+    // Processed mic audio (AudioEngine's chain, int16 interleaved stereo at
+    // sampleRateHz), delivered whether or not the transmitter is keyed, because
+    // VOX has to hear the operator start talking BEFORE anything is keyed.
+    //
+    // RECEIVE-ONLY BY CONTRACT. It carries no TX context and must never reach a
+    // modulator: submitTxAudio() is the only transmit audio path and stays
+    // fenced by its context. A backend that uses this may do one thing with
+    // what it hears -- emit voxKeyingRequested() -- and the engine decides.
+    //
+    // `delayMs` above is TransmitModel's raw vox_delay (0..100, the model's
+    // "ms = value x 20"), passed under the Flex wire name; a backend converts.
+    //
+    // Default no-op: a Flex and an Icom run VOX in the radio.
+    virtual void observeTxMicAudio(const QByteArray& int16Stereo, int sampleRateHz)
+    {
+        Q_UNUSED(int16Stereo);
+        Q_UNUSED(sampleRateHz);
+    }
+
     // The ANTENNA TUNER, and NOT setTune().
     //
     // These are two different things that both say "tune", and conflating them
@@ -1188,6 +1209,15 @@ signals:
     // answer and therefore produce no delta. Backends without a separate
     // command/readback plane need not emit it.
     void keyingStateConfirmed(bool keyed);
+
+    // HOST VOX ASKS; THE ENGINE DECIDES. A backend that detects voice on the
+    // host (see observeTxMicAudio) emits true when the operator starts talking
+    // and false when its hang runs out. It is a REQUEST, never keying:
+    // RadioModel turns it into an ordinary PTT press through TxController, so
+    // the TX coordinator, every PTT preflight (inhibits, receive-only modes,
+    // interlocks) and the backend's own setKeying() gate all apply exactly as
+    // they do to a MOX press, and a refusal leaves the radio unkeyed.
+    void voxKeyingRequested(bool key);
 
     // Normalized power-amplifier status delta (aetherd 2.4 — AmpModel decode
     // split, #4094). Typed + present-only; the backend translates the SmartSDR

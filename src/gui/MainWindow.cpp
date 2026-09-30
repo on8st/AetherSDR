@@ -1761,6 +1761,18 @@ MainWindow::MainWindow(QWidget* parent)
         m_radioModel.submitTxAudio(pcm, AudioEngine::DEFAULT_SAMPLE_RATE,
                                    source, context);
     });
+    // Host VOX listens on the unguarded tap, because it has to hear the
+    // operator BEFORE anything is keyed and txTransportPcmReady only carries
+    // admitted transmit audio. Microphone only: VOX answers a voice, not a
+    // modem or a generator. Receive-only by contract -- the backend may only
+    // ASK to key (IRadioBackend::voxKeyingRequested), and the ask goes through
+    // the same TX gate as a PTT press. A backend without host VOX ignores it.
+    connect(m_audio, &AudioEngine::txFinalMonitorPcmReady,
+            this, [this](const QByteArray& pcm, TxAudioSource source) {
+        if (source == TxAudioSource::Microphone) {
+            m_radioModel.observeTxMicAudio(pcm, AudioEngine::DEFAULT_SAMPLE_RATE);
+        }
+    });
     wireModemAudioCompletion();
     wireTxAudioAuthority();
     connect(&m_radioModel.transmitModel(), &TransmitModel::moxChanged,

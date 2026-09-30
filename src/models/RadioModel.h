@@ -1571,6 +1571,10 @@ public:
     void submitTxAudio(const QByteArray& int16Stereo, int sampleRateHz,
                        TxAudioSource source,
                        const TxCoordinator::Context& context);
+    // Processed mic audio, keyed or not, for a backend that runs VOX on the
+    // host. RECEIVE-ONLY: no context, never modulated -- see
+    // IRadioBackend::observeTxMicAudio. A backend with no host VOX ignores it.
+    void observeTxMicAudio(const QByteArray& int16Stereo, int sampleRateHz);
     // Ordered completion barrier for a finite modem stream. The token lets the
     // producer reject a stale completion from an aborted transmission.
     void finishTxAudio(quint64 token, const TxCoordinator::Context& context);
@@ -2097,6 +2101,13 @@ private:
     // actors on the same coordinator and cannot obtain this desktop actor.
     TxCoordinator m_txCoordinator;
     std::shared_ptr<TxController> m_localTxController;
+    // HOST VOX's own producer: a PTT press like any other, so it passes the
+    // coordinator and every preflight a MOX press does. Separate from the local
+    // controller so a VOX release can only ever end VOX's own hold, never an
+    // operator's MOX. See onBackendVoxKeying().
+    std::shared_ptr<TxController> m_voxController;
+    void onBackendVoxKeying(bool key);
+    void retireVoxController();
     TxCoordinator::Actor m_desktopTxActor;
     TxCoordinator::Operation m_txOperation;
     std::unique_ptr<TxGrantManager> m_independentTxGrants;
