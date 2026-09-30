@@ -94,27 +94,43 @@ Hl2TxDsp::~Hl2TxDsp() = default;
 
 #if AETHER_HL2_TX_TXA
 
-bool Hl2TxDsp::buildModulator(std::string* error)
+namespace {
+bool isLowerSidebandMode(WdspChannel::Mode mode) noexcept
 {
-    m_channel.reset();
-    m_modulatorRunning = false;
-    m_txBlocks = 0;
-    m_txFaultBlocks = 0;
+    switch (mode) {
+    case WdspChannel::Mode::Lsb:
+    case WdspChannel::Mode::Cwl:
+    case WdspChannel::Mode::Digl:
+        return true;
+    default:
+        return false;
+    }
+}
+}  // namespace
 
+WdspChannel::Config Hl2TxDsp::modulatorChannelConfig(const Config& config)
+{
     // The LIVE geometry, and it is arithmetic rather than a table: WDSP's
     // three-rate channel model wants the DSP block expressed in DSP-rate
     // samples, so one input block of Config::dspBlockSize audio samples is
-    // m_upsample times that many at the DSP rate and the channel consumes
+    // `upsample` times that many at the DSP rate and the channel consumes
     // exactly one input block per pass. That is the mirror of what
-    // Hl2RxDsp::configure does for receive.
+    // Hl2RxDsp::configure does for receive. configure() has already refused a
+    // zero or non-integral rate ratio before buildModulator() gets here.
+    const int upsample = config.inputSampleRateHz > 0
+        ? config.outputSampleRateHz / config.inputSampleRateHz : 0;
     WdspChannel::Config c;
     c.direction = WdspChannel::Direction::Transmit;
-    c.inputSampleRate = m_config.inputSampleRateHz;
-    c.dspSampleRate = m_config.outputSampleRateHz;
-    c.outputSampleRate = m_config.outputSampleRateHz;
-    c.inputBlockSize = static_cast<std::size_t>(m_config.dspBlockSize);
-    c.dspBlockSize = c.inputBlockSize * static_cast<std::size_t>(m_upsample);
-    c.mode = m_config.mode;
+    c.inputSampleRate = config.inputSampleRateHz;
+    c.dspSampleRate = config.outputSampleRateHz;
+    c.outputSampleRate = config.outputSampleRateHz;
+    c.inputBlockSize = static_cast<std::size_t>(config.dspBlockSize);
+    c.dspBlockSize = c.inputBlockSize * static_cast<std::size_t>(upsample);
+    c.mode = config.mode;
+    // TRANSMIT ONLY: no delay before the up-ramp. See kTxMuteDelayUpSec. The
+    // 25 ms slew after it is WdspChannel::Config's and is kept -- that half is
+    // the de-click. Receive channels are opened elsewhere and are untouched.
+    c.muteDelayUpSec = kTxMuteDelayUpSec;
     // blockForOutput = false is WdspChannel::Config's default and is the
     // setting every figure quoted above was measured at. Do not flip it to
     // silence an underrun: with it set, fexchange2's `*error += -2` branch is
@@ -124,12 +140,24 @@ bool Hl2TxDsp::buildModulator(std::string* error)
     c.blockForOutput = false;
 
     // Signed, from the mode. See applyModeAndFilter().
-    const double lo = std::min(std::abs(m_config.filterLowHz),
-                               std::abs(m_config.filterHighHz));
-    const double hi = std::max(std::abs(m_config.filterLowHz),
-                               std::abs(m_config.filterHighHz));
-    c.filterLowHz = isLowerSideband() ? -hi : lo;
-    c.filterHighHz = isLowerSideband() ? -lo : hi;
+    const double lo = std::min(std::abs(config.filterLowHz),
+                               std::abs(config.filterHighHz));
+    const double hi = std::max(std::abs(config.filterLowHz),
+                               std::abs(config.filterHighHz));
+    const bool lower = isLowerSidebandMode(config.mode);
+    c.filterLowHz = lower ? -hi : lo;
+    c.filterHighHz = lower ? -lo : hi;
+    return c;
+}
+
+bool Hl2TxDsp::buildModulator(std::string* error)
+{
+    m_channel.reset();
+    m_modulatorRunning = false;
+    m_txBlocks = 0;
+    m_txFaultBlocks = 0;
+
+    const WdspChannel::Config c = modulatorChannelConfig(m_config);
 
     std::string err;
     m_channel = WdspChannel::create(c, &err);
