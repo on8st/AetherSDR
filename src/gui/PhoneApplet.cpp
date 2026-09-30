@@ -12,6 +12,9 @@
 #include <QFrame>
 #include <QPainter>
 #include "core/ThemeManager.h"
+#include "core/TxKeyingMarker.h"
+
+#include <QPointer>
 
 namespace AetherSDR {
 
@@ -164,6 +167,36 @@ void PhoneApplet::buildUI()
         m_voxBtn->setStyleSheet(kBtnBase + kGreenActive);
         connect(m_voxBtn, &QPushButton::toggled, this, [this](bool on) {
             if (!m_updatingFromModel && m_model) m_model->setVoxEnable(on);
+        });
+        // THE AUTOMATION BRIDGE MAY DISARM VOX, AND ONLY DISARM IT.
+        //
+        // Without this the button reached the bridge's TX guard through its
+        // NAME ("...transmit"), and a name-matched control has no scoped action,
+        // so `invoke setChecked false` was refused -- the safe direction, turned
+        // down. d167 D-vox (hl2-lab, 2026-09-30) is what that cost: VOX
+        // chattered 15 overs against an approval of 4 and the runner could not
+        // switch it off. Registered as a keying control, so everything the
+        // guard refused before it still refuses: arming (setChecked true,
+        // click, toggle, any pointer gesture) has no action here, and without
+        // bridge TX permission the invoke is still blocked outright. What is
+        // new is exactly one verb: setChecked false, with TX permission, which
+        // switches VOX off in the model whatever the button currently shows.
+        registerTxKeyingAction(m_voxBtn, [this](const std::shared_ptr<TxController>&,
+                                                const QString& action,
+                                                const QString& value) -> TxKeyingAction::Prepared {
+            const QString v = value.trimmed().toLower();
+            const bool disarm = action == QLatin1String("setChecked")
+                && (v == QLatin1String("false") || v == QLatin1String("0")
+                    || v == QLatin1String("off") || v == QLatin1String("no"));
+            if (!disarm) {
+                return {};
+            }
+            const QPointer<PhoneApplet> self(this);
+            return [self] {
+                if (self && self->m_model) {
+                    self->m_model->setVoxEnable(false);
+                }
+            };
         });
         row->addWidget(m_voxBtn);
         row->addSpacing(10);
