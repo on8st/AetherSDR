@@ -16,6 +16,7 @@
 #include "gui/FrontEndOverloadIndicator.h"
 
 #include <QApplication>
+#include <QLabel>
 
 #include <cstdio>
 
@@ -67,7 +68,7 @@ int main(int argc, char** argv)
           "while the state underneath is the recovered one");
     check(AetherSDR::gui::shortText(ind.state())
               .contains(QStringLiteral("Clean")),
-          "and the line reads clean, not the latched warning");
+          "and the word reads clean, not the latched warning");
 
     // A marginal window arriving during the latch does not clear it either.
     ind.setState(at(FrontEndLevel::Marginal));
@@ -86,6 +87,46 @@ int main(int argc, char** argv)
     blank.setState(at(FrontEndLevel::Unobserved));
     check(blank.shownLamp() == LampColour::Dark,
           "losing the reading goes dark rather than staying green");
+
+    // NO VISIBLE DETAIL (ON8ST, 2026-09-30: "the indicator pill is enough").
+    // The widget's one visible label shows the state word only; the running
+    // gain and the operator's setting are in the tooltip AND the accessible
+    // description, on the widget and on the label, because a tooltip alone is
+    // never announced.
+    {
+        FrontEndOverloadIndicator w;
+        FrontEndOverload s;
+        s.level = FrontEndLevel::AtFloor;
+        s.autoArmed = true;
+        s.autoOffsetDb = 26;
+        s.gainScaleKnown = true;
+        s.settingDb = 48;
+        s.effectiveDb = 22;
+        s.minGainDb = -12;
+        w.setState(s);
+        const auto labels = w.findChildren<QLabel*>();
+        check(labels.size() == 1,
+              "one label and no second detail label beside it");
+        const QLabel* word = w.findChild<QLabel*>(QStringLiteral("frontEndStateWord"));
+        check(word && word->text() == QStringLiteral("At limit"),
+              "the visible text is \"At limit\" alone -- no \"+22 dB (set +48 dB)\"");
+        const auto carries = [](const QString& t) {
+            return t.contains(QStringLiteral("+22 dB"))
+                && t.contains(QStringLiteral("+48 dB"));
+        };
+        check(carries(w.toolTip()), "the tooltip carries both levels");
+        check(carries(w.accessibleDescription()),
+              "and so does the accessible description, for a screen reader");
+        check(word && carries(word->toolTip()) && carries(word->accessibleDescription()),
+              "on the word itself too, so hovering or reading it finds them");
+
+        s.level = FrontEndLevel::Clean;
+        w.setState(s);
+        check(word && word->text() == QStringLiteral("Clean"),
+              "a clean window with gain held reads \"Clean\" alone");
+        check(carries(w.toolTip()) && carries(w.accessibleDescription()),
+              "with the held gain still in tooltip and description");
+    }
 
     if (g_failures == 0)
         std::printf("front_end_overload_indicator_test: all checks passed\n");

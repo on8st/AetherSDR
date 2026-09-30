@@ -33,7 +33,10 @@ FrontEndOverloadIndicator::FrontEndOverloadIndicator(QWidget* parent)
     row->setContentsMargins(0, 0, 0, 0);
     row->setSpacing(0);
     row->addSpacing(kLampDiameter + kLampGap);   // the lamp is painted, not a child
+    // The state word and nothing else (see shortText). The details live in the
+    // tooltip and the accessible description, set together in refresh().
     m_text = new QLabel(this);
+    m_text->setObjectName(QStringLiteral("frontEndStateWord"));
     row->addWidget(m_text);
     row->addStretch(1);
 
@@ -83,10 +86,17 @@ void FrontEndOverloadIndicator::setState(const AetherSDR::FrontEndOverload& stat
 void FrontEndOverloadIndicator::refresh()
 {
     m_text->setText(AetherSDR::gui::shortText(m_state));
+    // THE DETAILS, on both channels. The visible word is only the state, so the
+    // running gain, the operator's setting and the backend's reason are here and
+    // nowhere else -- as tooltip for the mouse AND as accessible description,
+    // because a tooltip is never announced (docs/a11y.md, theme-style-guide
+    // §4a). The label carries the same description and tooltip so hovering the
+    // word, not only the lamp, shows them.
     const QString spoken = AetherSDR::gui::accessibleText(m_state);
     setAccessibleDescription(spoken);
     m_text->setAccessibleDescription(spoken);
     setToolTip(spoken);
+    m_text->setToolTip(spoken);
     update();
 }
 

@@ -790,9 +790,9 @@ void SpectrumOverlayMenu::buildAntPanel()
     // THE VISIBILITY HALF OF RFC #5535, which the ruling made a condition of
     // shipping the loop above at all -- armed by default or not. Its own row
     // rather than squeezed
-    // into gainRow: the line has to fit "Clipping hard  -6 dB" without
-    // elliding, because a truncated warning is the failure this exists to
-    // prevent. Hidden with the checkbox -- a family that cannot observe its
+    // into gainRow: the word has to fit "Clipping hard" without elliding,
+    // because a truncated warning is the failure this exists to prevent. The
+    // gain figures are in its tooltip and accessible description, not on it. Hidden with the checkbox -- a family that cannot observe its
     // converter shows neither.
     m_frontEndIndicator = new FrontEndOverloadIndicator(this);
     m_frontEndIndicator->setObjectName(QStringLiteral("antennaFrontEndIndicator"));

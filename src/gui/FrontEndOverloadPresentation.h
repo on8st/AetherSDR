@@ -1,7 +1,7 @@
 #pragma once
 
-// HOW THE FRONT-END STATE IS SAID, in three registers: a lamp, a line of text,
-// and what a screen reader is told.
+// HOW THE FRONT-END STATE IS SAID, in three registers: a lamp, one state word,
+// and what a screen reader (and the tooltip) is told.
 //
 // SEPARATED FROM THE WIDGET SO IT CAN BE TESTED. Everything here is a pure
 // function of AetherSDR::FrontEndOverload -- no Qt widgets, no painting, no
@@ -56,32 +56,6 @@ enum class LampColour { Dark, Green, Amber, Red };
     return signedNumberText(db) + QStringLiteral(" dB");
 }
 
-// THE REGULATOR'S ACTION, as a short suffix, or empty when there is none to
-// report. The operator must be able to see that something moved their gain --
-// the second half of #5535's condition.
-//
-// WITH A GAIN SCALE IT IS SAID IN LEVELS ONLY: "+22 dB (set +48 dB)", where the
-// gain the radio is running comes first and the operator's own setting second.
-// No offset figure. A bare "−26 dB" beside "RF Gain: 22 dB" reads as a second
-// level that disagrees with the first; on 2026-09-30 the operator read it that
-// way and could not see that his own setting was +48, which the slider -- it
-// shows the running gain -- no longer showed anywhere.
-//
-// Without a gain scale the family has given nothing to say it in, and the
-// offset is all there is.
-[[nodiscard]] inline QString offsetText(const FrontEndOverload& s)
-{
-    if (!s.autoArmed || s.autoOffsetDb <= 0) {
-        return {};
-    }
-    if (s.gainScaleKnown) {
-        return QCoreApplication::translate("FrontEndOverload", "%1 (set %2)")
-            .arg(signedDbText(s.effectiveDb), signedDbText(s.settingDb));
-    }
-    return QCoreApplication::translate("FrontEndOverload", "−%1 dB")
-        .arg(s.autoOffsetDb);
-}
-
 // Whether the loop's limit is also the radio's. At the floor with native range
 // still below it, the fix is the operator's hand on RF Gain, not a filter, and
 // saying "attenuation ahead of the radio" there sends them the wrong way.
@@ -90,8 +64,17 @@ enum class LampColour { Dark, Green, Amber, Red };
     return s.gainScaleKnown && s.effectiveDb > s.minGainDb;
 }
 
-// The line beside the lamp. Deliberately short -- it sits next to the RF Gain
-// slider, not in a dialog.
+// The word beside the lamp, and ONLY the word: "Clean", "Clipping", "Clipping
+// hard", "At limit". Nothing trails it.
+//
+// The regulator's action -- the gain the radio is running and the operator's own
+// setting -- lives in accessibleText(), which the widget sets as both its
+// tooltip and its accessibleDescription, so it is one hover away for a mouse and
+// read on arrival by a screen reader. ON8ST, 2026-09-30, on the installed
+// integration build: "I still see text next to the clean or clipping indicator
+// .. that text should not be there, the indicator pill is enough." Two levels
+// beside a gain slider that already shows one read as a second, disagreeing
+// readout; the lamp and its word are the glance, the rest is on demand.
 [[nodiscard]] inline QString shortText(const FrontEndOverload& s)
 {
     const auto tr_ = [](const char* k) {
@@ -109,14 +92,15 @@ enum class LampColour { Dark, Green, Amber, Red };
         head = s.gainScaleKnown ? tr_("At limit") : tr_("At floor");
         break;
     }
-    const QString off = offsetText(s);
-    return off.isEmpty() ? head : QStringLiteral("%1  %2").arg(head, off);
+    return head;
 }
 
-// WHAT A SCREEN READER IS TOLD, which is not the same string. The lamp carries
-// colour and the line is abbreviated for space; neither survives being read
-// aloud, so this spells out the state, the regulator's action and the backend's
-// own reason in one sentence. docs/a11y.md asks for exactly this rather than a
+// WHAT A SCREEN READER IS TOLD, AND WHAT THE TOOLTIP SAYS -- which is not the
+// visible word. The lamp carries colour and the word carries only the state;
+// neither survives being read aloud, so this spells out the state, the
+// regulator's action (in levels) and the backend's own reason in one sentence.
+// It is the ONLY place those details appear, so it is set as accessible
+// description as well as tooltip: a tooltip alone is never announced. docs/a11y.md asks for exactly this rather than a
 // terse label that happens to be technically present.
 [[nodiscard]] inline QString accessibleText(const FrontEndOverload& s)
 {

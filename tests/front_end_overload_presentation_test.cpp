@@ -44,23 +44,25 @@ int main(int argc, char** argv)
           "and at the floor is red too");
 
     // ── THE REGULATOR'S OWN ACTION, which is #5535's second condition ────
+    //
+    // It must be visible to the operator on demand -- but NOT as text beside
+    // the lamp (ON8ST, 2026-09-30: "the indicator pill is enough"). It lives in
+    // accessibleText(), which the widget sets as tooltip AND accessible
+    // description.
     {
         FrontEndOverload s;
+        s.level = FrontEndLevel::Clean;
         s.autoArmed = true;
         s.autoOffsetDb = 6;
-        check(offsetText(s).contains(QStringLiteral("6")),
-              "an armed loop holding 6 dB down SAYS SO -- without this, "
-              "\"my noise floor moved and I touched nothing\" comes back");
-        check(shortText(s).contains(QStringLiteral("6")),
-              "and the offset reaches the visible line, not just the tooltip");
-
-        s.autoOffsetDb = 0;
-        check(offsetText(s).isEmpty(),
-              "an armed loop holding nothing back reports no offset");
+        check(accessibleText(s).contains(QStringLiteral("6 dB below")),
+              "an armed loop holding 6 dB down SAYS SO in the tooltip and "
+              "description -- without this, \"my noise floor moved and I "
+              "touched nothing\" comes back");
+        check(shortText(s) == QStringLiteral("Clean"),
+              "and the visible word stays the bare state, with no offset");
 
         s.autoArmed = false;
-        s.autoOffsetDb = 6;
-        check(offsetText(s).isEmpty(),
+        check(!accessibleText(s).contains(QStringLiteral("Automatic gain")),
               "a disarmed loop reports no offset even with a stale number");
     }
 
@@ -122,11 +124,9 @@ int main(int argc, char** argv)
         s.reason = QStringLiteral("AT FLOOR and still clipping");
 
         const QString line = shortText(s);
-        check(line == QStringLiteral("At limit  +22 dB (set +48 dB)"),
-              "d168: the line reads \"At limit  +22 dB (set +48 dB)\" -- the "
-              "running gain and the operator's setting, both as levels");
-        check(!line.contains(QStringLiteral("26")),
-              "and carries no offset figure at all");
+        check(line == QStringLiteral("At limit"),
+              "the visible word is \"At limit\" and nothing else -- no "
+              "\"+22 dB (set +48 dB)\" beside the pill");
 
         const QString spoken = accessibleText(s);
         check(spoken.contains(QStringLiteral("+22 dB"))
@@ -161,27 +161,77 @@ int main(int argc, char** argv)
         s.effectiveDb = 22;
         s.minGainDb = -12;
         const QString line = shortText(s);
-        check(line == QStringLiteral("Clean  +22 dB (set +48 dB)"),
-              "ON8ST: \"the -26 indication next to 'clean' is plain confusing\" "
-              "-- a clean window with gain held reads in levels as well");
-        check(!line.contains(QStringLiteral("−")),
-              "no minus-sign offset on the visible line");
+        check(line == QStringLiteral("Clean"),
+              "ON8ST: \"that text should not be there, the indicator pill is "
+              "enough\" -- a clean window with gain held shows only \"Clean\"");
         const QString spoken = accessibleText(s);
         check(spoken.contains(QStringLiteral("+22 dB"))
                   && spoken.contains(QStringLiteral("+48 dB"))
                   && !spoken.contains(QStringLiteral("26")),
-              "spoken: running gain and setting, no offset");
-
-        s.autoOffsetDb = 0;
-        s.effectiveDb = 48;
-        check(shortText(s) == QStringLiteral("Clean"),
-              "nothing held: nothing to add to the line");
+              "tooltip/description: running gain and setting, in levels, no "
+              "offset");
 
         s.settingDb = 0;
         s.effectiveDb = -6;
         s.autoOffsetDb = 6;
-        check(shortText(s) == QStringLiteral("Clean  −6 dB (set 0 dB)"),
-              "a negative LEVEL carries its sign and unit, zero is plain 0");
+        check(shortText(s) == QStringLiteral("Clean"),
+              "a negative running gain adds nothing to the visible word either");
+        check(accessibleText(s).contains(QStringLiteral("−6 dB"))
+                  && accessibleText(s).contains(QStringLiteral("setting is 0 dB")),
+              "and in the description a negative LEVEL carries its sign and "
+              "unit, zero is plain 0");
+    }
+
+    // ── NO VISIBLE DETAIL, IN ANY STATE ──────────────────────────────────
+    //
+    // Every level, with the loop armed and holding and a reason attached: the
+    // visible word is exactly the state word, and every detail is in the
+    // description instead.
+    {
+        const struct { FrontEndLevel level; const char* word; } words[] = {
+            {FrontEndLevel::Unobserved, "No ADC reading"},
+            {FrontEndLevel::Clean,      "Clean"},
+            {FrontEndLevel::Marginal,   "Clipping"},
+            {FrontEndLevel::Hot,        "Clipping hard"},
+            {FrontEndLevel::AtFloor,    "At limit"},
+        };
+        bool wordsOnly = true;
+        bool detailsInDescription = true;
+        for (const auto& w : words) {
+            FrontEndOverload s;
+            s.level = w.level;
+            s.autoArmed = true;
+            s.autoOffsetDb = 26;
+            s.gainScaleKnown = true;
+            s.settingDb = 48;
+            s.effectiveDb = 22;
+            s.minGainDb = -12;
+            s.reason = QStringLiteral("backend reason");
+            if (shortText(s) != QString::fromUtf8(w.word)) {
+                std::printf("  shortText(%s) = \"%s\"\n", w.word,
+                            shortText(s).toUtf8().constData());
+                wordsOnly = false;
+            }
+            const QString d = accessibleText(s);
+            if (!d.contains(QStringLiteral("+22 dB"))
+                || !d.contains(QStringLiteral("+48 dB"))
+                || !d.contains(s.reason)) {
+                detailsInDescription = false;
+            }
+        }
+        check(wordsOnly,
+              "every state shows its word alone -- no gain, offset or advice "
+              "beside the pill");
+        check(detailsInDescription,
+              "and every state's description (= tooltip) carries both levels "
+              "and the backend's reason");
+
+        FrontEndOverload noScale;
+        noScale.level = FrontEndLevel::AtFloor;
+        noScale.autoArmed = true;
+        noScale.autoOffsetDb = 12;
+        check(shortText(noScale) == QStringLiteral("At floor"),
+              "a family with no gain scale: the word alone as well");
     }
 
     // ── WHAT IS WORTH INTERRUPTING A SCREEN READER FOR ───────────────────

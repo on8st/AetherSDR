@@ -2,8 +2,9 @@
 
 // THE VISIBLE HALF OF RFC #5535's CONDITION.
 //
-// A lamp and a line, sitting beside the RF Gain slider where the operator
-// already looks. It draws what FrontEndOverloadPresentation.h decides and holds
+// A lamp and one state word, sitting beside the RF Gain slider where the
+// operator already looks. The regulator's action is in the tooltip and the
+// accessible description, not on the line. It draws what FrontEndOverloadPresentation.h decides and holds
 // no rules of its own beyond the red latch, which needs a clock and therefore
 // cannot live in a pure header.
 //
@@ -50,7 +51,7 @@ private:
     // excursion is the warning that the next one will not be brief. The lamp
     // therefore stays red for a beat after the level drops back.
     //
-    // The TEXT is not latched, only the lamp: the operator reading the line
+    // The WORD is not latched, only the lamp: the operator reading it
     // should see what is true now, while the lamp says what just happened.
     QElapsedTimer m_redSince;
     QTimer m_latchTimer;
