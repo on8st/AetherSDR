@@ -23,8 +23,7 @@ namespace AetherSDR::hl2 {
 // WHEN it is heard is the gate below, and every term in it is a refusal:
 //   * MON off                         -> nothing
 //   * not keyed                        -> nothing (queued blocks that arrive
-//                                         after the unkey are dropped, so the
-//                                         monitor cannot outlive the over)
+//                                         after the unkey are dropped here)
 //   * the diagnostic TX-audio monitor  -> nothing: setTxAudioMonitor() exists
 //     is on                               so a measurement can demodulate our
 //                                         own signal, and mixing the MON copy
@@ -34,6 +33,15 @@ namespace AetherSDR::hl2 {
 //                                         the mic audio Hl2TxDsp may still be
 //                                         levelling during a CW over is not
 //                                         what is on the air
+//
+// WHAT THE GATE DOES NOT DO: it bounds what ENTERS the playout path, not what
+// leaves it. A block that passed is in AudioEngine's receive queue (capped at
+// AudioBufferMs, default 100 ms) and then in its 24 -> 48 kHz output resampler
+// (r8brain at a 2 % transition band: 1694 input frames, 70.6 ms), and nothing
+// on the unkey path empties either. Measured on an HL2 at the engine's output
+// tap: the tone started 103-169 ms after MOX-on and ended 153-178 ms after
+// MOX-off. So at the speaker MON is late by that much and outlasts the over by
+// that much. This class cannot shorten it; the delay is downstream of it.
 //
 // LEVEL is 0..100 -> 0.0..1.0 LINEAR, the same law Hl2Backend::
 // setSliceAudioGain() uses for the receive fader, so MON at 100 sits at the
