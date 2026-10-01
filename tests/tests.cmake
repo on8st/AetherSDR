@@ -5044,6 +5044,20 @@ target_link_libraries(noise_floor_auto_adjust_gate_test PRIVATE
 add_test(NAME noise_floor_auto_adjust_gate_test
          COMMAND noise_floor_auto_adjust_gate_test)
 
+# A control that worked is not reported as unsupported: PROC on a host-
+# modulating radio with no command plane raises no commandDropped (executed,
+# injected backend), a Flex's wire text is unchanged (executed, command sink on
+# an unopened RadioConnection), and the panadapter sites that send client-
+# rendered display values are gated on hasCommandPlane() (source text: they are
+# MainWindow lambdas). The manual Black Level slider is pinned as NOT gated.
+# No sockets, no radio.
+add_executable(no_false_unsupported_notice_test tests/no_false_unsupported_notice_test.cpp)
+target_include_directories(no_false_unsupported_notice_test PRIVATE src tests)
+target_compile_definitions(no_false_unsupported_notice_test PRIVATE
+    AETHER_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(no_false_unsupported_notice_test PRIVATE aethercore Qt6::Core)
+add_test(NAME no_false_unsupported_notice_test COMMAND no_false_unsupported_notice_test)
+
 add_executable(radiomodel_pan_range_null_test tests/radiomodel_pan_range_null_test.cpp)
 target_include_directories(radiomodel_pan_range_null_test PRIVATE src)
 target_link_libraries(radiomodel_pan_range_null_test PRIVATE aethercore Qt6::Core Qt6::Test)
@@ -6688,6 +6702,7 @@ set(AETHER_SETTINGS_CONSUMERS
     decoder_audio_routing_test
     cw_pcm_consumer_test
     noise_floor_auto_adjust_gate_test
+    no_false_unsupported_notice_test
     qso_recorder_rates_test
     qso_recorder_playback_lifecycle_test
     vfo_display_defaults_test

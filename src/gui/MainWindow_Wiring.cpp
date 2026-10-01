@@ -3375,8 +3375,13 @@ int MainWindow::cloneDisplaySettingsToAllPans(PanadapterApplet* source)
             // Re-sending them once per target would be the same write N times.
             dst->setWfColorGain(src->wfColorGain());
             dst->setWfBlackLevel(src->wfBlackLevel());
+            // The radio's copy, where there is a radio to hold one. Both
+            // values are rendered by the client and were applied just above;
+            // without a command plane the text reaches sendCmd's drop and
+            // tells the operator a clone that worked is unsupported.
             if (auto* pan = m_radioModel.panadapter(targetPanId);
-                pan && !pan->waterfallId().isEmpty()) {
+                pan && !pan->waterfallId().isEmpty()
+                && m_radioModel.hasCommandPlane()) {
                 m_radioModel.sendCommand(
                     QString("display panafall set %1 color_gain=%2")
                         .arg(pan->waterfallId())
@@ -3758,6 +3763,15 @@ void MainWindow::wirePanadapter(PanadapterApplet* applet)
         // plane is silently dropped, which is precisely what starts the ratchet.
         // A future fourth caller gets the protection without knowing to ask.
         if (!m_radioModel.backendCapabilities().radioOwnsDbmScale) {
+            return;
+        }
+        // The capability alone does not cover the Hermes-Lite 2, which keeps
+        // radioOwnsDbmScale at its permissive default for the auto-floor
+        // loop's sake (Hl2Backend::capabilities()) and has no command plane.
+        // The local scale has already moved by the time a range gets here, so
+        // the text would only reach sendCmd's drop and tell the operator that
+        // a scale drag which worked is unsupported.
+        if (!m_radioModel.hasCommandPlane()) {
             return;
         }
         if (!dbmRangeLooksPlausible(minDbm, maxDbm)) {
@@ -4699,8 +4713,12 @@ void MainWindow::wirePanadapter(PanadapterApplet* applet)
             return;
         }
         sw->setWfColorGain(v);
+        // The client renders the gain; the text is the radio's copy of it. A
+        // non-Flex pan carries a waterfall id too, so without the command-plane
+        // term this reached sendCmd's drop and called a slider that had just
+        // worked unsupported (as RadioModel::setWaterfallColorGain guards).
         auto* pan = m_radioModel.panadapter(applet->panId());
-        if (pan && !pan->waterfallId().isEmpty())
+        if (pan && !pan->waterfallId().isEmpty() && m_radioModel.hasCommandPlane())
             m_radioModel.sendCommand(
                 QString("display panafall set %1 color_gain=%2").arg(pan->waterfallId()).arg(v));
     });
@@ -4710,6 +4728,13 @@ void MainWindow::wirePanadapter(PanadapterApplet* applet)
             return;
         }
         sw->setWfBlackLevel(v);
+        // NOT gated on the command plane like the gain above, deliberately.
+        // With auto black off, SpectrumWidget::intensityToWaterfallLevel()
+        // puts the black point at 160 - level, in tile-intensity units. A
+        // backend whose waterfall rows are dBm sits below that at every slider
+        // position, so there this slider changes nothing, and the dropped-
+        // command notice is the only thing that says so. Gate this send once
+        // the manual black point works on dBm rows.
         auto* pan = m_radioModel.panadapter(applet->panId());
         if (pan && !pan->waterfallId().isEmpty())
             m_radioModel.sendCommand(
@@ -4963,8 +4988,10 @@ void MainWindow::wirePanadapter(PanadapterApplet* applet)
         // not reset the rate. (#4470)
         if (!m_adaptiveThrottleActive)
             m_radioModel.requestPanDisplayRates(applet->panId(), 25, 100);
+        // Gain and black level were reset on the widget above; the radio's
+        // copy goes only where there is a command plane to take it.
         auto* pan = m_radioModel.panadapter(applet->panId());
-        if (pan && !pan->waterfallId().isEmpty()) {
+        if (pan && !pan->waterfallId().isEmpty() && m_radioModel.hasCommandPlane()) {
             m_radioModel.sendCommand(
                 QString("display panafall set %1 color_gain=50").arg(pan->waterfallId()));
             m_radioModel.sendCommand(

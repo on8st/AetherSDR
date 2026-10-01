@@ -715,7 +715,7 @@ bool MainWindow::hostModulatesTxAudio() const
     // The same capability pair MainWindow_Session.cpp tests before opening the
     // mic: a backend host-modulates only if it says so AND may transmit.
     const RadioCapabilities caps = m_radioModel.backendCapabilities();
-    return caps.hostModulates && caps.canTransmit;
+    return hostRunsTxVoiceChain(caps.hostModulates, caps.canTransmit);
 }
 
 void MainWindow::applySpeechProcessorToClientComp(bool operatorIntent)

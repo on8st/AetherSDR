@@ -29,6 +29,24 @@
 
 namespace AetherSDR {
 
+// Does THIS HOST run the transmit voice chain for the connected radio?
+//
+// True for a backend that modulates here and may transmit: the microphone path
+// then runs through AudioEngine's TX chain, and PROC with its NOR/DX/DX+ level
+// is served by the ClientComp in that chain (MainWindow::
+// applySpeechProcessorToClientComp). False for a radio that modulates itself,
+// and for a receive-only host-DSP backend, where a compressor on audio that is
+// never transmitted serves nothing.
+//
+// One expression with two readers, so they cannot drift apart: MainWindow asks
+// it before binding the Flex-shaped voice controls to the shared objects, and
+// RadioModel asks it before reporting PROC's Flex wire text as a control the
+// radio does not support.
+constexpr bool hostRunsTxVoiceChain(bool hostModulates, bool canTransmit) noexcept
+{
+    return hostModulates && canTransmit;
+}
+
 // May a connection edge re-push the operator's PROC and graphic-EQ state onto
 // the shared objects?
 //

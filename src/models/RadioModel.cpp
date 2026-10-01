@@ -27,6 +27,7 @@
 #include "core/CwTrace.h"
 #include "core/DigitalVoiceModeRegistry.h"
 #include "core/DigitalVoiceWaveformProcess.h"
+#include "core/HostVoiceChainPolicy.h"
 #include "core/LogManager.h"
 #include "core/MemoryFieldValues.h"
 #include "core/backends/MemoryWireCodec.h"
@@ -2618,6 +2619,30 @@ RadioModel::RadioModel(QObject* parent)
         if (trimmed.startsWith(QStringLiteral("transmit set "), Qt::CaseInsensitive)) {
             const QMap<QString, QString> kvs =
                 CommandParser::parseKVs(trimmed.mid(QStringLiteral("transmit set ").size()));
+            // PROC and its NOR/DX/DX+ level, on a radio whose transmit audio
+            // this host modulates and which has no command plane: the control
+            // is served by the compressor in the host's TX chain (see
+            // hostRunsTxVoiceChain), driven from speechProcessorCommandIssued,
+            // which TransmitModel emits before this text. The text itself has
+            // nowhere to go; handing it to sendCmd() only reported a control
+            // that had just acted as unsupported, and spent the once-per-
+            // session notice that the controls which really do nothing rely
+            // on (#5263). Only a line carrying nothing but the two speech
+            // processor keys is withheld; every other verb still reaches the
+            // loud drop.
+            if (!hasCommandPlane() && m_backend && !kvs.isEmpty()
+                && std::all_of(kvs.keyBegin(), kvs.keyEnd(), [](const QString& key) {
+                       return key == QLatin1String("speech_processor_enable")
+                           || key == QLatin1String("speech_processor_level");
+                   })) {
+                const RadioCapabilities caps = m_backend->capabilities();
+                if (hostRunsTxVoiceChain(caps.hostModulates, caps.canTransmit)) {
+                    qCDebug(lcProtocol).noquote()
+                        << "RadioModel: no command plane; speech processor is"
+                        << "served by the host TX chain:" << trimmed;
+                    return;
+                }
+            }
             if (kvs.contains(QStringLiteral("filter_low"))
                 && kvs.contains(QStringLiteral("filter_high"))) {
                 const QString message = txFilterFrequencyLimitMessage(

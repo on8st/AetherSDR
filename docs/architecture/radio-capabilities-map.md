@@ -341,6 +341,15 @@ which are capability-gated: PROC and its NOR/DX/DX+ level drive `ClientComp`,
 and the Phone applet's TX low-cut/high-cut reaches a host modulator through
 `IRadioBackend::setTxFilter`.
 
+PROC still emits its Flex text (`transmit set speech_processor_enable=` /
+`speech_processor_level=`) beside the intent. On a radio with no command plane
+whose transmit audio this host modulates, `RadioModel` withholds that text from
+`sendCmd` rather than letting it raise the dropped-command notice for a control
+that acted. The test is `hostRunsTxVoiceChain()` in
+`core/HostVoiceChainPolicy.h`, the same expression `MainWindow` uses to bind
+PROC to `ClientComp`. A receive-only host-DSP backend fails it and keeps the
+notice.
+
 **NB is now the same correction applied to the receive side.** The button used
 to be gated on `hasRadioSideDsp` alongside NR and ANF, on the reasoning that
 `SliceModel::setNb` emits `slice set N nb=` and that wire text reaches nothing
@@ -553,7 +562,7 @@ behaviour at four gates plus two fan-out sites:
 | Site | What `false` does |
 |---|---|
 | `SpectrumWidget::applyNoiseFloorAutoAdjust` | Early return — the gate that actually stops the runaway, because `m_refLevel` is local and would keep marching without it |
-| `sendDbmRangeCommand` (`MainWindow_Wiring.cpp`) | Backstop: no dBm range leaves for the radio, whichever caller asked |
+| `sendDbmRangeCommand` (`MainWindow_Wiring.cpp`) | Backstop: no dBm range leaves for the radio, whichever caller asked. It also returns when there is no command plane, which is what covers the HL2 and its permissive default: the local scale moves, and no text is sent to be dropped |
 | `radioDbmHeadroomRecoveryRequested` handler | Return — the second ratchet source; gating `dbmRangeChangeRequested` alone did not stop it |
 | `dbmRangeChangeRequested`, auto-floor branch | Re-seeds the widget from the pan's real range instead of commanding one |
 | `dbmRangeDragFinished` | A hand drag still moves the LOCAL scale, but skips the handshake and the command |
