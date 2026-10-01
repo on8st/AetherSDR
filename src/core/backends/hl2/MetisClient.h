@@ -534,6 +534,11 @@ public:
     // periodic artefact on the air, and blocking would starve the radio's
     // watchdog. Overflow drops the oldest, because on transmit the freshest
     // audio is the one that matters.
+    //
+    // THE QUEUE IS PRIMED ONCE PER OVER (#6052): the first samples of an over
+    // are held, behind the keyed silence the over already opens with, until
+    // kTxPrimeTargetSamples are waiting. See that constant for what it defends
+    // and what it costs.
     void queueTxIq(std::span<const std::complex<float>> iq, const TxCoordinator::Context& context);
     // Discard pending transmit audio. Call on unkey: whatever is still queued
     // belongs to the transmission that just ended.
@@ -542,19 +547,20 @@ public:
 
     // ---- TX IQ FIFO fault accounting ----
     //
-    // The FIFO is bounded ABOVE at kTxQueueMax and not below, and both ends
+    // The FIFO is bounded ABOVE at kTxQueueMax. Below, it is PRIMED once per
+    // over (kTxPrimeTargetSamples, #6052) and not defended after that: a queue
+    // that spends its margin still runs dry. Both ends
     // silently alter what goes on the air: overflow drops the oldest samples
     // (a discontinuity), underflow substitutes transmit silence for samples
     // that never arrived (a step to zero mid-envelope). queueTxIq's own
     // documentation above says so, and until these counters existed NOTHING
     // said it had happened -- not a log line, not a reading, not a test.
     //
-    // THESE COUNT; THEY DO NOT REPAIR. The truncation is still exactly what it
-    // was, deliberately: giving the FIFO a floor (a pre-roll, a target depth,
-    // or a held/ramped last sample instead of a step to zero) changes what
-    // this client transmits, and that is a separate decision from being able
-    // to see the fault at all. Counting first is what makes that decision
-    // measurable rather than argued.
+    // THESE COUNT; THEY DO NOT REPAIR. A short queue is still padded with a
+    // step to zero, exactly as it was. Counting came first (#5881) so that
+    // giving the FIFO a floor would be measured rather than argued; the
+    // pre-roll half of that floor is kTxPrimeTargetSamples (#6052). A ramped
+    // edge instead of the step is NOT made: see the constant for why.
     //
     // The spectral cost is measured, not assumed: on EP2 captures of live
     // speech, windows containing no starvation give 78.6-78.8 dB
@@ -625,8 +631,10 @@ public:
     //   immediately, while the first block of transmit IQ cannot arrive until
     //   the audio chain has produced one -- Hl2TxDsp works in whole
     //   Config::dspBlockSize blocks at Config::inputSampleRateHz, and nothing
-    //   primes m_txIq before MOX. Every tick in between takes the empty-queue
-    //   arm and counts a WHOLE packet. So a clean over OPENS with a burst of
+    //   fills m_txIq before MOX. Every tick in between takes the empty-queue
+    //   arm and counts a WHOLE packet. (The prime, #6052, starts where this
+    //   ends: its hold is keyed silence with samples WAITING, and is counted
+    //   by txPrimeHoldPackets() instead, so this floor reads what it did.) So a clean over OPENS with a burst of
     //   whole-packet underflows and CLOSES with the short tail, and the burst
     //   is worth an order of magnitude more silent samples than the tail is.
     //
@@ -668,6 +676,19 @@ public:
     [[nodiscard]] std::uint64_t lastKeyDownUnderflowSamples() const noexcept
     {
         return m_lastKeyDownUnderflowSamples;
+    }
+    // Keyed EP2 packets sent as silence BY THE PRIME, with queued samples
+    // waiting behind them (#6052). Not an underflow and not counted as one:
+    // nothing was missing, the client chose to wait. Per over this is the
+    // latency the prime adds, in packets; an over that reads 0 here went out
+    // unprimed or never carried queued IQ. Process totals and I/O THREAD ONLY,
+    // like the three above.
+    [[nodiscard]] std::uint64_t txPrimeHoldPackets() const noexcept { return m_txPrimeHoldPackets; }
+    // How many overs the prime let go at its deadline instead of at its
+    // target: the producer delivered something and then not enough.
+    [[nodiscard]] std::uint64_t txPrimeDeadlineReleases() const noexcept
+    {
+        return m_txPrimeDeadlineReleases;
     }
 
     // A baseband test tone, offsetHz from the TX carrier, amplitude 0..1.
@@ -989,6 +1010,84 @@ private:
     // Roughly a quarter second at 48 kHz. Past this the operator is hearing
     // latency, so dropping is better than growing the backlog.
     static constexpr std::size_t kTxQueueMax = 12000;
+
+    // ---- THE PRIME: a depth the queue is given once per over (#6052) ----
+    //
+    // WHAT WAS WRONG. Producer and pacer both run at a nominal 48000
+    // samples/s, the producer in whole Hl2TxDsp blocks and the pacer in
+    // kTxSamplesPerPacket every 2.625 ms. The pacer used to start draining on
+    // the first delivery, so the queue reached zero just as the next block was
+    // due: the depth sat pinned at zero, and a block late by ANY amount became
+    // keyed zeros in mid-over. Measured on a Hermes-Lite 2 into a dummy load:
+    // 41 such gaps of 0.4-27.5 ms in 15 of 15 three-second overs, each one
+    // late and none lost (hl2-lab d167; #6052).
+    //
+    // WHAT THIS DOES. On the keyed edge, and whenever the queue is abandoned,
+    // the prime is armed. While it is armed the keyed queued-IQ arm sends
+    // silence and CONSUMES NOTHING until the queue holds the target; then it
+    // lets go for the rest of the over. MOX is not moved: the hold is spent
+    // inside the over, as keyed silence, like the silence already there.
+    //
+    // THE MARGIN IS THE TARGET MINUS ONE BLOCK, and that is the trap in "prime
+    // to one block". Delivery is in whole blocks, so a target of one block is
+    // met by the first delivery and the queue is back at zero when the second
+    // is due: no margin, the old behaviour exactly. What absorbs lateness is
+    // what is left in the queue at the moment a block is due, which is the
+    // target less the block being drained.
+    //
+    // WHY TWO BLOCKS OF MARGIN. A gap moves everything after it later, so the
+    // gaps of one over ADD: the margin has to cover an over's total, not its
+    // longest gap. The ten 3 s overs of d167 leg C inserted 2.0-27.5 ms each.
+    // One block of margin (21.33 ms) covers seven of the ten, two blocks
+    // (42.67 ms) all ten. Those are tone overs on one machine; speech and
+    // other hosts are not measured.
+    //
+    // WHAT IT COSTS, on the queued-IQ path only (CW and the test tone are
+    // synthesised per packet and never come here):
+    //   - the transmitted audio is 42.67 ms later, for the whole over, on
+    //     every over: the over's leading keyed silence grows by that much;
+    //   - at key-up the queue holds that much more audio, and flushTxIq()
+    //     discards it, so the over ends 42.67 ms earlier in the audio;
+    //   - a producer that stops short of the target is held until
+    //     kTxPrimeMaxHoldPackets and goes out late rather than never.
+    //
+    // WHAT IT DOES NOT DO. It is given once and not defended: an over whose
+    // lateness exceeds the margin runs dry and is at zero margin from there
+    // on. A short packet is still padded with a step to zero. A ramp in place
+    // of the step was modelled and left out: repeating the last sample under
+    // a decay puts a burst at the carrier frequency (worse close in), and
+    // ramping the real samples needs the dry point known a ramp ahead, which
+    // holds only while the margin does.
+    //
+    // RETYPED, AND PINNED WHERE BOTH ARE VISIBLE: this file does not see
+    // Hl2TxDsp::Config, so the block is written out here. hl2_tx_gate_test
+    // ("THE PRIME") derives it from the real Config and fails if the two part.
+    static constexpr std::size_t kTxPrimeBlockSamples = 1024;   // 512 @ 24 kHz, at 48 kHz
+    static constexpr std::size_t kTxPrimeMarginBlocks = 2;
+    static constexpr std::size_t kTxPrimeTargetSamples =
+        (kTxPrimeMarginBlocks + 1) * kTxPrimeBlockSamples;
+    // The hold's deadline, in EP2 packets counted from the first one that had
+    // samples waiting: twice the time the margin takes to arrive at the
+    // nominal rate. A producer that is merely late (27.5 ms was the worst
+    // measured) still primes in full; one that has stopped is let go.
+    static constexpr std::uint64_t kTxPrimeMaxHoldPackets =
+        (2 * kTxPrimeMarginBlocks * kTxPrimeBlockSamples)
+            / static_cast<std::size_t>(kTxSamplesPerPacket);
+    static_assert(kTxPrimeTargetSamples < kTxQueueMax,
+                  "the prime target must fit below the overflow bound");
+    // 0 = let go (or never armed): the queued-IQ arm drains normally.
+    // Non-zero = armed: the depth the queue must reach first.
+    std::size_t m_txIqPrimeTarget = 0;
+    std::uint64_t m_txIqPrimeHeldPackets = 0;   // this hold, for the deadline
+    std::uint64_t m_txPrimeHoldPackets = 0;     // process total
+    std::uint64_t m_txPrimeDeadlineReleases = 0;
+    void armTxIqPrime() noexcept;
+    // Every place the queue is emptied without being transmitted: what comes
+    // next is the start of a stream, so it is primed like one.
+    void abandonTxIq();
+    // True while this keyed packet must go out as silence with the queue left
+    // alone. Lets the prime go when the target or the deadline is reached.
+    [[nodiscard]] bool txIqPrimeHolds();
     // Monotonic for the life of the PROCESS; see the accessors above. Never
     // reset on key, unkey, link loss or a change of radio -- a per-over counter
     // would answer a different question and would lose the drift that
