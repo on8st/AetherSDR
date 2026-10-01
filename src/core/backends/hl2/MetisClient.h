@@ -677,6 +677,14 @@ public:
     {
         return m_lastKeyDownUnderflowSamples;
     }
+    // And the packets the PRIME held in that same stretch, with samples
+    // waiting: txPrimeHoldPackets from MOX-on to the first queued sample. The
+    // two together are the queue's whole share of the over's leading silence;
+    // neither contains the other.
+    [[nodiscard]] std::uint64_t lastKeyDownPrimeHoldPackets() const noexcept
+    {
+        return m_lastKeyDownPrimeHoldPackets;
+    }
     // Keyed EP2 packets sent as silence BY THE PRIME, with queued samples
     // waiting behind them (#6052). Not an underflow and not counted as one:
     // nothing was missing, the client chose to wait. Per over this is the
@@ -1136,7 +1144,10 @@ private:
     // Armed on MOX's rising edge with the underflow total at that moment, and
     // reported ONCE, on the first keyed packet that carries queued IQ: the
     // difference is the keyed silence THIS QUEUE put at the head of the over
-    // (whole empty packets plus the short tail of the first one). Everything
+    // (whole empty packets plus the short tail of the first one). The prime's
+    // hold is the queue's too and is NOT an underflow, so it is taken the same
+    // way from txPrimeHoldPackets and reported beside it: without it the line
+    // would read 21 ms for a queue that kept the over silent for 63. Everything
     // else in the leading silence the wire shows was delivered to the queue
     // as zeros by the chain upstream of it -- and the voice processor's share
     // of that is logged in the same line. CW and the test tone synthesise
@@ -1144,6 +1155,8 @@ private:
     bool m_keyDownReportPending = false;
     std::uint64_t m_keyDownUnderflowBase = 0;
     std::uint64_t m_lastKeyDownUnderflowSamples = 0;
+    std::uint64_t m_keyDownPrimeHoldBase = 0;
+    std::uint64_t m_lastKeyDownPrimeHoldPackets = 0;
     void reportKeyDown();
     double m_toneHz = 0.0;
     double m_toneAmp = 0.0;
