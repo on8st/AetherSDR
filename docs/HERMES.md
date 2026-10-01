@@ -171,6 +171,12 @@ the same radio steps monotonically through −12…+48 dB (aethersdr/AetherSDR#5
 There is no five-bit limit, and automatic RF gain arms from any baseline in
 the native range.
 
+Automatic RF gain is armed by default (RFC aethersdr/AetherSDR#5535). A radio
+with no saved switch arms at the connect edge, on the wideband-bandscope law
+with a 24 dB floor below the operator's RF Gain, and that starts the wideband
+gate. It only attenuates, and only on clip evidence. Switching it off is saved
+per radio and is kept: the default applies only where nothing has been saved.
+
 ### The C&C bank we were missing
 
 `MetisClient` sent three banks: config `0x00`, RX1 frequency `0x04`, LNA gain

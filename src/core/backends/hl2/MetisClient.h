@@ -398,8 +398,12 @@ public:
     // is no correctness argument for a shorter duty cycle and no integrity
     // argument against a longer one.
     //
-    // DEFAULT OFF, and there is no UI and no setting: this is reached only
-    // through Hl2Backend::invokeExtension("hl2", "bandscope.enable", ...).
+    // DEFAULT OFF IN THIS CLIENT, and there is no UI and no setting for it.
+    // Two callers: Hl2Backend::invokeExtension("hl2", "bandscope.enable", ...)
+    // and the automatic RF gain loop, which asks for the gate when it arms
+    // under a law that reads the bandscope (applyBandscopeForAutoGain). That
+    // loop is armed by default, so in the application the gate runs on an
+    // ordinary connect unless the operator has switched the loop off.
     //
     // Re-asserting `run` in the same byte is a no-op in the gateware's decode,
     // so nothing here restarts or perturbs the IQ stream. It is a no-op unless

@@ -17,6 +17,15 @@
 // answers: MetisClient ignores the enable with no stream behind it, and the
 // gate itself is hl2_ep4_gate_test's subject. The positive path on hardware is
 // not certified here.
+//
+// AND WHETHER THE LOOP IS ARMED AT A CONNECT NOBODY ASKED FOR (sections 6-10).
+// RFC #5535 approved the loop armed by default and its amendment shipped it
+// off, because a +20 dB LNA default above a +19 dB arming ceiling meant the
+// connect edge would ask, be refused, and log a warning about a control the
+// operator never touched. Those sections drive that same connect edge and
+// count the three things the amendment named: the refusal, the warning and
+// the settled verdict. A positive control forces the refusal through the test
+// seam, so that "none seen" is read off instruments shown to see one.
 
 #include "TestSettingsProfile.h"
 #include "core/AppSettings.h"
@@ -29,6 +38,9 @@
 #include <QCoreApplication>
 #include <QEvent>
 #include <QJsonObject>
+#include <QMutex>
+#include <QMutexLocker>
+#include <QStringList>
 #include <cstdio>
 
 namespace AetherSDR::hl2 {
@@ -177,6 +189,165 @@ void connectWith(hl2::Hl2Backend& backend, const RestoredRadioState& state)
     Access::seedConnectBaseline(backend, kTrustedBaselineDb);
     Access::linkUp(backend);
 }
+
+// THE AMENDMENT'S OWN NUMBER, written here and not read from the code under
+// test: "This radio's constructed LNA default is +20 dB".
+constexpr int kShippedLnaDefaultDb = 20;
+
+// A profile that has never said anything about the switch, in the two forms it
+// reaches the backend: no memory at all (a first connect of this radio), and a
+// document with gains in it and no `autoEnabled` key.
+RestoredRadioState noMemory()
+{
+    return RestoredRadioState{};
+}
+RestoredRadioState gainsButNoSwitch()
+{
+    RestoredRadioState state;
+    state.rfFrequencyHz = 14'074'000.0;
+    state.sampleRateHz = 48'000;
+    state.extensionSchemaVersion = 1;
+    state.extension = QJsonObject{
+        {QStringLiteral("rfGain"), QJsonObject{
+            {QStringLiteral("lnaDbByBand"),
+             QJsonObject{{QStringLiteral("40m"), 7}}}}}};
+    return state;
+}
+// The same document with the operator's switch written in it, either way.
+RestoredRadioState withSwitch(const QJsonValue& value)
+{
+    RestoredRadioState state = gainsButNoSwitch();
+    QJsonObject rfGain = state.extension.value(QStringLiteral("rfGain")).toObject();
+    rfGain.insert(QStringLiteral("autoEnabled"), value);
+    state.extension.insert(QStringLiteral("rfGain"), rfGain);
+    return state;
+}
+
+// applyRestoredState and the link edge, with the baseline applyRestoredState
+// itself leaves: nothing is seeded by hand.
+void connectUnseeded(hl2::Hl2Backend& backend, const RestoredRadioState& state)
+{
+    backend.applyRestoredState(state);
+    Access::linkUp(backend);
+}
+
+// EVERY SETTLED VERDICT, and the refusal reason as a handler would have read
+// it when the verdict arrived. MainWindow::onAutoRfGainArmSettled shows the
+// refusal card from exactly this pair.
+class SettledLog {
+public:
+    explicit SettledLog(hl2::Hl2Backend& backend)
+    {
+        m_conn = QObject::connect(&backend, &IRadioBackend::autoRfGainArmSettled,
+                                  &backend, [this, &backend](bool armed) {
+            ++m_settles;
+            armed ? ++m_armed : ++m_notArmed;
+            m_reasonAtEmit = backend.lastArmRefusalReason();
+        });
+    }
+    ~SettledLog() { QObject::disconnect(m_conn); }
+    SettledLog(const SettledLog&) = delete;
+    SettledLog& operator=(const SettledLog&) = delete;
+
+    int settles() const { return m_settles; }
+    int armed() const { return m_armed; }
+    int notArmed() const { return m_notArmed; }
+    QString reasonAtEmit() const { return m_reasonAtEmit; }
+
+private:
+    QMetaObject::Connection m_conn;
+    int m_settles = 0;
+    int m_armed = 0;
+    int m_notArmed = 0;
+    QString m_reasonAtEmit;
+};
+
+// HOW MANY TIMES THE BACKEND SAID ITS DOCUMENT MOVED, and what the document
+// said at that moment. RadioModel saves on this signal and on nothing else.
+class SaveLog {
+public:
+    explicit SaveLog(hl2::Hl2Backend& backend)
+    {
+        m_conn = QObject::connect(&backend, &IRadioBackend::operatingStateChanged,
+                                  &backend, [this, &backend] {
+            ++m_saves;
+            m_stored = backend.currentOperatingState().extension
+                           .value(QStringLiteral("rfGain")).toObject();
+        });
+    }
+    ~SaveLog() { QObject::disconnect(m_conn); }
+    SaveLog(const SaveLog&) = delete;
+    SaveLog& operator=(const SaveLog&) = delete;
+
+    int saves() const { return m_saves; }
+    QJsonValue storedSwitch() const { return m_stored.value(QStringLiteral("autoEnabled")); }
+
+private:
+    QMetaObject::Connection m_conn;
+    int m_saves = 0;
+    QJsonObject m_stored;
+};
+
+// EVERY WARNING THE PROCESS LOGS WHILE THIS IS ALIVE. The amendment's harm was
+// "a warning in the log about a control they never asked for", so the log is
+// an instrument here and not noise. Warnings from any thread are kept; the
+// ones about this control are the ones that name it.
+class WarningLog {
+public:
+    WarningLog()
+    {
+        s_self = this;
+        m_previous = qInstallMessageHandler(&WarningLog::handle);
+    }
+    ~WarningLog()
+    {
+        qInstallMessageHandler(m_previous);
+        s_self = nullptr;
+    }
+    WarningLog(const WarningLog&) = delete;
+    WarningLog& operator=(const WarningLog&) = delete;
+
+    int aboutAutoGain() const
+    {
+        QMutexLocker lock(&m_mutex);
+        int n = 0;
+        for (const QString& line : m_warnings) {
+            if (line.contains(QLatin1String("Auto RF gain"), Qt::CaseInsensitive)) {
+                ++n;
+            }
+        }
+        return n;
+    }
+    int total() const
+    {
+        QMutexLocker lock(&m_mutex);
+        return static_cast<int>(m_warnings.size());
+    }
+
+private:
+    static void handle(QtMsgType type, const QMessageLogContext& context,
+                       const QString& message)
+    {
+        if (!s_self) {
+            return;
+        }
+        if (type == QtWarningMsg || type == QtCriticalMsg) {
+            QMutexLocker lock(&s_self->m_mutex);
+            s_self->m_warnings.append(message);
+        }
+        if (s_self->m_previous) {
+            s_self->m_previous(type, context, message);
+        } else {
+            // Nothing was installed before: keep the line visible in the
+            // test's own output, which is where a failure will be read.
+            std::fprintf(stderr, "%s\n", qPrintable(message));
+        }
+    }
+    static inline WarningLog* s_self = nullptr;
+    QtMessageHandler m_previous = nullptr;
+    mutable QMutex m_mutex;
+    QStringList m_warnings;
+};
 }  // namespace
 
 int main(int argc, char** argv)
@@ -335,18 +506,240 @@ int main(int argc, char** argv)
         backend.disconnectRadio();
     }
 
-    // ---- 6. OFF BY DEFAULT STILL MEANS NO STREAM ---------------------------
-    // Installing the bandscope law on connect must not start the gate for an
-    // operator who never switched the loop on.
+    // ---- 6. THE INSTRUMENTS SEE A REFUSAL WHEN THERE IS ONE ----------------
+    // The positive control for sections 7 and 9, and it comes first. This is
+    // the connect the amendment described: the wish is on, the baseline is
+    // above the arming ceiling, the connect edge asks and is refused. No
+    // public path produces a baseline above the ceiling any more (the setter
+    // and the restore both clamp to the native range), so it is forced through
+    // the test seam. What matters is that the three instruments below register
+    // it, because sections 7 and 9 read "none" off the same three.
     {
         hl2::Hl2Backend backend;
-        connectWith(backend, savedProfile(false));
+        WarningLog warnings;
+        SettledLog settled(backend);
+        backend.applyRestoredState(noMemory());
+        Access::seedConnectBaseline(backend,
+                                    hl2::Hl2Backend::kAutoRfGainMaxBaselineDb + 1);
+        Access::linkUp(backend);
         check(backend.isConnected(), "positive control: the link edge was delivered");
-        check(!backend.isArmed(), "a profile with no switch does not arm");
-        check(backend.law() == kApprovedLaw, "the law is installed all the same");
-        check(!Access::gateAskedFor(backend),
-              "and no bandscope gate is asked for while the loop is off");
+        check(!backend.isArmed(),
+              "positive control: a baseline above the ceiling is refused at the connect edge");
+        check(settled.settles() == 1 && settled.notArmed() == 1,
+              "positive control: the refusal settles once, as not armed");
+        check(!settled.reasonAtEmit().isEmpty() && !backend.lastArmRefusalReason().isEmpty(),
+              "positive control: with a reason, which is what the GUI shows as a card");
+        check(warnings.aboutAutoGain() == 1,
+              "positive control: and with one warning in the log that names the control");
         backend.disconnectRadio();
+    }
+
+    // ---- 7. NO SAVED PREFERENCE: ARMED AT +20, ON THE BANDSCOPE LAW, --------
+    // ---- AND NOTHING IS REFUSED --------------------------------------------
+    // The first connect of a radio this installation has no memory of. Not
+    // seeded by hand: the baseline is the one applyRestoredState() leaves.
+    {
+        check(hl2::kLnaDefaultGainDb == kShippedLnaDefaultDb,
+              "the shipped LNA default is still the +20 dB the amendment names");
+
+        hl2::Hl2Backend backend;
+        WarningLog warnings;
+        SettledLog settled(backend);
+        SaveLog saves(backend);
+        connectUnseeded(backend, noMemory());
+
+        check(backend.isConnected(), "positive control: the link edge was delivered");
+        check(backend.isArmed(),
+              "with no saved preference the loop is armed at the connect edge");
+        check(backend.lnaBaselineDb() == kShippedLnaDefaultDb,
+              "from the shipped +20 dB baseline");
+        check(row(backend, "lnaGainDb").toInt() == kShippedLnaDefaultDb
+                  && autoOffsetDb(backend) == 0,
+              "and arming moves nothing: the gain on the wire is still +20, offset 0");
+        check(backend.law() == kApprovedLaw
+                  && row(backend, "autoRfGainMode").toString() == kApprovedLaw,
+              "the armed loop runs the bandscope law");
+        check(backend.floorDb() == kApprovedFloorDb,
+              "with the 24 dB floor the ruling holds");
+        check(Access::gateAskedFor(backend),
+              "and the backend asked for the bandscope gate that law reads");
+
+        // WHAT THE AMENDMENT SAID WOULD BE WRONG WITH DEFAULT-ON, item by item.
+        check(settled.settles() == 1 && settled.armed() == 1 && settled.notArmed() == 0,
+              "the connect edge settles once, as ARMED: nothing was refused");
+        check(settled.reasonAtEmit().isEmpty() && backend.lastArmRefusalReason().isEmpty(),
+              "there is no refusal reason, so no card and no announcement");
+        check(warnings.aboutAutoGain() == 0,
+              "and no warning in the log about a control the operator never touched");
+
+        // The default is recorded as the wish, and the profile is told.
+        check(storedRfGain(backend).value(QStringLiteral("autoEnabled")).toBool(false),
+              "the document now says the loop is wanted");
+        check(saves.saves() > 0 && saves.storedSwitch().toBool(false),
+              "and the backend announced it, so the profile is written");
+
+        // Armed is not attenuating. Without clip evidence nothing moves.
+        for (int i = 0; i < 40; ++i) {
+            Access::telemetry(backend, window(0, 1000));
+        }
+        check(autoOffsetDb(backend) == 0
+                  && row(backend, "lnaGainDb").toInt() == kShippedLnaDefaultDb,
+              "40 s of clean windows: no attenuation, the wire still carries +20");
+        // And the loop is live: clip evidence is answered.
+        Access::telemetry(backend, window(10, 100));
+        check(autoOffsetDb(backend) == 6
+                  && row(backend, "lnaGainDb").toInt() == kShippedLnaDefaultDb - 6
+                  && backend.lnaBaselineDb() == kShippedLnaDefaultDb,
+              "positive control: a clip is answered with one 6 dB step, and the "
+              "operator's own number is not touched");
+        check(warnings.aboutAutoGain() == 0,
+              "still without a warning");
+
+        // ---- the operator switches it off, and it stays off ----
+        backend.setAutoRfGain(false);
+        check(!backend.isArmed() && autoOffsetDb(backend) == 0
+                  && row(backend, "lnaGainDb").toInt() == kShippedLnaDefaultDb,
+              "an explicit off disarms and restores +20 in one action");
+        check(!Access::gateAskedFor(backend),
+              "and releases the bandscope gate the loop started");
+        const QJsonValue switchAfterOff =
+            storedRfGain(backend).value(QStringLiteral("autoEnabled"));
+        check(switchAfterOff.isBool() && !switchAfterOff.toBool(),
+              "the off is written as an explicit false, not as a missing key");
+        check(saves.storedSwitch().isBool() && !saves.storedSwitch().toBool(),
+              "and it reaches the profile");
+
+        // The next connect reads that document. The default must not undo it.
+        const RestoredRadioState saved = backend.currentOperatingState();
+        backend.disconnectRadio();
+        hl2::Hl2Backend next;
+        SettledLog nextSettled(next);
+        connectUnseeded(next, saved);
+        check(next.isConnected(), "positive control: the next connect was delivered");
+        check(!next.isArmed() && nextSettled.settles() == 0,
+              "on the next connect the saved off holds: the loop is not armed "
+              "and nothing is even asked");
+        check(!Access::gateAskedFor(next),
+              "and no bandscope gate is asked for");
+        next.disconnectRadio();
+    }
+
+    // ---- 8. THE THREE THINGS A DOCUMENT CAN SAY ----------------------------
+    // A document with gains in it, differing only in the switch.
+    {
+        // No key: armed. The other form of "never said".
+        hl2::Hl2Backend absent;
+        SettledLog absentSettled(absent);
+        connectUnseeded(absent, gainsButNoSwitch());
+        check(absent.isConnected() && absent.isArmed(),
+              "a document with gains and no switch arms at the connect edge");
+        check(absentSettled.settles() == 1 && absentSettled.armed() == 1
+                  && absent.lastArmRefusalReason().isEmpty(),
+              "once, as armed, with no refusal");
+        check(Access::gateAskedFor(absent) && absent.law() == kApprovedLaw,
+              "on the bandscope law, with its gate asked for");
+        absent.disconnectRadio();
+
+        // An explicit false: off, and it stays off under clip evidence.
+        hl2::Hl2Backend off;
+        SettledLog offSettled(off);
+        SaveLog offSaves(off);
+        connectUnseeded(off, withSwitch(false));
+        check(off.isConnected(), "positive control: the link edge was delivered");
+        check(!off.isArmed(), "an explicit saved off does not arm");
+        check(offSettled.settles() == 0,
+              "nothing is asked of the control, so nothing settles");
+        check(off.law() == kApprovedLaw, "the law is installed all the same");
+        check(!Access::gateAskedFor(off),
+              "and no bandscope gate is asked for while the loop is off");
+        for (int i = 0; i < 10; ++i) {
+            Access::telemetry(off, window(100, 100));
+        }
+        check(autoOffsetDb(off) == 0 && !off.isArmed(),
+              "ten windows of solid clipping: the switched-off loop takes no gain");
+        const QJsonValue stillOff = storedRfGain(off).value(QStringLiteral("autoEnabled"));
+        check(stillOff.isBool() && !stillOff.toBool(),
+              "and the document still says off");
+        off.disconnectRadio();
+
+        // An explicit true: on, as before this change.
+        hl2::Hl2Backend on;
+        SettledLog onSettled(on);
+        connectUnseeded(on, withSwitch(true));
+        check(on.isConnected() && on.isArmed(), "an explicit saved on arms");
+        check(onSettled.settles() == 1 && onSettled.armed() == 1,
+              "once, as armed");
+        check(storedRfGain(on).value(QStringLiteral("autoEnabled")).toBool(false),
+              "and the document still says on");
+        on.disconnectRadio();
+
+        // A value that is not a boolean is not an operator's off. The restore
+        // boundary drops a field that fails validation, and the default
+        // decides. Stated so that it is a decision and not an accident.
+        hl2::Hl2Backend garbled;
+        connectUnseeded(garbled, withSwitch(QStringLiteral("off")));
+        check(garbled.isArmed(),
+              "a switch that is not a boolean is dropped, and the default arms");
+        garbled.disconnectRadio();
+    }
+
+    // ---- 9. NO BASELINE A PROFILE CAN HOLD IS REFUSED ----------------------
+    // The amendment's failure was a refusal at the connect edge. A fresh
+    // profile comes up on +20, and an old one can hold any gain in the native
+    // range for the band it comes up on. Every one of them, with no saved
+    // switch: armed, one settled verdict, no reason, no warning.
+    {
+        int tried = 0;
+        int armedCount = 0;
+        int cleanCount = 0;
+        WarningLog warnings;
+        for (int gainDb = hl2::kLnaGainMinDb; gainDb <= hl2::kLnaGainMaxDb; ++gainDb) {
+            hl2::Hl2Backend backend;
+            SettledLog settled(backend);
+            backend.applyRestoredState(noMemory());
+            Access::seedConnectBaseline(backend, gainDb);
+            Access::linkUp(backend);
+            ++tried;
+            if (backend.isConnected() && backend.isArmed()
+                && backend.lnaBaselineDb() == gainDb) {
+                ++armedCount;
+            }
+            if (settled.settles() == 1 && settled.armed() == 1
+                && backend.lastArmRefusalReason().isEmpty()) {
+                ++cleanCount;
+            }
+            backend.disconnectRadio();
+        }
+        check(tried == 61 && hl2::kLnaGainMinDb == -12 && hl2::kLnaGainMaxDb == 48,
+              "positive control: all 61 baselines of the native -12..+48 dB range were tried");
+        check(armedCount == tried,
+              "every one of them arms at the connect edge, baseline untouched");
+        check(cleanCount == tried,
+              "every one settles once as armed, with no refusal reason");
+        check(warnings.aboutAutoGain() == 0,
+              "and none of the 61 connects logs a warning about the control");
+    }
+
+    // ---- 10. THE CONSTRUCTED DEFAULT AND THE RESTORED ONE AGREE -------------
+    // The law's default had three copies and one was moved without the others.
+    // The switch's default has one constant; this is the check that it is the
+    // only one.
+    {
+        hl2::Hl2Backend fresh;
+        hl2::Hl2Backend restored;
+        restored.applyRestoredState(noMemory());
+        const QJsonValue constructed =
+            storedRfGain(fresh).value(QStringLiteral("autoEnabled"));
+        const QJsonValue afterRestore =
+            storedRfGain(restored).value(QStringLiteral("autoEnabled"));
+        check(constructed.isBool() && constructed.toBool(),
+              "a constructed backend's document says the loop is wanted");
+        check(afterRestore.isBool() && afterRestore.toBool() == constructed.toBool(),
+              "and applyRestoredState({}) leaves the same answer");
+        check(hl2::Hl2Backend::kAutoRfGainArmedByDefault == constructed.toBool(),
+              "which is the one constant both read");
+        check(!fresh.isArmed() && !restored.isArmed(),
+              "wanted is not running: neither is armed before a link is up");
     }
 
     return failures ? 1 : 0;

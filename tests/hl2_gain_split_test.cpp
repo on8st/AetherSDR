@@ -306,7 +306,7 @@ int main(int argc, char** argv)
         check(s.backend.autoRfGainControl() != nullptr,
               "the HL2 declares the automatic RF-gain capability");
         check(!s.backend.autoRfGainEnabled(),
-              "and it is OFF on a fresh session, with no setting to say otherwise");
+              "and it is not RUNNING on a session whose link is not up");
 
         // ---- THE CEILING IS THE TOP OF THE NATIVE RANGE.
         //
@@ -424,19 +424,38 @@ int main(int argc, char** argv)
               "the one thing that must be honoured next launch");
     }
 
-    // ---- ABSENT MEANS OFF. RFC #5535 asked for armed-by-default. The
-    // arithmetic obstacle -- a +20 dB default above a +19 dB ceiling -- is
-    // gone now that the ceiling is the top of the native range; flipping the
-    // default is a separate change, so a document with no key still reads false.
+    // ---- ABSENT MEANS ON, AND THE ARITHMETIC IT RESTS ON. RFC #5535 asked
+    // for armed-by-default, and its amendment shipped the loop off because the
+    // +20 dB default sat above a +19 dB arming ceiling: the connect edge would
+    // have been refused on every fresh connect. The amendment left this test
+    // asserting that arithmetic "so the day either number moves, the test
+    // names which one". The ceiling moved (to the top of the native range), so
+    // the inequality now points the other way and the default is on.
+    //
+    // IF THIS GOES RED, DEFAULT-ON IS A WARNING ON EVERY CONNECT AGAIN. Either
+    // the shipped LNA default rose above the ceiling or the ceiling came down
+    // below it. Do not adjust the assertion: one of kLnaDefaultGainDb,
+    // kAutoRfGainMaxBaselineDb and kAutoRfGainArmedByDefault has to give.
     {
         RestoredRadioState st;
         st.rfFrequencyHz = 14'200'000.0;
         Session s(st);
         check(!s.backend.isArmed(),
-              "a fresh profile does not arm the loop");
+              "a fresh profile's loop is not running before the link is up");
+        check(s.backend.currentOperatingState().extension
+                  .value(QStringLiteral("rfGain")).toObject()
+                  .value(QStringLiteral("autoEnabled")).toBool(false),
+              "but it is wanted: a profile with no saved switch reads as on");
+        check(hl2::Hl2Backend::kAutoRfGainArmedByDefault,
+              "the loop is armed by default");
         check(hl2::kLnaDefaultGainDb <= hl2::Hl2Backend::kAutoRfGainMaxBaselineDb,
-              "and the shipped LNA default is armable: default-on is no longer "
-              "blocked by arithmetic, only by a decision not taken here");
+              "and the shipped LNA default is at or below the arming ceiling, "
+              "so a fresh connect is not refused");
+        // The default is the fresh profile's baseline. An older profile can
+        // come up on any stored gain, and those must not be refused either.
+        check(hl2::kLnaGainMaxDb <= hl2::Hl2Backend::kAutoRfGainMaxBaselineDb,
+              "nor is any gain a profile can hold: the top of the native range "
+              "is at or below the ceiling too");
     }
 
     // ---- THE FIRST TICK ON A FRESH INSTALL ARMS (#5817) ----

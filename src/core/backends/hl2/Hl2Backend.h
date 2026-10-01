@@ -307,6 +307,16 @@ public:
     // declines to arm and says why rather than moving the operator's number.
     static constexpr int kAutoRfGainMaxBaselineDb = hl2::kLnaGainMaxDb;
 
+    // ARMED BY DEFAULT (RFC #5535). What the operator's switch reads as when
+    // nothing has been saved for it: a constructed backend, and a restored
+    // document with no `autoEnabled` key. ONE constant for both, so the
+    // constructed default and the one applyRestoredState() installs cannot
+    // come to disagree the way the control law's did.
+    //
+    // It is the WISH that defaults to on, not the running flag: the loop
+    // still arms only at the link-up edge, from the restored baseline.
+    static constexpr bool kAutoRfGainArmedByDefault = true;
+
     // dspChains()' gather, over the two things it may read.
     //
     // STATIC, AND THAT IS THE POINT. This runs on the I/O thread, where m_rx is
@@ -1107,18 +1117,23 @@ private:
     //
     //   * this member is "is the loop RUNNING", and a constructed backend has
     //     not connected, so of course it is false;
-    //   * m_autoRfGainWanted is "does the operator WANT it", and a document
-    //     with no `autoEnabled` key reads as FALSE. The control ships OFF and
-    //     an operator turns it on.
+    //   * m_autoRfGainWanted is "does the operator WANT it", and with nothing
+    //     saved it is kAutoRfGainArmedByDefault: TRUE. The link-up handler
+    //     arms on it.
     //
-    // OFF BY DEFAULT. RFC #5535 approved this loop and asked for it armed by
-    // default. What stood in the way was arithmetic: the +20 dB LNA default
+    // ON BY DEFAULT. RFC #5535 approved this loop armed by default, and it
+    // shipped off for one reason, which was arithmetic: the +20 dB LNA default
     // (kLnaDefaultGainDb) sat one dB above a +19 dB arming ceiling, so a
-    // default-on control would have refused on every fresh connect. That
-    // ceiling rested on a gain "fold" that was one unit's hardware defect (RX
-    // gain bit 5 stuck high; repaired, #5354 / #5943), and it is now the top
-    // of the native range -- the obstacle is removed. Flipping the default is
-    // left for a separate change under #5535.
+    // default-on control would have refused on every fresh connect and warned
+    // every new operator about a switch they had not touched. That ceiling
+    // rested on a gain "fold" that was one unit's hardware defect (RX gain bit
+    // 5 stuck high; repaired, #5354 / #5943). The ceiling is now the top of
+    // the native range, the setter clamps to that range, and so no baseline a
+    // profile can hold is refused.
+    //
+    // An explicit "off" is a saved `autoEnabled: false` and is kept. Every
+    // capture writes the key, so the default decides only for a profile that
+    // has never been written with one.
     //
     // NO TIMER. The policy is evaluated on the existing telemetry publish,
     // which is where the observation arrives; the window length is an input
@@ -1135,8 +1150,9 @@ private:
     //
     // The two differ whenever the control DECLINED to arm: the wish stays true,
     // the control stays off, and the next connect from a baseline it trusts
-    // honours the operator without them having to ask twice.
-    bool m_autoRfGainWanted = false;
+    // honours the operator without them having to ask twice. They also differ
+    // before the link is up: the wish is known and nothing is running yet.
+    bool m_autoRfGainWanted = kAutoRfGainArmedByDefault;
     // Why the last arm attempt was declined, empty when it was not. See
     // setAutoRfGain: composed where the refusal happens, cleared on a
     // successful arm so it can never describe a different failure.

@@ -585,6 +585,9 @@ Hl2Backend::Hl2Backend(QObject* parent) : IRadioBackend(parent)
         // guard; if it ever fires it is logged by setAutoRfGain, the control
         // stays off, the operator's preference stays recorded, and they are
         // told why.
+        //
+        // THE WISH IS TRUE BY DEFAULT (kAutoRfGainArmedByDefault), so this is
+        // also where a profile with no saved switch arms.
         if (m_autoRfGainWanted && !m_autoRfGainEnabled) {
             setAutoRfGain(true);
         } else {
@@ -7818,34 +7821,39 @@ void Hl2Backend::applyRestoredState(const RestoredRadioState& state)
     // cannot make until the restored baseline has actually been applied. So
     // this records the WISH and the connect edge acts on it.
     //
-    // ABSENT MEANS ON, and this reverses what an earlier revision of this
-    // comment argued. That argument was: "a session that predates this key
-    // never armed anything, and reading a missing key as on would switch a
-    // control on for an operator who never asked." It was right about the
-    // mechanism and wrong about the alternative, because there was no neutral
-    // ABSENT MEANS OFF. A document with no `autoEnabled` key is an operator who
-    // has never expressed a preference, and they get the control switched off.
+    // ABSENT MEANS ON (kAutoRfGainArmedByDefault). A document with no
+    // `autoEnabled` key is an operator who has never said either way, and
+    // RFC #5535 approved the loop armed for them. An explicit `false` is an
+    // operator who switched it off, and it stays off: toBool() falls back to
+    // the default only when the key is missing or is not a boolean.
     //
-    // NOT A JUDGEMENT ABOUT WHETHER THE LOOP IS GOOD -- RFC #5535 approved it
-    // and asked for it armed by default. The reason this stayed off was
-    // arithmetic: the +20 dB LNA default (kLnaDefaultGainDb) sat above a +19 dB
-    // arming ceiling, so default-on would have refused on every fresh connect.
-    // That ceiling came from a "fold" that was one unit's hardware defect (RX
-    // gain bit 5 stuck high by a bad joint; repaired, the same radio steps
-    // monotonically through -12..+48 dB -- #5354, #5943), and the ceiling is
-    // now the top of the native range, so the obstacle is gone.
+    // WHY IT WAS OFF, AND WHAT CHANGED. The ruling was amended to ship the
+    // loop off for one stated reason: the +20 dB LNA default
+    // (kLnaDefaultGainDb) sat above a +19 dB arming ceiling, so the connect
+    // edge would have asked, been refused, and logged a warning about a
+    // control the operator never touched, on every fresh connect. That ceiling
+    // came from a "fold" that was one unit's hardware defect (RX gain bit 5
+    // stuck high by a bad joint; repaired, the same radio steps monotonically
+    // through -12..+48 dB -- #5354, #5943). The ceiling is now the top of the
+    // native range and every restored gain is clamped to that range below, so
+    // the connect edge has no baseline it can refuse.
     //
-    // DEFAULT-ON IS STILL NOT DECIDED HERE for a profile that never expressed
-    // a wish. It IS the effective outcome for one that did: #5828 made the ask
-    // survive a refusal, so an operator who ticked the switch on a stock +20
-    // baseline (always refused before the ceiling moved) has autoEnabled=true
-    // on disk with the loop never having run. From the first connect after
-    // this change that profile arms. The direction is the safe one --
-    // attenuate-only, on clip evidence, with the AtFloor warning -- and it is
-    // what those operators asked for; flipping the default for everyone else
-    // remains #5535's separate change.
+    // THE DEFAULT DECIDES ONCE PER PROFILE. currentOperatingState() writes the
+    // key on every capture, so after the first save the document says `true`
+    // or `false` and this fallback is not consulted again. The same is true of
+    // a profile saved by a build that shipped the loop off: it carries a
+    // `false` that the program wrote and the operator did not choose, it
+    // cannot be told apart from a chosen one, and it is honoured as one.
+    //
+    // WHAT ARMING MEANS FOR AN OPERATOR WHO DID NOT ASK. Attenuate-only, on
+    // clip evidence, never above their own RF Gain, with the overload
+    // indicator showing the loop's action and the AtFloor warning when the
+    // floor is not enough. The installed law is the bandscope one
+    // (installDefaultAutoGainLaw above), so arming also starts the wideband
+    // gate on every connect.
     m_autoRfGainWanted =
-        rfGain.value(QStringLiteral("autoEnabled")).toBool(false);
+        rfGain.value(QStringLiteral("autoEnabled"))
+            .toBool(kAutoRfGainArmedByDefault);
     const QJsonObject lnaByBand =
         rfGain.value(QStringLiteral("lnaDbByBand")).toObject();
     for (auto it = lnaByBand.constBegin(); it != lnaByBand.constEnd(); ++it)
@@ -8339,10 +8347,11 @@ void Hl2Backend::setAutoRfGain(bool on)
     } else {
         // WAS IT ACTUALLY RUNNING. Read before the flag is cleared, and used
         // only for the log: the two states that reach here with it false are a
-        // decline still standing, and the window inside a connect after
-        // applyRestoredState() has restored autoEnabled:true and before the
-        // linkUp handler has tried to arm on it. Neither has a baseline to
-        // restore, and the old sentence claimed one for both.
+        // decline still standing, and a wish that has not been acted on yet --
+        // a constructed backend, or the window inside a connect after
+        // applyRestoredState() has restored (or defaulted) the wish to true
+        // and before the linkUp handler has tried to arm on it. Neither has a
+        // baseline to restore, and the old sentence claimed one for both.
         const bool wasRunning = m_autoRfGainEnabled;
         m_autoRfGainEnabled = false;
         // The operator turning it OFF is a preference, and is persisted as one.

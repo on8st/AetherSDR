@@ -97,7 +97,7 @@ static QString autoRfGainHelpToolTip()
     return QStringLiteral(
         "Automatic RF Gain — reduces gain when the radio's converter clips.\n"
         "The slider becomes the CEILING: this can only take gain away, never add.\n"
-        "Off by default. Does nothing while transmitting.");
+        "On by default; untick to switch it off. Does nothing while transmitting.");
 }
 
 static constexpr int kKiwiSdrWaterfallRateMax = 4;

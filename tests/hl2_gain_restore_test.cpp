@@ -30,27 +30,54 @@ int bandGain(const RestoredRadioState& state, const QString& band)
 // THE OPERATOR'S AUTOMATIC-GAIN PREFERENCE, as it will be written to disk.
 // `m_autoRfGainWanted` is private and correctly has no accessor -- what it
 // means is only observable where it acts, which is the document
-// currentOperatingState() produces and applyRestoredState() reads back. Absent
-// reads as false, matching applyRestoredState's own `toBool(false)`.
+// currentOperatingState() produces and applyRestoredState() reads back.
+//
+// THIS READS A CAPTURE, in which the key is always written. A capture without
+// the key would read false here, and that is deliberate: it is a different
+// fallback from applyRestoredState's own, which reads a MISSING key as on
+// (Hl2Backend::kAutoRfGainArmedByDefault). So a "wanted" answer from this
+// helper can only come from a key that is present and true.
 bool autoGainWanted(const RestoredRadioState& state)
 {
     return state.extension.value(QStringLiteral("rfGain")).toObject()
         .value(QStringLiteral("autoEnabled")).toBool(false);
 }
 
+// The switch exactly as the document holds it: Undefined when the key is
+// missing, which toBool() cannot tell from a false.
+QJsonValue autoGainSwitch(const RestoredRadioState& state)
+{
+    return state.extension.value(QStringLiteral("rfGain")).toObject()
+        .value(QStringLiteral("autoEnabled"));
+}
+
 // A profile with no per-band gains, so the connect baseline comes from
 // `defaultDb` and each leg below can set the baseline it needs explicitly.
+//
+// THE SWITCH IS ALWAYS WRITTEN, true or false. It used to be left out for
+// "not wanted", which was the same thing while a missing key read as off. A
+// missing key now reads as ON, so a profile that means "the operator has it
+// off" has to say so. A profile that says nothing is autoGainNoPreference().
 RestoredRadioState autoGainProfile(bool wanted)
 {
     RestoredRadioState state;
     state.rfFrequencyHz = 14'074'000.0;
     state.sampleRateHz = 48'000;
     state.extensionSchemaVersion = 1;
-    QJsonObject rfGain{{QStringLiteral("defaultDb"), 20}};
-    if (wanted) {
-        rfGain.insert(QStringLiteral("autoEnabled"), true);
-    }
-    state.extension = QJsonObject{{QStringLiteral("rfGain"), rfGain}};
+    state.extension = QJsonObject{{QStringLiteral("rfGain"), QJsonObject{
+        {QStringLiteral("defaultDb"), 20},
+        {QStringLiteral("autoEnabled"), wanted}}}};
+    return state;
+}
+
+// The same profile with no `autoEnabled` key at all: an operator who has never
+// said either way.
+RestoredRadioState autoGainNoPreference()
+{
+    RestoredRadioState state = autoGainProfile(false);
+    QJsonObject rfGain = state.extension.value(QStringLiteral("rfGain")).toObject();
+    rfGain.remove(QStringLiteral("autoEnabled"));
+    state.extension.insert(QStringLiteral("rfGain"), rfGain);
     return state;
 }
 
@@ -569,6 +596,88 @@ int main(int argc, char** argv)
             session.backend.setAutoRfGain(false);
             check(mirror.saves() > savesBeforeDisarm && !mirror.storedAutoGain(),
                   "push positive control: the disarm reaches the profile by the path that worked");
+        }
+    }
+    // ARMED BY DEFAULT (RFC #5535): WHAT THE RESTORE DOES WITH THE SWITCH.
+    //
+    // This file has no link edge to fire (see the note on the handler above),
+    // so it asserts the half that is the restore's own: which WISH a document
+    // leaves behind, and that the wish reaches the profile through the real
+    // store. That the wish arms at the connect edge, on the bandscope law and
+    // with nothing refused, is hl2_auto_gain_law_test sections 6 to 9, which
+    // has the seam for it.
+    {
+        const RadioSettingsScope armScope(QStringLiteral("hl2"),
+                                          QStringLiteral("AA:BB:CC:DD:EE:02"));
+        // No saved preference, in both forms: this radio has no memory at all,
+        // and a document with gains and no switch.
+        {
+            RestoredRadioState none;
+            none.rfFrequencyHz = 14'074'000.0;
+            GainSession session(none);
+            check(session.liveGain() == 20 && hl2::kLnaDefaultGainDb == 20,
+                  "default-on: a radio with no memory comes up on the +20 dB default");
+            const QJsonValue wish = autoGainSwitch(session.backend.currentOperatingState());
+            check(wish.isBool() && wish.toBool(),
+                  "default-on: and with no saved preference the loop is WANTED");
+            check(!session.backend.autoRfGainEnabled(),
+                  "default-on: wanted is not running -- nothing arms before the link is up");
+            check(session.backend.lastArmRefusalReason().isEmpty(),
+                  "default-on: and nothing has been refused");
+            check(session.backend.law() == QLatin1String("bandscope")
+                      && session.backend.floorDb() == 24,
+                  "default-on: the law it will arm is the bandscope one, floor 24");
+        }
+        {
+            GainSession session(autoGainNoPreference());
+            check(autoGainSwitch(autoGainNoPreference()).isUndefined(),
+                  "positive control: this profile really has no autoEnabled key");
+            check(autoGainWanted(session.backend.currentOperatingState()),
+                  "default-on: a document with gains and no switch reads as wanted");
+        }
+        // An explicit off stays off, and an explicit on stays on.
+        {
+            GainSession session(autoGainProfile(false));
+            const QJsonValue wish = autoGainSwitch(session.backend.currentOperatingState());
+            check(wish.isBool() && !wish.toBool(),
+                  "default-on: an explicit saved off is still off after the restore");
+        }
+        {
+            GainSession session(autoGainProfile(true));
+            check(autoGainWanted(session.backend.currentOperatingState()),
+                  "default-on: an explicit saved on is still on after the restore");
+        }
+        // THE OFF, THROUGH THE REAL STORE, AND BACK. The default is consulted
+        // only for a missing key, so what protects an operator's off is that
+        // the capture WRITES the key. Asserted on the stored document, because
+        // a merging or key-dropping store would turn every off back into the
+        // default on the next launch and no in-memory read would see it.
+        {
+            RestoredRadioState none;
+            none.rfFrequencyHz = 14'074'000.0;
+            GainSession session(none);
+            check(RadioStateMemory::store(armScope, caps,
+                                          session.backend.currentOperatingState()),
+                  "default-on: the first session's state is stored");
+            const QJsonValue storedOn =
+                autoGainSwitch(RadioStateMemory::load(armScope, caps));
+            check(storedOn.isBool() && storedOn.toBool(),
+                  "default-on: the stored document says true, as a key and not as an absence");
+            session.backend.setAutoRfGain(false);
+            check(RadioStateMemory::store(armScope, caps,
+                                          session.backend.currentOperatingState()),
+                  "default-on: the operator's off is stored");
+        }
+        {
+            const RestoredRadioState reloaded = RadioStateMemory::load(armScope, caps);
+            const QJsonValue storedOff = autoGainSwitch(reloaded);
+            check(storedOff.isBool() && !storedOff.toBool(),
+                  "default-on: the stored document carries an explicit false");
+            GainSession session(reloaded);
+            const QJsonValue wish = autoGainSwitch(session.backend.currentOperatingState());
+            check(wish.isBool() && !wish.toBool(),
+                  "default-on: and the next session restores it as off -- the "
+                  "default does not undo an operator's off");
         }
     }
     // Cross-family compatibility at the exact display-restore seam. No Flex or
