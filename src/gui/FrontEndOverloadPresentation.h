@@ -1,21 +1,10 @@
 #pragma once
 
-// HOW THE FRONT-END STATE IS SAID, in three registers: a lamp, one state word,
-// and what a screen reader (and the tooltip) is told.
-//
-// SEPARATED FROM THE WIDGET SO IT CAN BE TESTED. Everything here is a pure
-// function of AetherSDR::FrontEndOverload -- no Qt widgets, no painting, no
-// clock. The widget draws what these return and owns no rules of its own. That
-// division is what lets front_end_overload_presentation_test assert the
-// behaviour RFC #5535 made a merge condition without instantiating a GUI.
-//
-// MODELLED ON THE RADIO'S OWN LEDS, which is #5535's wording and not a
-// decoration: an operator watching an HL2 already reads clipping off the board,
-// so the indicator that replaces that glance should not require learning a new
-// vocabulary. Dark when there is nothing to say, green when clean, amber when it
-// is starting, red when it is bad -- and red LATCHES BRIEFLY, because a
-// converter that rails for 200 ms and recovers is exactly the event a glance
-// would miss.
+// How front-end state is presented: lamp colour, one state word and the
+// screen-reader/tooltip text, as pure functions of FrontEndOverload so
+// front_end_overload_presentation_test covers RFC #5535 without a GUI. Modelled
+// on the radio's own LEDs: dark (nothing to say), green (clean), amber
+// (starting), red (bad); red latches briefly so a 200 ms rail is not missed.
 
 #include "core/backends/FrontEndOverload.h"
 
@@ -64,17 +53,9 @@ enum class LampColour { Dark, Green, Amber, Red };
     return s.gainScaleKnown && s.effectiveDb > s.minGainDb;
 }
 
-// The word beside the lamp, and ONLY the word: "Clean", "Clipping", "Clipping
-// hard", "At limit". Nothing trails it.
-//
-// The regulator's action -- the gain the radio is running and the operator's own
-// setting -- lives in accessibleText(), which the widget sets as both its
-// tooltip and its accessibleDescription, so it is one hover away for a mouse and
-// read on arrival by a screen reader. ON8ST, 2026-09-30, on the installed
-// integration build: "I still see text next to the clean or clipping indicator
-// .. that text should not be there, the indicator pill is enough." Two levels
-// beside a gain slider that already shows one read as a second, disagreeing
-// readout; the lamp and its word are the glance, the rest is on demand.
+// The word beside the lamp, and only the word ("Clean", "Clipping", "At
+// limit"). The regulator's action is in accessibleText(), set as tooltip and
+// accessible description; a level beside the gain slider reads as a second one.
 [[nodiscard]] inline QString shortText(const FrontEndOverload& s)
 {
     const auto tr_ = [](const char* k) {
@@ -95,13 +76,10 @@ enum class LampColour { Dark, Green, Amber, Red };
     return head;
 }
 
-// WHAT A SCREEN READER IS TOLD, AND WHAT THE TOOLTIP SAYS -- which is not the
-// visible word. The lamp carries colour and the word carries only the state;
-// neither survives being read aloud, so this spells out the state, the
-// regulator's action (in levels) and the backend's own reason in one sentence.
-// It is the ONLY place those details appear, so it is set as accessible
-// description as well as tooltip: a tooltip alone is never announced. docs/a11y.md asks for exactly this rather than a
-// terse label that happens to be technically present.
+// What a screen reader and the tooltip are told: the state, the regulator's
+// action in levels and the backend's reason, in one sentence. It is the only
+// place those details appear, so it is set as accessible description as well
+// as tooltip (docs/a11y.md).
 [[nodiscard]] inline QString accessibleText(const FrontEndOverload& s)
 {
     const auto tr_ = [](const char* k) {

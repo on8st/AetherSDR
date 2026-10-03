@@ -86,12 +86,8 @@ void FrontEndOverloadIndicator::setState(const AetherSDR::FrontEndOverload& stat
 void FrontEndOverloadIndicator::refresh()
 {
     m_text->setText(AetherSDR::gui::shortText(m_state));
-    // THE DETAILS, on both channels. The visible word is only the state, so the
-    // running gain, the operator's setting and the backend's reason are here and
-    // nowhere else -- as tooltip for the mouse AND as accessible description,
-    // because a tooltip is never announced (docs/a11y.md, theme-style-guide
-    // §4a). The label carries the same description and tooltip so hovering the
-    // word, not only the lamp, shows them.
+    // The details live only here, as tooltip AND accessible description (a
+    // tooltip is never announced, docs/a11y.md), on the lamp and on the word.
     const QString spoken = AetherSDR::gui::accessibleText(m_state);
     setAccessibleDescription(spoken);
     m_text->setAccessibleDescription(spoken);
@@ -108,19 +104,10 @@ void FrontEndOverloadIndicator::announceIfWorthIt(FrontEndLevel before)
     if (!QAccessible::isActive()) {
         return;
     }
-    // AN ANNOUNCEMENT, NOT A VALUE CHANGE, and not gated on focus.
-    //
-    // Every other announcing widget in this tree (RangeSlider, HGauge) speaks
-    // only while focused, because they are reporting what the operator is
-    // DOING. This one reports what the RADIO is doing, to an operator who is
-    // most likely looking at the panadapter -- and a blind operator has no
-    // panadapter to look at, so a focus-gated announcement would mean the one
-    // user who most needs to hear about a clipping front end is the one who
-    // never does. That is the gap #4896 exists to close.
-    //
-    // Politeness, not assertiveness: it must not interrupt an announcement the
-    // operator asked for. shouldAnnounce() is what keeps this from becoming
-    // chatter -- only starting, stopping and hitting the floor speak at all.
+    // An announcement, not gated on focus: it reports what the radio is doing,
+    // and a blind operator has no panadapter to glance at (#4896). Polite so it
+    // never interrupts speech the operator asked for; shouldAnnounce() limits it
+    // to start, stop and hitting the floor.
     QAccessibleAnnouncementEvent ev(this, AetherSDR::gui::accessibleText(m_state));
     ev.setPoliteness(QAccessible::AnnouncementPoliteness::Polite);
     QAccessible::updateAccessibility(&ev);
