@@ -628,7 +628,8 @@ void Hl2TxDsp::processAudioBlock(const std::vector<float>& mono,
     const double micGain =
         (source == TxAudioSource::EngineGenerated) ? 1.0 : m_micGain;
 
-    // One decision per call; the stage itself is Hl2TxAlc.h.
+    // One decision per call, applied as a path inside it (Hl2TxAlc.h) so a
+    // moving gain does not step at the block rate (#5912).
     Hl2TxAlc::Settings alc;
     alc.enabled = m_config.alcEnabled;
     alc.targetPeak = m_config.alcTargetPeak;
