@@ -277,11 +277,12 @@ inline constexpr std::int64_t kBandscopeProbeConfirmMs = 30000;
 // (headroomRailAttacks; inert while the bandscope is off). headroomBiasDb has no
 // default: the caller derives it from the gate period it runs
 // (gatedPeakBiasDbForPeriod; 3.77 dB at the 1000 ms kBandscopeSampleMs). The
-// 2 dB margin is a choice, not a measurement. The 30 s probe interval is kept
-// pending a ruling on #5535.
+// 8 dB margin covers the scatter of one block at a fixed gain (p10-p90 8.7 dB
+// on a busy 80 m band). The 30 s probe interval is kept pending a ruling on
+// #5535.
 [[nodiscard]] inline AutoGainConfig bandscopeReleaseConfig(
     double headroomBiasDb,
-    double releaseHeadroomMarginDb = 2.0) noexcept
+    double releaseHeadroomMarginDb = 8.0) noexcept
 {
     AutoGainConfig c = probingReleaseConfig();
     c.probeConfirmMs = kBandscopeProbeConfirmMs;

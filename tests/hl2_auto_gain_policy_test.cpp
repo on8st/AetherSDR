@@ -995,13 +995,13 @@ int main()
         // -- the requirement is real, in both directions --
         {
             AutoGainObservation o = clean;
-            o.headroom = measured(12.0);        // 12 >= 6 + 3.77 + 2 = 11.77
+            o.headroom = measured(18.0);        // 18 >= 6 + 3.77 + 8 = 17.77
             const AutoGainAction a =
                 autoGainStep(readyToRelease(12), o, kBandscope);
             check(a.reason == AutoGainReason::Release && a.deltaDb == -6,
-                  "8.1 twelve dB of measured room releases the full 6 dB step");
+                  "8.1 eighteen dB of measured room releases the full 6 dB step");
 
-            o.headroom = measured(11.0);        // one dB short of the same sum
+            o.headroom = measured(17.0);        // one dB short of the same sum
             const AutoGainAction b =
                 autoGainStep(readyToRelease(12), o, kBandscope);
             check(b.reason == AutoGainReason::HeadroomHold && b.deltaDb == 0,
@@ -1034,7 +1034,7 @@ int main()
         // cfg.releaseStepDb would refuse a release that fits.
         {
             AutoGainObservation o = clean;
-            o.headroom = measured(8.0);         // 8 >= 2 + 3.77 + 2 = 7.77
+            o.headroom = measured(14.0);        // 14 >= 2 + 3.77 + 8 = 13.77
             const AutoGainAction a =
                 autoGainStep(readyToRelease(2), o, kBandscope);
             check(a.reason == AutoGainReason::Release && a.deltaDb == -2,
@@ -1044,7 +1044,7 @@ int main()
             const AutoGainAction b =
                 autoGainStep(readyToRelease(12), o, kBandscope);
             check(b.reason == AutoGainReason::HeadroomHold,
-                  "8.4 the same 8 dB does not license a full 6 dB step");
+                  "8.4 the same 14 dB does not license a full 6 dB step");
         }
 
         // -- a refusal is not a failed probe --

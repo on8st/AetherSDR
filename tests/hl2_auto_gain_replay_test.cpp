@@ -345,15 +345,16 @@ int main()
         report("shipped", k30m, r30);
         check(r80.trace.size() == 7,
               "2.1 80 m: 7 changes where the 3 s confirm made 13");
-        check(r80.maxDwellMs == 240000,
-              "2.2 80 m: three failed probes widen the interval to 240 s");
-        check(r80.blindMs <= 5000 && r80.heldMoreMs <= 60000,
-              "2.3 80 m: under 5 s without clip evidence, under 60 s of "
-              "attenuation the radio had given back");
-        // The 30 m re-clip 35.3 s after a release is outside the 30 s confirm.
-        check(r30.trace.size() == 10 && r30.maxDwellMs == 120000,
-              "2.4 30 m: still 10 changes in the leg; the last failed probe "
-              "leaves the interval at 120 s, not 30 s");
+        check(r80.maxDwellMs == 60000,
+              "2.2 80 m: one failed probe widens the interval to 60 s");
+        // The 8 dB margin moves the releases, so the law is at 0 dB while the
+        // radio held 6 dB: the record cannot say whether it clipped there.
+        check(r80.blindMs > 40000 && r80.blindMs <= 46000
+              && r80.heldMoreMs <= 20000,
+              "2.3 80 m: 44.5 s without clip evidence, so 7 is a lower bound");
+        check(r30.trace.size() == 8 && r30.blindMs <= 9000,
+              "2.4 30 m: 8 changes where the 3 s confirm made 10, 8 s without "
+              "clip evidence");
     }
 
     // 3. The same band for half an hour (a model).
@@ -370,10 +371,10 @@ int main()
         check(old1800.changes > 60 && old1800.maxDwellMs <= 60000,
               "3.1 with the 3 s confirm: more than 60 changes in 30 minutes, "
               "interval never past 60 s");
-        check(m1800.changes <= 20,
-              "3.2 shipped: at most 20 changes in 30 minutes");
-        check(m1800.maxDwellMs == law.dwellBackoffMaxMs,
-              "3.3 shipped: the interval reaches its 480 s cap while probes fail");
+        check(m300.changes <= 3 && m1800.changes <= 16,
+              "3.2 shipped: at most 3 changes in 5 minutes and 16 in 30");
+        check(m1800.maxDwellMs >= 240000,
+              "3.3 shipped: the interval widens to 240 s while probes fail");
         check(m1800.clippedObs < old1800.clippedObs / 2,
               "3.4 shipped: fewer than half the clipped observations");
     }
