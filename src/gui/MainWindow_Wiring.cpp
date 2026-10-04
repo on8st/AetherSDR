@@ -3417,17 +3417,8 @@ int MainWindow::cloneDisplaySettingsToAllPans(PanadapterApplet* source)
             // Re-sending them once per target would be the same write N times.
             dst->setWfColorGain(src->wfColorGain());
             dst->setWfBlackLevel(src->wfBlackLevel());
-            if (auto* pan = m_radioModel.panadapter(targetPanId);
-                pan && !pan->waterfallId().isEmpty()) {
-                m_radioModel.sendCommand(
-                    QString("display panafall set %1 color_gain=%2")
-                        .arg(pan->waterfallId())
-                        .arg(src->wfColorGain()));
-                m_radioModel.sendCommand(
-                    QString("display panafall set %1 black_level=%2")
-                        .arg(pan->waterfallId())
-                        .arg(src->wfBlackLevel()));
-            }
+            m_radioModel.setWaterfallColorGainFor(targetPanId, src->wfColorGain());
+            m_radioModel.setWaterfallBlackLevelFor(targetPanId, src->wfBlackLevel());
             // Clamp like the slider path does (applyWaterfallLineDuration).
             // The source value came through the same clamp today, so this is
             // belt-and-braces — but the two paths should not disagree about
@@ -4631,10 +4622,7 @@ void MainWindow::wirePanadapter(PanadapterApplet* applet)
             return;
         }
         sw->setWfColorGain(v);
-        auto* pan = m_radioModel.panadapter(applet->panId());
-        if (pan && !pan->waterfallId().isEmpty())
-            m_radioModel.sendCommand(
-                QString("display panafall set %1 color_gain=%2").arg(pan->waterfallId()).arg(v));
+        m_radioModel.setWaterfallColorGainFor(applet->panId(), v);
     });
     connect(menu, &SpectrumOverlayMenu::wfBlackLevelChanged,
             this, [this, applet, sw](int v) {
@@ -4642,10 +4630,7 @@ void MainWindow::wirePanadapter(PanadapterApplet* applet)
             return;
         }
         sw->setWfBlackLevel(v);
-        auto* pan = m_radioModel.panadapter(applet->panId());
-        if (pan && !pan->waterfallId().isEmpty())
-            m_radioModel.sendCommand(
-                QString("display panafall set %1 black_level=%2").arg(pan->waterfallId()).arg(v));
+        m_radioModel.setWaterfallBlackLevelFor(applet->panId(), v);
     });
     connect(menu, &SpectrumOverlayMenu::wfAutoBlackChanged,
             this, [this, applet, sw](bool on) {
@@ -4900,13 +4885,8 @@ void MainWindow::wirePanadapter(PanadapterApplet* applet)
         // not reset the rate. (#4470)
         if (!m_adaptiveThrottleActive)
             m_radioModel.requestPanDisplayRates(applet->panId(), 25, 100);
-        auto* pan = m_radioModel.panadapter(applet->panId());
-        if (pan && !pan->waterfallId().isEmpty()) {
-            m_radioModel.sendCommand(
-                QString("display panafall set %1 color_gain=50").arg(pan->waterfallId()));
-            m_radioModel.sendCommand(
-                QString("display panafall set %1 black_level=15").arg(pan->waterfallId()));
-        }
+        m_radioModel.setWaterfallColorGainFor(applet->panId(), 50);
+        m_radioModel.setWaterfallBlackLevelFor(applet->panId(), 15);
 
         // Persist all defaults to AppSettings
         auto& s = AppSettings::instance();
