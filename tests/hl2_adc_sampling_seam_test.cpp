@@ -216,31 +216,47 @@ int main(int argc, char** argv)
 
     // ── Key up, short. THE BUG. ──────────────────────────────────────────
     //
-    // The held stamp is milliseconds old — this test keys up immediately, which
-    // is the short key-down that makes the age gate useless. Nothing about the
-    // DSP has changed: it is still muted, and will stay muted until the event
-    // loop runs.
+    // Nothing about the DSP has changed: it is still muted, and will stay muted
+    // until the event loop runs.
     keyed = false;
     queueMute();
-    const std::int64_t ago = (steadyNowNs() - dsp.adcPeakObservedAtNs()) / 1'000'000;
-    check(ago <= kSliceStaleMs,
+    // The age gate's verdict at a key-up instant, as Hl2Backend forms it. The
+    // instant is placed on the held stamp's own timeline, at the last age the
+    // gate admits and one millisecond past it, so how long this host took to
+    // feed the muted blocks decides nothing.
+    const std::int64_t held = dsp.adcPeakObservedAtNs();
+    const auto currentAt = [held](std::int64_t nowNs) {
+        return (nowNs - held) / 1'000'000 <= kSliceStaleMs;
+    };
+    const std::int64_t lastFreshNs = held + kSliceStaleMs * 1'000'000;
+    const std::int64_t firstStaleNs = lastFreshNs + 1'000'000;
+    check(currentAt(lastFreshNs),
           "the held peak is still FRESH BY AGE at key-up, so the age gate is open");
+    check(!currentAt(firstStaleNs),
+          "one millisecond later it is STALE, and the age gate is shut");
     // What the predicted input says here is the defect, asserted as a fact so
     // that a future simplification back to `!(keyed && !monitor)` fails loudly
     // instead of quietly restoring the inverted verdict.
     check(requested(),
           "the predicted input claims sampling the instant the key is released");
-    check(!gate.applied(dsp.adcPeakObservedAtNs()),
+    check(!gate.applied(held),
           "the gate does not — no peak has been stamped since the resume was asked for");
     // And that is the difference between an assertion and an omission.
     const double peak = *dsp.adcPeakDbfs();
-    check(adcPairing(true, peak, /*current=*/true, /*sampling=*/requested(), true, true)
+    check(adcPairing(true, peak, currentAt(lastFreshNs), /*sampling=*/requested(),
+                     true, true)
               != AdcPairing::Unknown,
           "predicted: a causal verdict from a value nothing is sampling");
-    check(adcPairing(true, peak, /*current=*/true,
-                     /*sampling=*/gate.applied(dsp.adcPeakObservedAtNs()), true, true)
+    check(adcPairing(true, peak, currentAt(lastFreshNs),
+                     /*sampling=*/gate.applied(held), true, true)
               == AdcPairing::Unknown,
           "gated: Unknown until the chain has actually resumed");
+    // Past the stale window the age gate withholds the verdict by itself, so
+    // the window above is the only one the sampling gate has to cover.
+    check(adcPairing(true, peak, currentAt(firstStaleNs), /*sampling=*/requested(),
+                     true, true)
+              == AdcPairing::Unknown,
+          "a stale held peak is not paired, even on the predicted input");
 
     // ── The unmute lands. One block later the pairing is a sentence again. ─
     app.processEvents();
