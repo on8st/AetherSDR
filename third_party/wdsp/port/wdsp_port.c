@@ -6,6 +6,10 @@
  * shutdown through its run flags and semaphores.
  */
 
+// Default-inactive, one-worker test rendezvous at the existing handoff hook.
+// Inactive hooks only read their state; no shipping scheduling change.
+enum WdspHandoffHoldState { WDSP_HOLD_OFF, WDSP_HOLD_ARMED, WDSP_HOLD_ENTERED };
+
 #ifndef _WIN32
 
 #include "wdsp_port.h"
@@ -37,10 +41,13 @@ struct WdspThreadStart
     void* context;
 };
 
+static _Thread_local uint64_t g_threadAllocationSequence = 0;
 static _Atomic uint64_t g_allocationSequence = 0;
 static _Atomic uint64_t g_outstandingAllocations = 0;
 // AetherSDR patch 13: see wdspPortHandoffPauseForTest() below.
 static _Atomic unsigned g_handoffPauseMicroseconds = 0;
+static _Atomic int g_handoffHoldState = WDSP_HOLD_OFF;
+static _Atomic int g_outputCopyHoldState = WDSP_HOLD_OFF;
 
 static uint64_t monotonicMilliseconds(void)
 {
@@ -380,6 +387,7 @@ void* wdspAlignedAllocate(size_t size, size_t alignment)
     {
         return NULL;
     }
+    ++g_threadAllocationSequence;
     atomic_fetch_add_explicit(&g_allocationSequence, 1, memory_order_relaxed);
     atomic_fetch_add_explicit(&g_outstandingAllocations, 1, memory_order_relaxed);
     return pointer;
@@ -392,6 +400,11 @@ void wdspAlignedFree(void* pointer)
         atomic_fetch_sub_explicit(&g_outstandingAllocations, 1, memory_order_relaxed);
         free(pointer);
     }
+}
+
+uint64_t wdspPortThreadAllocationSequence(void)
+{
+    return g_threadAllocationSequence;
 }
 
 uint64_t wdspPortAllocationSequence(void)
@@ -415,8 +428,58 @@ void wdspPortSetHandoffPauseForTest(unsigned microseconds)
     atomic_store_explicit(&g_handoffPauseMicroseconds, microseconds, memory_order_relaxed);
 }
 
+void wdspPortSetOutputCopyHoldForTest(int enabled)
+{
+    atomic_store_explicit(&g_outputCopyHoldState,
+        enabled ? WDSP_HOLD_ARMED : WDSP_HOLD_OFF, memory_order_release);
+}
+
+int wdspPortOutputCopyHeldForTest(void)
+{
+    return atomic_load_explicit(&g_outputCopyHoldState, memory_order_acquire) == WDSP_HOLD_ENTERED;
+}
+
+void wdspPortOutputCopyHoldForTest(void)
+{
+    if (atomic_load_explicit(&g_outputCopyHoldState, memory_order_relaxed) == WDSP_HOLD_ARMED)
+    {
+        int expected = WDSP_HOLD_ARMED;
+        if (atomic_compare_exchange_strong_explicit(&g_outputCopyHoldState, &expected,
+                WDSP_HOLD_ENTERED, memory_order_acq_rel, memory_order_relaxed))
+        {
+            while (atomic_load_explicit(&g_outputCopyHoldState, memory_order_acquire) == WDSP_HOLD_ENTERED)
+            {
+                Sleep(1);
+            }
+        }
+    }
+}
+
+void wdspPortSetHandoffHoldForTest(int enabled)
+{
+    atomic_store_explicit(&g_handoffHoldState,
+        enabled ? WDSP_HOLD_ARMED : WDSP_HOLD_OFF, memory_order_release);
+}
+
+int wdspPortHandoffHeldForTest(void)
+{
+    return atomic_load_explicit(&g_handoffHoldState, memory_order_acquire) == WDSP_HOLD_ENTERED;
+}
+
 void wdspPortHandoffPauseForTest(void)
 {
+    if (atomic_load_explicit(&g_handoffHoldState, memory_order_relaxed) == WDSP_HOLD_ARMED)
+    {
+        int expected = WDSP_HOLD_ARMED;
+        if (atomic_compare_exchange_strong_explicit(&g_handoffHoldState, &expected,
+                WDSP_HOLD_ENTERED, memory_order_acq_rel, memory_order_relaxed))
+        {
+            while (atomic_load_explicit(&g_handoffHoldState, memory_order_acquire) == WDSP_HOLD_ENTERED)
+            {
+                Sleep(1);
+            }
+        }
+    }
     const unsigned microseconds =
         atomic_load_explicit(&g_handoffPauseMicroseconds, memory_order_relaxed);
     if (microseconds != 0)
@@ -483,6 +546,7 @@ void OutputDebugStringA(const char* text)
 #undef _aligned_malloc
 #undef _aligned_free
 
+static __declspec(thread) uint64_t g_threadAllocationSequence = 0;
 static volatile LONG64 g_allocationSequence = 0;
 static volatile LONG64 g_outstandingAllocations = 0;
 
@@ -491,6 +555,7 @@ void* wdspAlignedAllocate(size_t size, size_t alignment)
     void* pointer = _aligned_malloc(size, alignment);
     if (pointer != NULL)
     {
+        ++g_threadAllocationSequence;
         InterlockedIncrement64(&g_allocationSequence);
         InterlockedIncrement64(&g_outstandingAllocations);
     }
@@ -504,6 +569,11 @@ void wdspAlignedFree(void* pointer)
         InterlockedDecrement64(&g_outstandingAllocations);
         _aligned_free(pointer);
     }
+}
+
+uint64_t wdspPortThreadAllocationSequence(void)
+{
+    return g_threadAllocationSequence;
 }
 
 uint64_t wdspPortAllocationSequence(void)
@@ -520,14 +590,62 @@ uint64_t wdspPortOutstandingAllocations(void)
 // millisecond resolution, so a non-zero request rounds UP to whole milliseconds
 // -- a longer window, never a shorter one.
 static volatile LONG g_handoffPauseMicroseconds = 0;
+static volatile LONG g_handoffHoldState = WDSP_HOLD_OFF;
+static volatile LONG g_outputCopyHoldState = WDSP_HOLD_OFF;
 
 void wdspPortSetHandoffPauseForTest(unsigned microseconds)
 {
     InterlockedExchange(&g_handoffPauseMicroseconds, (LONG)microseconds);
 }
 
+void wdspPortSetOutputCopyHoldForTest(int enabled)
+{
+    InterlockedExchange(&g_outputCopyHoldState, enabled ? WDSP_HOLD_ARMED : WDSP_HOLD_OFF);
+}
+
+int wdspPortOutputCopyHeldForTest(void)
+{
+    return InterlockedCompareExchange(&g_outputCopyHoldState, 0, 0) == WDSP_HOLD_ENTERED;
+}
+
+void wdspPortOutputCopyHoldForTest(void)
+{
+    // Aligned LONG reads are atomic on Windows. Only an armed test performs a
+    // modifying interlocked operation, so inactive workers do not contend.
+    if (g_outputCopyHoldState == WDSP_HOLD_ARMED &&
+        InterlockedCompareExchange(&g_outputCopyHoldState, WDSP_HOLD_ENTERED,
+            WDSP_HOLD_ARMED) == WDSP_HOLD_ARMED)
+    {
+        while (InterlockedCompareExchange(&g_outputCopyHoldState, 0, 0) == WDSP_HOLD_ENTERED)
+        {
+            Sleep(1);
+        }
+    }
+}
+
+void wdspPortSetHandoffHoldForTest(int enabled)
+{
+    InterlockedExchange(&g_handoffHoldState, enabled ? WDSP_HOLD_ARMED : WDSP_HOLD_OFF);
+}
+
+int wdspPortHandoffHeldForTest(void)
+{
+    return InterlockedCompareExchange(&g_handoffHoldState, 0, 0) == WDSP_HOLD_ENTERED;
+}
+
 void wdspPortHandoffPauseForTest(void)
 {
+    // Aligned LONG reads are atomic on Windows. Only an armed test performs a
+    // modifying interlocked operation, so inactive workers do not contend.
+    if (g_handoffHoldState == WDSP_HOLD_ARMED &&
+        InterlockedCompareExchange(&g_handoffHoldState, WDSP_HOLD_ENTERED,
+            WDSP_HOLD_ARMED) == WDSP_HOLD_ARMED)
+    {
+        while (InterlockedCompareExchange(&g_handoffHoldState, 0, 0) == WDSP_HOLD_ENTERED)
+        {
+            Sleep(1);
+        }
+    }
     const LONG microseconds = InterlockedCompareExchange(&g_handoffPauseMicroseconds, 0, 0);
     if (microseconds != 0)
     {

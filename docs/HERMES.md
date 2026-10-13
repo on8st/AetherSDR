@@ -606,6 +606,10 @@ convergence must be verified on real hardware through the automation bridge.
 - `SetRXAAGCTop` is the **maximum gain in dB**, and 120 dB is the top of WDSP's
   range. Inheriting that default ran the HL2 wide open: peak 3.186, **10.31% of
   samples at or beyond full scale**. At a 65 dB ceiling: peak 2.664, 0.27%.
+- Both peaks include RXA's panel gain of 4.0 after the AGC. The HL2 now opens
+  it at unity (`Hl2RxDsp::kRxPanelGain`, #5942): 12.04 dB quieter. The second
+  bandpass pass, speak and mpeak run between the AGC and the panel, so the
+  AGC's ceiling is not a bound on the output.
 - Mode vocabulary: `off/slow/med/fast` → WDSP RXA 0/2/3/4. WDSP's "long" (1)
   has no representation in the four-way UI control.
 - **The AGC is client-owned state and nothing on the radio can be asked for
@@ -632,6 +636,18 @@ convergence must be verified on real hardware through the automation bridge.
   meant a change on RX2 fired the capture and then persisted RX1's untouched
   value: the change that triggered the write was not the change that got
   written.
+- **The AGC-off level is remembered PER RECEIVER, unlike the pair.** It is the
+  fixed gain WDSP applies with AGC off (`Hl2RxDsp::agcFixedGainDbForOffLevel`),
+  and since DIGU/DIGL open with AGC off (§18.5) it is their operating gain.
+  `RestoredRadioState::agcOffLevels` holds one 0..100 entry per receiver index
+  (-1 = none), stored as the `agcOffLevels` array of the radio's
+  `OperatingState` document. `RadioStateMemory` reads and writes it only for a
+  backend that declares the `Agc` domain and `hasAgcThreshold`; a document
+  without it restores the default of 10. `Hl2Backend::requestSliceAgc()`
+  captures a change, `seedReceiverAgc()` seeds each receiver with its own
+  entry, `createPanadapter()` gives a receiver opened later the entry for its
+  index, and a receiver that is closed keeps its entry. An entry outside
+  0..100 is dropped, not clamped.
 - **"At the next connect" means a NEW radio, not a returning one.** The seeding
   runs from `connectRadio()` when the connect request's serial differs from the
   last one seeded, or when `buildReceivers()` had no previous state to carry —
@@ -1560,11 +1576,11 @@ radio. See §18 for the full audit and the proposed seam.
 |---|---|---|---|---|
 | ~~24~~ | ~~RADE / DAX-bridge bare `panStream()` deref~~ **DONE** | §18.3, gap 18 | Both halves are closed: RADE is guarded in `activateRADE()`, and `startDax()` already guarded `panStream()` by the §18 audit. The earlier DAX bring-up crash and its fix remain recorded in §6 gap 1 | — |
 | ~~25~~ | ~~WSPR beacon on a host-modulating backend~~ **DONE** | §18.4 | The audio route already existed (#4471); only the DAX-borrow guard was in the way. First external-oracle TX instrument we have | — |
-| ~~26~~ | ~~Unified RX-audio seam~~ **PARTLY DONE** | §18.5, §18.8 | `rxDemodAudioReady` landed with CW, RTTY and the QSO recorder RX tap as its consumers. The `sliceId` argument and a `Wideband` tap are still open — nothing needs them yet | S |
+| ~~26~~ | ~~Unified RX-audio seam~~ **PARTLY DONE** | §18.5, §18.8 | `rxDemodAudioReady` landed with CW, RTTY and the QSO recorder RX tap as its consumers. The `sliceId` argument is still open — nothing needs it yet. The `Wideband` tap is withdrawn (item 30) | S |
 | 27 | AetherClock off DAX-channel identity onto slice identity | §18.6, gap 17 | WWV/WWVB decode. Depends on 26 | S |
-| 28 | `hasDaxAudio` / `hasDaxIq` / tap kinds / `rxAudioSampleRateHz` capabilities | §18.5 | Lets features decline honestly instead of binding to nothing. Depends on 26 | S |
+| 28 | `hasDaxAudio` / `hasDaxIq` / tap kinds / `rxAudioSampleRateHz` capabilities | §18.5 | Lets features decline honestly instead of binding to nothing. Depends on 26. On HL2 the tap-kinds answer is `Demod` only (item 30) | S |
 | 29 | Retire the `kiwi : "flex"` source-tag ternary | §18.2, gap 19 | Blocks a third concurrent family; `AsrTapPolicy` cannot disambiguate. Fold into 26 | XS |
-| 30 | Measure whether TCI's post-AGC feed costs WSJT-X decodes | §18.5 | Decides whether a `Wideband` tap is worth building at all. **Measure before building** | S |
+| ~~30~~ | ~~Measure whether TCI's post-AGC feed costs WSJT-X decodes~~ **DONE (#5629)** | §18.5 | Measured offline against WSJT-X's FT8 decoder: no measurable loss alone or beside a +10/+20 dB signal, 32 of 82 weak decodes lost beside +30 dB and 58 of 76 beside +40 dB. `agcMode = "off"` recovers them, so no `Wideband` tap is built; DIGU/DIGL open with AGC off instead, up to 29 dB quieter (§18.5) | — |
 
 ### Tier 4 — deliberate divergences, do NOT "fix" by reflex
 
@@ -2170,6 +2186,43 @@ Measured on the real HL2 at 96 kHz span, 25 fps pan:
 that the slider midpoint is the speed midpoint — the property whose absence was
 the second bug.
 
+#### What survives a restart, and where it is kept
+
+A Flex stores a pan's FFT FPS, FFT AVG, Wt Avg, waterfall rate and dBm range and
+reports them back on connect, which is why the client keeps no copy of them
+there (`SpectrumWidget::loadSettings` deletes the old flat keys; #2465, #4126).
+The HL2 stores none of them and nothing reports them.
+
+The waterfall rate, FFT FPS and the dBm range live in the per-radio
+`ClientDisplay` document, keyed by pan slot (`core/ClientDisplaySettings.h`).
+The Display panel's FPS slider, Clone to all Pans and Reset to Defaults save;
+`MainWindow::wirePanDisplayStatus` restores into the widget before it seeds the
+shaper. FFT AVG and Wt Avg have a table of their own in that document
+(`fftAverages`), kept only for a backend that declares
+`BackendPanAveraging::clientPersistsAveraging`. The HL2 declares it, so the
+Display panel's FFT AVG slider and Wt Avg toggle are remembered per pan slot too.
+
+The dBm range is the odd one: the pan model, not the widget, is what every
+re-seed reads, so a scale the operator moves is put into the model
+(`MainWindow::adoptClientOwnedDbmRange`) and the remembered one goes into the
+model before the first prime. FFT Floor Auto's own moves are not stored; with it
+on, the top is re-derived at every start and what survives is the dynamic range.
+
+Never as flat `AppSettings` keys, and FFT FPS and the range only where the
+backend declares the client their persistence owner:
+`PanFrameRateShaping::clientPersistsFrameRate` and
+`PanAmplitudeModel::clientPersistsDbmRange`, read by the save and the restore
+alike through `RadioCapabilities::clientPersistsPanFrameRate()` and
+`clientPersistsDbmRange()`. The HL2 declares both and no other family does;
+another family opts in with one declaration in its own backend. The range
+declaration counts only with absolute bins, because the client writes the range
+into the pan model. The waterfall rate has a declared owner too,
+`PanWaterfallRateShaping::clientPersistsWaterfallRate`, read by its save and its
+restore through `RadioCapabilities::clientPersistsPanWaterfallRate()`, together
+with `RadioModel::shapesDisplayRatesLocally()`: both must hold. The HL2,
+ANAN, Icom, RTL and demo backends each declare it, a Flex does not, and a family
+stops storing the rate with one edit in its own backend.
+
 ### 15.2.3 There is no hardware black level to select
 
 The Display panel's **Black Level** button cycles the waterfall floor source:
@@ -2214,6 +2267,21 @@ correct: the operator made a real choice on a real radio.
 **SW is not gated and must never be**, on any backend. On a radio reporting
 false it is the only automatic floor the operator has.
 
+**Off needs the row's unit.** The manual level is a threshold in the unit the
+row carries. A Flex waterfall tile is intensity (about 96..120) and its threshold
+is `160 - level`. The HL2 has no waterfall plane: `RadioModel::onBackendSpectrumFrame`
+hands the pan frame on as the row, so the row is the pan's dB axis (dBFS under a
+dBm label). SW measures its black point from the row and so is already in the
+row's unit.
+
+`WaterfallLevelMap::manualBlackThreshold` takes the unit from
+`RadioCapabilities::panBinsAbsolute()`, the flag the auto-floor gate already
+reads: an absolute row gets `-60 dB - level`, one dB a step, -60 down to -160 dB.
+The direction is the Flex one (a higher value draws more of the floor). The two
+end points are chosen, not derived: -160 dBm clears the lowest floor this radio
+showed (-148 dBm at 384 kHz and LNA +40 dB, 9 dB lower at 48 kHz), and -60 dBm
+leaves only strong signals lit. A Flex leaves the flag false and is unchanged.
+
 ### 15.3 hpsdrsim cannot reproduce this
 
 **The simulator does not honour a sample-rate change.** Commanded to 384 kHz it
@@ -2226,6 +2294,39 @@ backwards for the input period. A 33 ms target producing 20 fps and a 100 ms
 target producing 9 fps are only consistent with frames arriving every ~25 ms —
 40 fps, not the 375 the sample rate implied. The simulator was reporting a
 384 kHz span while delivering a 48 kHz stream.
+
+### 15.3.1 Show TX in Waterfall is a client flag here
+
+Radio Setup's **Show TX in Waterfall** is one setting on a Flex: `transmit set
+show_tx_in_waterfall=`, stored by the radio and echoed in its transmit status.
+The echo is the only thing that sets `TransmitModel::showTxInWaterfall()`, and
+that flag is what `SpectrumWidget` reads while keyed: true, the pane holding the
+TX passband draws its pan frames as waterfall rows; false, it drops every row
+for the whole over.
+
+The HL2 has no command plane and no display engine: the command has nowhere to
+go and nothing echoes. There is something to draw: `Hl2RxDsp::setAudioMuted`
+mutes the demodulator while keyed and the spectrum keeps running on real IQ, so
+pan frames keep arriving.
+
+The HL2 backend says so in its capabilities:
+`RadioCapabilities::txWaterfallClientFlag` is engaged with `clientPersistsFlag`
+true, which declares the client the owner of the flag. One accessor,
+`clientPersistsShowTxInWaterfall()`, reads it for the request, the store and
+the restore. `RadioModel::requestLocalShowTxInWaterfall` takes the flag only on
+that declaration: it writes the transmit model through the path an echo would
+take, and stores the value per radio in the `ClientDisplay` document, because a
+disconnect clears the model and nothing will report it again. `onConnected()`
+puts it back, on the same declaration.
+
+The HL2 is the only radio that declares it. A Flex owns the flag in the radio;
+ANAN, Icom, RTL-SDR and the demo simulator leave the record absent. On all of
+those the request declines, the caller sends the wire text, and nothing is
+stored or restored by the client.
+
+**Not measured:** what the HL2's own receive path reads while keyed, and
+therefore what colour those rows take. The keyed rows are coloured by
+`SpectrumWidget::dbmToWaterfallLevel`, the same law a Flex's keyed rows use.
 
 ### 15.4 Killing the client wedges the radio
 
@@ -2963,9 +3064,33 @@ RadioModel::rxAudioReady(RxAudioTap tap, int sliceId, QByteArray pcm, int rateHz
   matters: `Demod` (what the operator hears, post-AGC, post-passband) versus
   `Wideband`/`Modem` (filter-flat, pre-AGC — what a decoder wants). Today this
   is invisible because bus B happens to be pre-AGC on a Flex; on the HL2,
-  WSJT-X over TCI is currently being fed **post-AGC, post-passband** audio from
-  `Hl2RxDsp`. It decodes, but a modem on AGC'd audio is a known-marginal
-  arrangement and nothing in the code admits it.
+  WSJT-X over TCI is fed **post-AGC, post-passband** audio from `Hl2RxDsp`.
+  Measured in #5629: the AGC leaves the 12.64 s the FT8 decoder integrates
+  alone (within 0.042 dB) and instead raises the noise in the gap between
+  transmissions by 25–29 dB, which inflates the decoder's frame-averaged noise
+  reference by 18.25 dB. That costs decodes only beside a signal +30 dB or
+  stronger, and no AGC time constant avoids it. WDSP has no pre-AGC tap
+  (`wcpAGC` works in place), so the HL2 has no `Wideband` feed and does not
+  need one: AGC off on the slice is that feed, and `Hl2Backend::followModeAgc`
+  selects it whenever a receiver enters DIGU/DIGL or comes up in one (mode
+  click, connect-time restore, a receiver seeded from another). The off is
+  never written to the remembered AGC. A band-stack recall does not override
+  it: the bookmark's AGC mode arrives as `SliceAgcRequest::Origin::Recall`
+  and `Hl2Backend::requestSliceAgc` drops it in DIGU/DIGL, so a bookmark
+  cannot bring an AGC mode into a data mode; its threshold still applies.
+  With AGC off the gain is the AGC-off
+  level: 10 dB at the default level of 10, against a 39 dB AGC ceiling at the
+  default threshold and LNA gain. DIGU/DIGL are therefore up to 29 dB quieter
+  on the speaker and on the TCI level meter (arithmetic on the two settings,
+  not a measurement); #5629's AGC-off arm ran at that same 10 dB. The
+  operator raises the level with the AGC-T slider while AGC is off, and the
+  level is remembered per receiver (`RestoredRadioState::agcOffLevels`, §5 AGC),
+  so the compensation holds across launches. The
+  mechanism is `wcpAGC`'s, not the HL2's, and the default is HL2-only: ANAN-G2
+  runs the same AGC and keeps the operator's mode in DIGU/DIGL
+  (`AnanBackend::setSliceAgc`); RTL-SDR runs it at WDSP's medium, offers no
+  data mode and takes no AGC command (`RtlSdrBackend::setSliceAgc`). Neither
+  is measured or changed.
 - **`sliceId`** replaces the DAX channel number as the routing key. Flex maps
   slice → DAX channel internally and keeps its hold registry; HL2 maps slice →
   its single DDC. Consumers never learn which.
@@ -2992,7 +3117,7 @@ backend from re-running this audit:
 | Field | Why |
 |---|---|
 | `hasDaxAudio` / `hasDaxIq` | The honest name for what bus B *is*. RADE and the DAX bridge should decline on this, not crash on a null stream (§18.3) |
-| available tap kinds | Whether a `Wideband` feed exists at all, or only `Demod` |
+| available tap kinds | Whether a `Wideband` feed exists at all, or only `Demod`. On HL2: `Demod` only (#5629) |
 | `providesRadioSideWaveforms` | Digital Voice waveform install is Flex firmware; nothing should offer it elsewhere |
 | `rxAudioSampleRateHz` | HL2 is 24 kHz by the deliberate divergence in §13 Tier 4. A future backend may not be, and `DEFAULT_SAMPLE_RATE` is assumed widely |
 
@@ -3066,9 +3191,8 @@ decision, or an accident of the Flex being the only radio there was.
 4. **AetherClock** — the slice-identity work. WWV on a direct-sampling front end
    is a genuinely good demonstration, and 10 MHz WWV was already the proof
    signal for #4528's panadapter.
-5. **Tap kinds** (`Wideband`) — only once there is a second consumer that wants
-   one, and once someone has measured whether the AGC'd TCI feed is costing
-   WSJT-X decodes.
+5. ~~**Tap kinds** (`Wideband`)~~ — withdrawn for HL2. The AGC'd TCI feed is
+   measured (#5629, §18.5): AGC off on the slice already is the pre-AGC feed.
 
 ### 18.8 The bus, as built
 
@@ -3613,7 +3737,10 @@ behavior is unchanged.
 
 The count was fixed at connect, from a persisted setting. It is now the
 operator's, at runtime: "Add Panadapter" and the pane close button. Connect
-always comes up with ONE receiver.
+always comes up with ONE receiver; the ones the operator had open come back
+after link-up through that same add (`Hl2Backend::replayRestoredSession`, from
+the `receivers` list of the `OperatingState` document), so the receiver
+ceiling at the current span still decides how many return (#5777).
 
 Retiring the persisted count mattered for a reason beyond tidiness: it made
 connect the only place the count could change, and a saved 4 was re-imposed on

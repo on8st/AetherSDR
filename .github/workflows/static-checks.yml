@@ -141,6 +141,25 @@ jobs:
             fail=1
           fi
 
+          # 5. AETHER_SHARED_CORE=ON (the ASan lane's link mode) must produce a
+          #    shared core, and the default must stay static. The sanitizer
+          #    lane is weekly, so this is the only per-PR check of the option.
+          #    Asserted on the generated ninja file, like case 2.
+          if cmake -B /tmp/cfg-shared -S . -G Ninja \
+                   -DAETHER_SHARED_CORE=ON > /tmp/shared.log 2>&1; then
+            grep -q '^build libaethercore\.so' /tmp/cfg-shared/build.ninja \
+              || { echo "::error::AETHER_SHARED_CORE=ON configured, but no libaethercore.so rule"; fail=1; }
+          else
+            echo "::error::-DAETHER_SHARED_CORE=ON failed to configure"
+            tail -30 /tmp/shared.log
+            fail=1
+          fi
+          if [ -f /tmp/cfg-thread/build.ninja ] \
+             && ! grep -q '^build libaethercore\.a' /tmp/cfg-thread/build.ninja; then
+            echo "::error::the default configure no longer builds a static libaethercore.a"
+            fail=1
+          fi
+
           exit "$fail"
 
   static-checks:
@@ -157,6 +176,9 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: "3.12"
+
+      - name: RTL release requirement combinations
+        run: python tools/test_require_rtl.py
 
       # ── aetherd-migration ratchet (docs/aetherd-headless-engine-design.md §10)
       #   EB1/EB2 — the engine (src/core/ + src/models/) must never depend on
@@ -210,6 +232,24 @@ jobs:
         if: ${{ !cancelled() }}
         run: python tools/test_gen_seam_probe_table.py
 
+      # ── The user docs' Generated Reference pages (docs/user/docs/generated/)
+      # are parsed from the C++ source: shortcuts, MIDI/FlexControl/Ulanzi/HID
+      # actions, log categories, TCI commands. docs.yml only runs on PRs that
+      # touch docs/user/, so a source change that renames an action would
+      # leave the page stale with no signal; this step is that signal. The fix
+      # is to re-run the generator and commit the pages with the change.
+      - name: User docs generated reference
+        if: ${{ !cancelled() }}
+        run: python tools/docs/gen_reference.py --check
+
+      # ── The docs site's Log Analyzer rules each cite the source line that
+      # writes the log message they match. A reworded or moved message fails
+      # here, for the same reason as the step above. Node is preinstalled on
+      # ubuntu-latest; the test is stdlib-only.
+      - name: Log Analyzer rules cite live log messages
+        if: ${{ !cancelled() }}
+        run: node tools/docs/test_log_rules.mjs
+
       # ── Test registration stays in tests/tests.cmake. The root CMakeLists.txt
       # was 6,357 lines, over half of it 300+ test-target declarations; the split
       # cut it to ~2,780. tests/tests.cmake fails the CONFIGURE step if a test
@@ -220,6 +260,21 @@ jobs:
       - name: Test registration location
         if: ${{ !cancelled() }}
         run: python tools/check_test_registration.py --strict
+
+      # Tests reach WDSP only through core/dsp/WdspChannel.h: no test source
+      # includes a WDSP header and no test links aether_wdsp, bar a commented
+      # allowlist of pure WDSP unit tests. With AETHER_SHARED_CORE=ON (the
+      # sanitizer lanes) libaethercore.so keeps WDSP's symbols hidden, so a
+      # direct call only links in the static build every PR uses (#6283/#6284),
+      # and linking aether_wdsp gives the test a second WDSP the core never
+      # touches. Stdlib-only, sub-second.
+      - name: WDSP test links
+        if: ${{ !cancelled() }}
+        run: python tools/check_wdsp_test_links.py --strict
+
+      - name: WDSP test-links checker self-test
+        if: ${{ !cancelled() }}
+        run: python tools/test_check_wdsp_test_links.py
 
       # ── #5262 M2: the capability descriptor's boolean population is FROZEN.
       # A new capability lands as a per-feature record (std::optional<Record>:
@@ -309,6 +364,20 @@ jobs:
         if: ${{ !cancelled() }}
         run: python tools/check_qsettings.py --strict
 
+      # Qt 6.12 deprecates Q_OS_MAC (#6354); Q_OS_MACOS is the spelling for
+      # macOS-only code. Only a macOS build warns, so without this a re-added
+      # Q_OS_MAC goes unseen by the Linux and Windows lanes. Source files only.
+      - name: No deprecated Q_OS_MAC
+        if: ${{ !cancelled() }}
+        run: |
+          rc=0
+          hits=$(git grep -nw Q_OS_MAC -- '*.cpp' '*.h' '*.hpp' '*.mm' '*.m' ':!third_party') || rc=$?
+          if [ "$rc" -eq 0 ]; then
+            echo "$hits" | awk -F: '{print "::error file="$1",line="$2"::Q_OS_MAC is deprecated in Qt 6.12; use Q_OS_MACOS"}'
+            exit 1
+          fi
+          [ "$rc" -eq 1 ] || { echo "::error::git grep failed (exit $rc)"; exit "$rc"; }
+
       # ── ThemeManager::seedBuiltinDefaults() compiles a copy of the default
       # theme into the binary. It is GENERATED (tools/gen_theme_seed.py emits
       # src/core/ThemeSeedGenerated.cpp from resources/themes/default-dark.json),
@@ -355,6 +424,18 @@ jobs:
       - name: Qt pin checker self-test
         if: ${{ !cancelled() }}
         run: python tools/test_check_qt_pin.py
+
+      # BUILD-OPTIONS.md is the catalog of project CMake options (#6097), and
+      # options arrive in PRs that have no reason to open it. Fails on an option
+      # or cache setting with no row, a row with no definition, or a literal
+      # ON/OFF default that differs. The self-test breaks each on purpose.
+      - name: Build options reference
+        if: ${{ !cancelled() }}
+        run: python tools/check_build_options.py --strict
+
+      - name: Build options checker self-test
+        if: ${{ !cancelled() }}
+        run: python tools/test_check_build_options.py
 
       # ── Hardcoded-colour ratchet (#4569, RFC #3076). Counts may not rise
       # above the PR's base. The gate is a DELTA rather than a stored constant:

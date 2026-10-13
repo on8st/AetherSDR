@@ -1,5 +1,6 @@
 #include "Ctr2ProxyModel.h"
 
+#include "core/Ctr2HidFraming.h"
 #include "core/Ctr2UsbRelay.h"
 #include "core/LogManager.h"
 #ifdef HAVE_HIDAPI
@@ -12,6 +13,11 @@
 #include <QTimer>
 
 #include <utility>
+
+#ifdef Q_OS_LINUX
+#include <cerrno>
+#include <unistd.h>
+#endif
 
 namespace AetherSDR {
 
@@ -48,11 +54,15 @@ Ctr2ProxyModel::Ctr2ProxyModel(QObject* parent)
     connect(m_usb, &Ctr2UsbRelay::stateChanged, this, stateMoved);
     connect(m_usb, &Ctr2UsbRelay::endpointsChanged, this, &Ctr2ProxyModel::endpointsChanged);
     connect(m_usb, &Ctr2UsbRelay::lastErrorChanged, this, &Ctr2ProxyModel::lastErrorChanged);
+    connect(m_usb, &Ctr2UsbRelay::extensionsChanged, this, &Ctr2ProxyModel::extensionsChanged);
 #ifdef HAVE_HIDAPI
     m_usbDevices = [] { return Ctr2HidapiPort::enumerate(); };
     m_usbOpener = [](const Ctr2HidPort::DeviceInfo& device, QString* error) -> Ctr2HidPort* {
         return Ctr2HidapiPort::open(device, error);
     };
+    // USB is the default whenever this build can open a CTR2.
+    m_transport = Transport::Usb;
+    m_activeTransport = Transport::Usb;
 #endif
     refreshDevices();
 }
@@ -101,6 +111,17 @@ void Ctr2ProxyModel::refreshDevices()
     }
     m_listenChoices = choices;
     m_usbChoices = usb;
+    // Default to the first recognized CTR2 while nothing is selected or the
+    // selected device has gone; an existing choice stands.
+    if (!isRunning() && !selectedUsbDevice()) {
+        m_usbDevicePath.clear();
+        for (const Ctr2HidPort::DeviceInfo& d : std::as_const(m_usbChoices)) {
+            if (!d.ctr2Model().isEmpty()) {
+                m_usbDevicePath = d.path;
+                break;
+            }
+        }
+    }
     emit listenAddressesChanged();
     emit configurationChanged();
 }
@@ -296,6 +317,21 @@ bool Ctr2ProxyModel::isRunning() const
     return s != TcpByteProxy::State::Stopped && s != TcpByteProxy::State::Error;
 }
 
+bool Ctr2ProxyModel::usbDeviceNeedsAccessRule() const
+{
+#ifdef Q_OS_LINUX
+    if (m_transport != Transport::Usb || m_usbDevicePath.isEmpty()) {
+        return false;
+    }
+    // hidraw nodes are root-only until the rule grants the session user an
+    // ACL; access() honours that ACL. A missing node (ENOENT) is not ours to fix.
+    const QByteArray path = m_usbDevicePath.toLocal8Bit();
+    return ::access(path.constData(), R_OK | W_OK) != 0 && errno == EACCES;
+#else
+    return false;
+#endif
+}
+
 bool Ctr2ProxyModel::start()
 {
     if (isRunning() || !configurationProblem().isEmpty()) {
@@ -318,7 +354,7 @@ bool Ctr2ProxyModel::start()
         } else {
             ok = m_usb->start(hid, m_aetherRadioAddress, m_aetherRadioPort);
             if (!ok) {
-                delete hid;
+                hid->shutdown({});  // never blocks; the port deletes itself
             }
         }
     } else {
@@ -395,6 +431,70 @@ QString Ctr2ProxyModel::peerEndpoint() const
 QString Ctr2ProxyModel::radioEndpoint() const
 {
     return usbActive() ? m_usb->radioDescription() : m_proxy->upstreamDescription();
+}
+
+bool Ctr2ProxyModel::audioSpectrumWanted() const
+{
+    return usbActive() && m_usb->state() == TcpByteProxy::State::Relaying
+        && (m_usb->extensions() & ctr2hid::capabilityBit(ctr2hid::MessageType::AudioSpectrum));
+}
+
+bool Ctr2ProxyModel::audioSpectrumLinearWanted() const
+{
+    return audioSpectrumWanted()
+        && (m_usb->extensions()
+            & ctr2hid::capabilityBit(ctr2hid::MessageType::AudioSpectrumLinear));
+}
+
+bool Ctr2ProxyModel::cwTextWanted() const
+{
+    return usbActive() && m_usb->state() == TcpByteProxy::State::Relaying
+        && (m_usb->extensions() & ctr2hid::capabilityBit(ctr2hid::MessageType::CwText));
+}
+
+bool Ctr2ProxyModel::sendCwText(const QString& text, float cost)
+{
+    if (!cwTextWanted()) {
+        return false;
+    }
+    const QByteArray payload = ctr2hid::cwtext::encode(text, cost);
+    return !payload.isEmpty() && m_usb->sendCwText(payload);
+}
+
+bool Ctr2ProxyModel::sendAudioSpectrum(int lowHz, int spanHz, const std::vector<float>& barsDb,
+                                       bool linear)
+{
+    if (linear && !audioSpectrumLinearWanted()) {
+        return false;
+    }
+    return audioSpectrumWanted()
+        && m_usb->sendAudioSpectrum(ctr2hid::spectrum::encode(lowHz, spanHz, barsDb),
+                                    linear ? ctr2hid::MessageType::AudioSpectrumLinear
+                                           : ctr2hid::MessageType::AudioSpectrum);
+}
+
+int Ctr2ProxyModel::audioSpectrumLowHz(int spanHz)
+{
+    return ctr2hid::spectrum::displayLowHz(spanHz);
+}
+
+double Ctr2ProxyModel::audioSpectrumBandEdgeHz(int lowHz, int spanHz, int n, int i, bool linear)
+{
+    return linear ? ctr2hid::spectrum::linearEdgeHz(lowHz, spanHz, n, i)
+                  : ctr2hid::spectrum::bandEdgeHz(lowHz, spanHz, n, i);
+}
+
+void Ctr2ProxyModel::audioSpectrumCwWindow(int filterLo, int filterHi, int pitchHz,
+                                           double sampleRate, int* lowHz, int* highHz)
+{
+    const auto w = ctr2hid::spectrum::cwWindow(filterLo, filterHi, pitchHz, sampleRate);
+    *lowHz = w.lowHz;
+    *highHz = w.highHz;
+}
+
+int Ctr2ProxyModel::audioSpectrumSpanHz(int filterLo, int filterHi, double sampleRate)
+{
+    return ctr2hid::spectrum::displaySpanHz(filterLo, filterHi, sampleRate);
 }
 
 TcpByteProxy::Stats Ctr2ProxyModel::stats() const

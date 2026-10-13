@@ -263,9 +263,13 @@ private:
             end(text, error, error);
         });
 
-        // One UDP socket per link: the radio learns this endpoint from the
-        // CTR2's own registration datagram, so its UDP never reaches
-        // AetherSDR's sockets and no port needs negotiating.
+        // One UDP socket per link, so the radio's UDP for the controller never
+        // reaches AetherSDR's own sockets. On a LAN the radio sends to the TCP
+        // peer's address (this PC) at the port the client names with
+        // `client udpport`, and it ignores `client udp_register` (verified on
+        // a FLEX-8600, firmware 4.2.18). A device that negotiated
+        // RelayUdpPort is told this socket's port right after READY, so it
+        // can name it; others can only register by datagram.
         // Bound to the interface that reaches the radio, not every interface.
         m_udp = new QUdpSocket(this);
         if (!m_udp->bind(m_radio->localAddress(), 0)) {
@@ -276,7 +280,7 @@ private:
             connect(m_udp, &QUdpSocket::readyRead, this, [this] { onRadioDatagrams(); });
         }
 
-        m_owner->sessionConnected(m_generation);
+        m_owner->sessionConnected(m_generation, m_udp ? m_udp->localPort() : 0);
         if (!m_ended) {
             m_relay->start();
         }
@@ -356,6 +360,12 @@ Ctr2UsbRelay::Ctr2UsbRelay(QObject* parent)
         linkFault(QStringLiteral("CTR2 message incomplete after %1 ms")
                       .arg(m_tuning.incompleteMessageTimeoutMs));
     });
+    m_helloTimer = new QTimer(this);
+    m_helloTimer->setSingleShot(true);
+    connect(m_helloTimer, &QTimer::timeout, this, [this] {
+        sendHello();
+        scheduleHello(m_helloDelayMs);
+    });
 }
 
 Ctr2UsbRelay::~Ctr2UsbRelay()
@@ -389,24 +399,50 @@ bool Ctr2UsbRelay::start(Ctr2HidPort* port, const QHostAddress& radioAddress, qu
     connect(m_port, &Ctr2HidPort::reportsReceived, this, &Ctr2UsbRelay::onReportsReceived);
     connect(m_port, &Ctr2HidPort::reportsSent, this, &Ctr2UsbRelay::onReportsSent);
     connect(m_port, &Ctr2HidPort::failed, this, &Ctr2UsbRelay::onPortFailed);
+    connect(m_port, &Ctr2HidPort::extensionsNegotiated, this,
+            &Ctr2UsbRelay::onExtensionsNegotiated);
     m_radioAddress = QHostAddress(radioAddress.toIPv4Address());
     m_radioPort = radioPort;
     m_rx.reset();
+    m_rx.setExtensions(m_port->extensions());
     m_tx.reset();
     m_reportCosts.clear();
     m_unsentPayload = 0;
     m_unsentDatagramBytes = 0;
-    m_awaitingHello = true;
+    m_linkDown = true;
     m_closedSent = false;
+    m_helloSent = false;
+    m_helloDelayMs = m_tuning.helloIntervalMs;
     m_lastSessionStats = {};
     ++m_generation;
     setLastError({});
-    qCInfo(lcDevices) << "CTR2 USB: waiting for HELLO from" << m_port->description()
-                      << "-> radio" << radioDescription();
+    qCInfo(lcDevices) << "CTR2 USB: calling" << m_port->description()
+                      << "with HELLO -> radio" << radioDescription();
     setState(State::Listening);
+    sendHello();
+    scheduleHello(m_helloDelayMs);
     emit endpointsChanged();
     emit statsChanged();
     return true;
+}
+
+void Ctr2UsbRelay::sendHello()
+{
+    // At most one HELLO waits on the port: a CTR2 that is not reading cannot
+    // accumulate them, and a pending CLOSED always goes out first.
+    if (!m_port || !m_linkDown || !m_reportCosts.empty()) {
+        return;
+    }
+    m_tx.reset();
+    sendControl(MessageType::Hello);
+    m_helloSent = true;
+}
+
+void Ctr2UsbRelay::scheduleHello(int delayMs)
+{
+    if (m_port && m_linkDown) {
+        m_helloTimer->start(std::max(1, delayMs));
+    }
 }
 
 void Ctr2UsbRelay::stop()
@@ -416,6 +452,7 @@ void Ctr2UsbRelay::stop()
     }
     endSession();
     m_incompleteTimer->stop();
+    m_helloTimer->stop();
     if (m_port) {
         // Queued radio bytes are dropped; CLOSED still reaches the device.
         std::vector<ctr2hid::Report> closed;
@@ -477,7 +514,7 @@ void Ctr2UsbRelay::onReportsReceived(const QByteArray& reports)
         if (!m_rx.feed(bytes, ctr2hid::kReportBytes, &messages)) {
             const QString err = m_rx.errorText();
             m_rx.reset();
-            if (!m_awaitingHello) {
+            if (!m_linkDown) {
                 linkFault(QStringLiteral("CTR2 link framing error: %1").arg(err));
             }
             continue;
@@ -505,10 +542,10 @@ void Ctr2UsbRelay::onMessage(const Message& message)
 {
     switch (message.type) {
     case MessageType::Hello:
-        onHello();
+        onDeviceStart();
         return;
     case MessageType::Data:
-        if (m_awaitingHello) {
+        if (m_linkDown) {
             // In flight before the device saw our CLOSED; it restarts with HELLO.
             return;
         }
@@ -519,7 +556,7 @@ void Ctr2UsbRelay::onMessage(const Message& message)
         m_session->deviceData(message.payload);
         return;
     case MessageType::Datagram:
-        if (m_awaitingHello) {
+        if (m_linkDown) {
             return;
         }
         if (!m_session || !m_session->relaying()) {
@@ -529,34 +566,52 @@ void Ctr2UsbRelay::onMessage(const Message& message)
         m_session->deviceDatagram(message.port, message.payload);
         return;
     case MessageType::Closed:
-        m_awaitingHello = true;
+        m_linkDown = true;
+        m_helloSent = false;
         if (m_session) {
+            // The session may still be draining the device's last bytes to the
+            // radio; its end schedules the next HELLO.
             m_session->deviceClosed();
+        } else if (!m_helloTimer->isActive()) {
+            // Never restart a running timer: stray CLOSEDs must not postpone
+            // the next call indefinitely.
+            scheduleHello(m_helloDelayMs);
         }
         return;
+    case MessageType::AudioSpectrum:
+    case MessageType::AudioSpectrumLinear:
+    case MessageType::CwText:
+    case MessageType::RelayUdpPort:
+        // Host-to-device only; a device has nothing to tell the host with these.
+        return;
     case MessageType::Ready:
-        if (!m_awaitingHello) {
-            linkFault(QStringLiteral("CTR2 sent READY, which only the host sends"));
+        // The CTR2's answer to a HELLO sent since the last link ended. Any
+        // other READY is a late answer to an earlier HELLO and changes nothing:
+        // it must not discard a pending CLOSED or skip the failure back-off.
+        if (m_linkDown && m_helloSent && !m_session) {
+            onDeviceStart();
         }
         return;
     }
 }
 
-void Ctr2UsbRelay::onHello()
+void Ctr2UsbRelay::onDeviceStart()
 {
     if (m_session) {
         m_session->terminate(QStringLiteral("CTR2 restarted the link"));
     }
     endSession();
+    m_helloTimer->stop();
     // Nothing from the previous link may reach the device after it restarted.
     discardOutput();
     m_closedSent = false;
-    m_awaitingHello = false;
+    m_helloSent = false;
+    m_linkDown = false;
     ++m_generation;
     m_lastSessionStats = {};
     QTcpSocket* radio = m_socketFactory();
     m_session = new Session(this, m_generation, radio);
-    qCInfo(lcDevices) << "CTR2 USB: HELLO; opening" << radioDescription();
+    qCInfo(lcDevices) << "CTR2 USB: CTR2 ready; opening" << radioDescription();
     setState(State::Connecting);
     emit endpointsChanged();
     m_session->begin(m_radioAddress, m_radioPort);
@@ -570,7 +625,8 @@ void Ctr2UsbRelay::linkFault(const QString& message)
     endSession();
     m_incompleteTimer->stop();
     m_rx.reset();
-    m_awaitingHello = true;
+    m_linkDown = true;
+    m_helloSent = false;
     qCWarning(lcDevices) << "CTR2 USB:" << message;
     setLastError(message);
     if (m_port) {
@@ -580,6 +636,8 @@ void Ctr2UsbRelay::linkFault(const QString& message)
             sendClosedOnce();
         }
         setState(State::Listening);
+        m_helloDelayMs = m_tuning.helloRetryAfterFaultMs;
+        scheduleHello(m_helloDelayMs);
     }
     emit endpointsChanged();
     emit statsChanged();
@@ -608,6 +666,7 @@ void Ctr2UsbRelay::onPortFailed(const QString& message)
     }
     endSession();
     m_incompleteTimer->stop();
+    m_helloTimer->stop();
     releasePort({});
     setLastError(message);
     setState(State::Error);
@@ -672,13 +731,86 @@ bool Ctr2UsbRelay::sendDatagram(quint16 port, const QByteArray& datagram)
     return true;
 }
 
-void Ctr2UsbRelay::sessionConnected(quint64 generation)
+quint32 Ctr2UsbRelay::extensions() const
+{
+    return m_port ? m_port->extensions() : 0;
+}
+
+void Ctr2UsbRelay::onExtensionsNegotiated(quint32 extensions)
+{
+    m_rx.setExtensions(extensions);
+    if (extensions) {
+        qCInfo(lcDevices) << "CTR2 USB:" << deviceDescription() << "link extensions"
+                          << Qt::hex << extensions;
+    }
+    emit extensionsChanged(extensions);
+}
+
+bool Ctr2UsbRelay::sendAudioSpectrum(const QByteArray& payload, MessageType type)
+{
+    if (type != MessageType::AudioSpectrum && type != MessageType::AudioSpectrumLinear) {
+        return false;
+    }
+    const quint32 bit = ctr2hid::capabilityBit(type);
+    // The link moves about one report per millisecond. One meter datagram
+    // alone can take ~60 reports, so allow that plus headroom (~130 ms);
+    // beyond it a frame would be stale on arrival and would crowd the radio.
+    constexpr size_t kMaxQueuedReportsForSpectrum = 128;
+    if (!m_port || m_state != State::Relaying || !(m_port->extensions() & bit)
+        || m_reportCosts.size() > kMaxQueuedReportsForSpectrum) {
+        return false;
+    }
+    std::vector<ctr2hid::Report> reports;
+    if (!m_tx.encodeExtension(type, payload, &reports)) {
+        return false;
+    }
+    for (size_t i = 0; i < reports.size(); ++i) {
+        m_reportCosts.push_back({});
+    }
+    m_port->send(reports);
+    return true;
+}
+
+bool Ctr2UsbRelay::sendCwText(const QByteArray& payload)
+{
+    const quint32 bit = ctr2hid::capabilityBit(MessageType::CwText);
+    // Text waits behind a busy link rather than being dropped like a spectrum
+    // frame, but a stalled device must not grow the queue without bound.
+    if (!m_port || m_state != State::Relaying || !(m_port->extensions() & bit)
+        || m_reportCosts.size() >= static_cast<size_t>(kMaxQueuedReports)) {
+        return false;
+    }
+    std::vector<ctr2hid::Report> reports;
+    if (!m_tx.encodeExtension(MessageType::CwText, payload, &reports)) {
+        return false;
+    }
+    for (size_t i = 0; i < reports.size(); ++i) {
+        m_reportCosts.push_back({});
+    }
+    m_port->send(reports);
+    return true;
+}
+
+void Ctr2UsbRelay::sessionConnected(quint64 generation, quint16 udpPort)
 {
     if (generation != m_generation) {
         return;
     }
     m_tx.reset();
     sendControl(MessageType::Ready);
+    const quint32 relayPortBit = ctr2hid::capabilityBit(MessageType::RelayUdpPort);
+    if (udpPort && m_port && (m_port->extensions() & relayPortBit)) {
+        std::vector<ctr2hid::Report> reports;
+        QByteArray payload;  // not QByteArray{hi, lo}: that is the (size, fill) constructor
+        payload.append(static_cast<char>(udpPort >> 8));
+        payload.append(static_cast<char>(udpPort & 0xFF));
+        if (m_tx.encodeExtension(MessageType::RelayUdpPort, payload, &reports)) {
+            for (size_t i = 0; i < reports.size(); ++i) {
+                m_reportCosts.push_back({});
+            }
+            m_port->send(reports);
+        }
+    }
     qCInfo(lcDevices) << "CTR2 USB: READY; relaying" << deviceDescription()
                       << "<->" << radioDescription();
     setState(State::Relaying);
@@ -702,7 +834,8 @@ void Ctr2UsbRelay::sessionEnded(quint64 generation, const QString& message, bool
     m_session = nullptr;
     QObject::disconnect(session, nullptr, this, nullptr);
     session->deleteLater();
-    m_awaitingHello = true;
+    m_linkDown = true;
+    m_helloSent = false;
     if (sendClosed) {
         discardOutput();
         sendClosedOnce();
@@ -715,6 +848,8 @@ void Ctr2UsbRelay::sessionEnded(quint64 generation, const QString& message, bool
     }
     if (m_port) {
         setState(State::Listening);
+        m_helloDelayMs = error ? m_tuning.helloRetryAfterFaultMs : m_tuning.helloIntervalMs;
+        scheduleHello(m_helloDelayMs);
     }
     emit endpointsChanged();
     emit statsChanged();

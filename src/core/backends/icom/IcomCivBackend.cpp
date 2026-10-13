@@ -232,6 +232,18 @@ bool validNtpServer(const QString& address)
     return true;
 }
 
+SquelchLevelScale measuredSquelchScale(const SquelchScaleProfile& profile)
+{
+    SquelchLevelScale sql;
+    sql.offsetDb = profile.offsetDb;
+    sql.dbPerStep = profile.dbPerStep;
+    for (const std::string_view mode : profile.modes) {
+        sql.modes.append(QString::fromUtf8(mode.data(), static_cast<qsizetype>(mode.size())));
+    }
+    sql.autoSquelch = false;
+    return sql;
+}
+
 }  // namespace
 
 IcomCivBackend::IcomCivBackend(QObject* parent)
@@ -277,6 +289,7 @@ RadioCapabilities IcomCivBackend::capabilities() const
     const IcomModel& m = *m_model;
     const IcomModelProfile& profile = profileFor(m);
     RadioCapabilities c;
+    c.broadcastFmReceive = std::nullopt;
     c.fmDtcsCodes = {};
     c.family = QStringLiteral("icom");
     c.manufacturer = QStringLiteral("Icom");
@@ -298,6 +311,7 @@ RadioCapabilities IcomCivBackend::capabilities() const
     c.receiveModeControl = std::nullopt;
     c.receiveFilterControl = std::nullopt;
     c.receiveAudioControl = std::nullopt;
+    c.receiveAudioExport = std::nullopt; // native DAX export not qualified for this backend
     c.receivePanCenterControl = std::nullopt;
     c.receivePanBandwidthControl = std::nullopt;
 
@@ -360,7 +374,7 @@ RadioCapabilities IcomCivBackend::capabilities() const
     // rfPower() is filled from a CI-V RF-power level READ (level::kRfPower), not
     // from what this client asked for, so it is confirmed radio state (#5518).
     c.transmitDriveControl = RadioCapabilities::TransmitDriveControl{
-        SliceFrequencyControl::Authority::Radio};
+        SliceFrequencyControl::Authority::Radio, /*tunePowerAppliesLive=*/true};
 
     // Modes this radio receives but cannot transmit in (e.g. IC-705 WFM,
     // #5040), derived from the same functions as the mode list. RadioModel's
@@ -426,10 +440,15 @@ RadioCapabilities IcomCivBackend::capabilities() const
     // it, 16 57 picks one of three widths. Not a TNF and not the auto notch —
     // see the capability's own note.
     c.hasManualNotch = true;
-    c.speechProcessorLevelMaximum = profile.speechProcessorLevelMaximum;
-    c.speechProcessorLabel = QString::fromUtf8(
-        profile.speechProcessorLabel.data(),
-        static_cast<qsizetype>(profile.speechProcessorLabel.size()));
+    if (m.hasTransmit) {
+        c.speechProcessorControl = RadioCapabilities::SpeechProcessorControl{
+            profile.speechProcessorLevelMaximum,
+            QString::fromUtf8(
+                profile.speechProcessorLabel.data(),
+                static_cast<qsizetype>(profile.speechProcessorLabel.size()))};
+    } else {
+        c.speechProcessorControl = std::nullopt;
+    }
     // Publish the momentary UI only when the active model profile attests both
     // the XFC command family and the FM facet's release contract. An address is
     // identity, not evidence that a command shape is supported.
@@ -446,6 +465,10 @@ RadioCapabilities IcomCivBackend::capabilities() const
     // CI-V has no per-pan zoom-to-band/segment verb; the scope span is set
     // directly, not by a radio-owned flag.
     c.panZoomModes = std::nullopt;
+    c.panFrameRateShaping = std::nullopt;  // no client owner is declared for FFT FPS
+    // CI-V carries no waterfall rate: the client is the only memory it has.
+    c.panWaterfallRateShaping =
+        PanWaterfallRateShaping{/*clientPersistsWaterfallRate*/ true};
 
     // NO IQ, on any networked Icom. Not deferred — absent. See icom-oracle §8.1.
     c.hasDaxStreams = false;
@@ -503,12 +526,27 @@ RadioCapabilities IcomCivBackend::capabilities() const
     c.hasAgcThreshold = false; // 16 12 selects AGC mode, not Flex AGC-T.
     c.agcModes = {QStringLiteral("slow"), QStringLiteral("med"), QStringLiteral("fast")};
     c.hasModeIndependentSquelch = profile.hasModeIndependentSquelch;
+    // The 0..255 register has no published dB mapping. The IC-7300MK2's is
+    // measured; the others keep Flex's scale until theirs are.
+    c.squelchLevelScale = profile.squelchScale
+        ? measuredSquelchScale(*profile.squelchScale)
+        : legacyDbmSquelchScale();
     c.hasCwTune = profile.hasCwTune;
     // setTune() drives the ordinary TUNE producer: one sine wave. There is no
     // CI-V route for a two-tone selection on any profiled model.
     c.twoToneGenerator = std::nullopt;
+    c.firmwareUpdateSource = std::nullopt;  // reports no firmware version to compare.
     c.hasAmCarrierLevel = false; // RF power is separate; no AM carrier setter.
-    c.hasVoxDelay = false; // setVox implements enable/gain only.
+    // setVox implements enable/gain only; setTxMonitor writes MON and its level.
+    c.voxControl = m.hasTransmit
+        ? std::optional(RadioCapabilities::VoxControl{/*hasDelay*/ false})
+        : std::nullopt;
+    c.txMonitorControl = m.hasTransmit
+        ? std::optional(RadioCapabilities::TxMonitorControl{})
+        : std::nullopt;
+    c.lineoutControl = std::nullopt;
+    // No client owner is declared for "Show TX in Waterfall" on an Icom.
+    c.txWaterfallClientFlag = std::nullopt;
 
     // THREE, and only three — and WHICH three depends on the mode. FIL1 is
     // 3.0 kHz in SSB, 1.2 kHz in CW, 9 kHz in AM and 15 kHz in FM, so a single
@@ -968,6 +1006,10 @@ void IcomCivBackend::disconnectRadio()
     m_controlsValueKnown.clear();
     m_controlsSeen.clear();
     m_confirmedState.clear();
+    // stop() emits no disconnected(), so onSessionDisconnected's reset does
+    // not run for an operator disconnect; the next connect's 0 is not ours.
+    m_squelchOnAtZero = false;
+    m_squelchOn = false;
     ++m_stateContext;
     m_controlsSent.clear();
     m_controlsScheduled.clear();
@@ -983,6 +1025,7 @@ void IcomCivBackend::disconnectRadio()
     m_civDetectAttempts = 0;
     m_scopeStarted = false;
     m_tuning = false;
+    m_tuneOperation = {};
     m_cwBreakInMode = 1;
     m_preTuneTxPowerPercent = -1;
     if (m_connected) {
@@ -1527,6 +1570,7 @@ void IcomCivBackend::onSessionDisconnected(const QString& reason)
 {
     m_tuneTimer->stop();
     m_tuning = false;
+    m_tuneOperation = {};
     m_preTuneTxPowerPercent = -1;
     const bool was = m_connected;
     if (was && !reason.isEmpty()) {
@@ -1553,6 +1597,8 @@ void IcomCivBackend::onSessionDisconnected(const QString& reason)
     m_accessoryModLevelPercent = -1;
     m_networkModLevelPercent = -1;
     m_micGainReported = false;
+    m_squelchOnAtZero = false;
+    m_squelchOn = false;
     m_pcAudioEnabled.reset();
     m_dataOffModRestore.reset();
     m_lastModInputWarning.clear();
@@ -2062,6 +2108,14 @@ void IcomCivBackend::onCivFrame(const CivFrame& frame,
         case level::kRfPower: {
             confirmState(QStringLiteral("civ.20.10"), pct);
             m_txPowerPercent = pct;
+            // During TUNE the register holds the tune drive, not the operator's
+            // RF power; publishing it would make a relative step (wheel, CAT)
+            // start from the tune level and become the value the unkey restores.
+            // CI-V cannot tell that confirming read from a front-panel change, so
+            // an RF-power knob turned during TUNE is not seen either.
+            if (m_tuning) {
+                return;
+            }
             TransmitDelta t; t.rfPower = pct;
             emit transmitChanged(t);
             return;
@@ -2084,12 +2138,14 @@ void IcomCivBackend::onCivFrame(const CivFrame& frame,
             return;
         }
         case level::kCompLevel: {
-            // Normalize the radio's compressor register to 0..100. The model
-            // capability decides whether that full domain survives to a
-            // continuous control or is bounded to the legacy preset surface.
-            m_compLevelPercent = pct;
+            // The SAME domain setSpeechProcessor writes from, the profile's
+            // 0..maximum: TransmitModel clamps to that maximum, so a percent
+            // here would read every non-zero level as the top step.
+            const int maximum = m_model
+                ? profileFor(*m_model).speechProcessorLevelMaximum : 2;
+            m_compLevel = speechProcessorLevelFromRaw(maximum, *raw);
             TransmitDelta t;
-            t.speechProcLevel = pct;
+            t.speechProcLevel = m_compLevel;
             emit transmitChanged(t);
             return;
         }
@@ -2103,10 +2159,22 @@ void IcomCivBackend::onCivFrame(const CivFrame& frame,
             confirmState(QStringLiteral("civ.20.3"), pct);
             m_squelchPercent = pct;
             SliceDelta d;
-            d.squelchLevel = pct;
             // NO SEPARATE ENABLE on this radio — the threshold IS the control,
-            // so a non-zero threshold is what "squelch on" means here.
-            d.squelchOn = pct > 0;
+            // so a non-zero threshold means "on". A zero is "off" unless it is
+            // the echo of our own on-at-0 write; a radio-side non-zero value
+            // ends that, so its later return to 0 reads as off again. Judged on
+            // the raw threshold: raw 1..2 round to 0 % but are not 0.
+            if (*raw > 0) {
+                m_squelchOnAtZero = false;
+            }
+            m_squelchOn = *raw > 0 || m_squelchOnAtZero;
+            d.squelchOn = m_squelchOn;
+            // An Off 0 is not a level. Publishing it would replace the slice's
+            // remembered manual threshold with 0, so the next SQL -> Manual
+            // would come back on at a threshold that gates nothing.
+            if (m_squelchOn) {
+                d.squelchLevel = pct;
+            }
             emit sliceChanged(sliceId(), d);
             return;
         }
@@ -3271,6 +3339,7 @@ int IcomCivBackend::stopTuneProducer()
     }
 
     m_tuning = false;
+    m_tuneOperation = {};
     const int restore = m_preTuneTxPowerPercent;
     m_preTuneTxPowerPercent = -1;
     return restore;
@@ -3397,7 +3466,7 @@ void IcomCivBackend::queueRead(const std::vector<std::uint8_t>& frame,
                                const std::string& key,
                                IcomCivScheduler::Priority priority,
                                qint64 notBeforeMs,
-                               std::vector<std::uint8_t> replyDataPrefix)
+                               std::vector<std::uint8_t> replyDataPrefix, bool coalesce)
 {
     const std::optional<CivFrame> parsed = parseFrame(frame);
     if (!parsed) {
@@ -3419,6 +3488,7 @@ void IcomCivBackend::queueRead(const std::vector<std::uint8_t>& frame,
         request.replySub = 0;
     }
     request.replyDataPrefix = std::move(replyDataPrefix);
+    request.coalesce = coalesce;
     request.notBeforeMs = notBeforeMs;
     m_civScheduler.enqueue(std::move(request), nowMs());
 }
@@ -4242,10 +4312,25 @@ void IcomCivBackend::setPanRfGain(const QString&, int gainDb)
                                 level::kRf, percentToLevelRaw(std::clamp(gainDb, 0, 100))));
 }
 
+// On the IC-7300MK2, engaging ATT drops the preamp, engaging the preamp
+// drops ATT, and ATT off restores the preamp. These interlock changes have no
+// unsolicited report, so the other stage needs a read after the write.
+void IcomCivBackend::queueFrontEndInterlockRead(const std::vector<std::uint8_t>& read)
+{
+    if (!m_session || !m_connected) {
+        return;
+    }
+    const qint64 now = nowMs();
+    // An earlier read can observe the stage before this write applies its
+    // interlock. Keep a fresh read even when that register is queued/in flight.
+    queueRead(read, semanticKey(read), IcomCivScheduler::Priority::Operator, now + 60, {}, false);
+    pumpCiv(now);
+}
+
 // Publish the requested step optimistically: a set is answered with a bare FB,
 // never an echo of the new value, so waiting would leave the widget stuck. If
 // the radio refused (the IC-705 has no P.AMP2 and no attenuator above 50 MHz),
-// the next unsolicited 16 02 / 11 report corrects it.
+// the write's confirmation read corrects it.
 void IcomCivBackend::setPanPreamp(const QString&, int step)
 {
     // Operator intent is bounded by the model's verified presentation ladder.
@@ -4259,6 +4344,9 @@ void IcomCivBackend::setPanPreamp(const QString&, int step)
     sendUserCommand(cmdSetFunction(m_session ? m_session->civAddress() : 0xA4,
                                    func::kPreamp, wanted));
     emit panPreampChanged(panId(), wanted);
+    if (!attenStepsFor(*m_model).empty() && m_session) {
+        queueFrontEndInterlockRead(cmdReadAttenuator(m_session->civAddress()));
+    }
 }
 
 void IcomCivBackend::reassertPanPreampWireStep(int step)
@@ -4285,6 +4373,229 @@ void IcomCivBackend::setPanAttenuator(const QString&, int step)
     sendUserCommand(cmdSetAttenuator(m_session ? m_session->civAddress() : 0xA4,
                                      steps[static_cast<std::size_t>(wanted)].db));
     emit panAttenuatorChanged(panId(), wanted);
+    if (m_session) {
+        queueFrontEndInterlockRead(cmdReadFunction(m_session->civAddress(), func::kPreamp));
+    }
+}
+
+ReceiveDispatch IcomCivBackend::requestSliceControl(int sliceId, const SliceControlRequest& request)
+{
+    using Field = SliceControlRequest::Field;
+    if (!m_connected || !m_session || !m_model || sliceId != 0 || !request.valid()) {
+        return ReceiveDispatch::Unsupported;
+    }
+    const FmRepeaterProfile* fm = basicFmProfileFor(m_model);
+    switch (request.field) {
+    case Field::Rit: case Field::Xit: {
+        const IncrementalTuning tuning = std::get<IncrementalTuning>(request.value);
+        if (request.field == Field::Rit) { setSliceRitEnabled(sliceId, tuning.enabled); }
+        else { setSliceXitEnabled(sliceId, tuning.enabled); }
+        setSliceRitOffset(sliceId, tuning.hz); // one register shared by RX and TX
+        break;
+    }
+    case Field::FmToneMode: {
+        const QString mode = std::get<QString>(request.value).trimmed().toLower();
+        if (!fm || !fm->hasTxCtcss || !capabilities().fmToneModes.contains(mode)) {
+            return ReceiveDispatch::Unsupported;
+        }
+        setSliceFmToneMode(sliceId, mode); break;
+    }
+    case Field::FmToneValue: {
+        const double hz = std::get<double>(request.value);
+        if (!fm || !fm->hasTxCtcss
+            || (ctcssRxProfileFor(m_model) ? !isCanonicalCtcssTone(hz) : hz > 299.9)) {
+            return ReceiveDispatch::Unsupported;
+        }
+        setSliceFmToneValue(sliceId, hz); break;
+    }
+    case Field::FmRxToneValue: {
+        const double hz = std::get<double>(request.value);
+        if (!ctcssRxProfileFor(m_model) || !isCanonicalCtcssTone(hz)) {
+            return ReceiveDispatch::Unsupported;
+        }
+        setSliceFmToneRxValue(sliceId, hz); break;
+    }
+    case Field::FmDtcs: {
+        const DtcsSetting setting = std::get<DtcsSetting>(request.value);
+        const FmRepeaterProfile* extended = extendedFmReadbackProfileFor(m_model);
+        if (!extended || !extended->hasDtcs || !isCanonicalDtcsCode(setting.code)) {
+            return ReceiveDispatch::Unsupported;
+        }
+        setSliceFmDtcs(sliceId, setting.code, setting.txReverse, setting.rxReverse); break;
+    }
+    case Field::RepeaterDirection: {
+        const QString direction = std::get<QString>(request.value).trimmed().toLower();
+        if (!fm || !fm->hasDuplex || (direction != QLatin1String("simplex")
+            && direction != QLatin1String("up") && direction != QLatin1String("down"))) {
+            return ReceiveDispatch::Unsupported;
+        }
+        setSliceRepeaterOffsetDir(sliceId, direction); break;
+    }
+    case Field::RepeaterOffset:
+        if (!fm || !fm->hasDuplex || std::get<double>(request.value) < 0
+            || std::get<double>(request.value) > 99'999'900.0) {
+            return ReceiveDispatch::Unsupported;
+        }
+        setSliceFmRepeaterOffset(sliceId, std::get<double>(request.value)); break;
+    case Field::RepeaterRecall: {
+        if (!fm || !fm->hasDuplex || !fm->hasTxCtcss) { return ReceiveDispatch::Unsupported; }
+        const RepeaterSetting setting = std::get<RepeaterSetting>(request.value);
+        const QString direction = setting.direction.trimmed().toLower();
+        const QString mode = setting.toneMode.trimmed().toLower();
+        // Validate the whole recall before the first write of its four parts.
+        if ((direction != QLatin1String("simplex") && direction != QLatin1String("up")
+             && direction != QLatin1String("down")) || setting.offsetHz < 0
+            || setting.offsetHz > 99'999'900.0 || !capabilities().fmToneModes.contains(mode)
+            || (ctcssRxProfileFor(m_model) ? !isCanonicalCtcssTone(setting.toneHz)
+                                         : setting.toneHz > 299.9)) {
+            return ReceiveDispatch::Unsupported;
+        }
+        setSliceFmRepeater(sliceId, direction, setting.offsetHz, mode, setting.toneHz);
+        break;
+    }
+    case Field::ActiveSlice: case Field::TxSlice:
+        return ReceiveDispatch::LocalOnly; // the existing sole selected VFO
+    case Field::TxAntenna: case Field::DaxChannel: case Field::RttyMark:
+    case Field::RttyShift: case Field::DiglOffset: case Field::DiguOffset:
+    case Field::Record: case Field::Play: case Field::TxOffset:
+    case Field::FmDeviation: case Field::RfGain: case Field::Diversity:
+    case Field::EscEnabled: case Field::EscGain: case Field::EscPhase: case Field::Count:
+        return ReceiveDispatch::Unsupported;
+    }
+    return ReceiveDispatch::Dispatched;
+}
+
+ReceiveDispatch IcomCivBackend::requestTransmitControl(const TransmitControlRequest& request,
+                                               TunePowerContext context)
+{
+    using Field = TransmitControlRequest::Field;
+    if (!m_connected || !m_session || !m_model || !request.valid()) {
+        return ReceiveDispatch::Unsupported;
+    }
+    const RadioCapabilities caps = capabilities();
+    switch (request.field) {
+    case Field::RfPower: setTxPower(std::get<int>(request.value)); break;
+    case Field::TunePower:
+        if (context == TunePowerContext::Deferred) { return ReceiveDispatch::LocalOnly; }
+        if (context != TunePowerContext::LiveLocalCarrier || !m_tuning
+            || !TxCoordinator::Command{m_tuneOperation, true}.permitsDispatch(TxCoordinator::monotonicMs())
+            || !transmitContext().permitsDispatch(TxCoordinator::monotonicMs())) {
+            return ReceiveDispatch::Unsupported;
+        }
+        setTunePower(std::get<int>(request.value)); break;
+    case Field::MicGain: setMicGain(std::get<int>(request.value)); break;
+    case Field::CwPitch: case Field::CwSpeed: case Field::CwBreakIn:
+        // Preserve the current capability gate until #6110 defines its replacement.
+        if (!caps.hasRadioSideCwKeyer) { return ReceiveDispatch::Unsupported; }
+        if (request.field == Field::CwPitch) { setCwPitch(std::get<int>(request.value)); }
+        else if (request.field == Field::CwSpeed) { setCwSpeed(std::get<int>(request.value)); }
+        else { setCwBreakIn(std::get<bool>(request.value)); }
+        break;
+    case Field::Filter: {
+        if (!caps.hasTxFilterControls || activeTxBandwidthItem() < 0) {
+            return ReceiveDispatch::Unsupported;
+        }
+        const TxPassband filter = std::get<TxPassband>(request.value);
+        setTxFilter(filter.lowHz, filter.highHz); break;
+    }
+    case Field::ProcessorEnabled: case Field::ProcessorLevel: {
+        if (!caps.speechProcessorControl) { return ReceiveDispatch::Unsupported; }
+        const ProcessorSetting setting = std::get<ProcessorSetting>(request.value);
+        setSpeechProcessor(setting.enabled, setting.level); break;
+    }
+    case Field::VoxEnabled: case Field::VoxLevel: {
+        if (!caps.voxControl) { return ReceiveDispatch::Unsupported; }
+        const VoxSetting setting = std::get<VoxSetting>(request.value);
+        setVox(setting.enabled, setting.level, setting.delay); break;
+    }
+    case Field::MonitorEnabled: case Field::MonitorLevel: {
+        if (!caps.txMonitorControl) { return ReceiveDispatch::Unsupported; }
+        const MonitorSetting setting = std::get<MonitorSetting>(request.value);
+        setTxMonitor(setting.enabled, setting.level); break;
+    }
+    case Field::TuneMode: case Field::MicInput: case Field::MicAccessory:
+    case Field::Dax: case Field::VoxDelay: case Field::MicBoost: case Field::MicBias:
+    case Field::AmCarrier: case Field::ExpanderEnabled: case Field::ExpanderLevel:
+    case Field::CwDelay: case Field::CwSidetone: case Field::CwIambic:
+    case Field::CwIambicMode: case Field::CwSwap: case Field::CwlEnabled:
+    case Field::CwMonitorGain: case Field::CwMonitorPan: case Field::TxProfile:
+    case Field::MicProfile: case Field::ApdEnabled: case Field::ApdSampler:
+    case Field::ApdReset: case Field::AtuMemories: case Field::AtuClear: case Field::Count:
+        return ReceiveDispatch::Unsupported;
+    }
+    return ReceiveDispatch::Dispatched;
+}
+
+ReceiveDispatch IcomCivBackend::requestSliceDsp(int sliceId, const SliceDspRequest& request)
+{
+    if (!m_connected || !m_session || !m_model || sliceId != 0 || !request.valid()
+        || request.origin != SliceDspRequest::Origin::Operator) {
+        return ReceiveDispatch::Unsupported;
+    }
+    switch (request.feature) {
+    case SliceDspRequest::Feature::Nb:
+        setSliceNoiseBlanker(sliceId, request.requestedBlanker(), request.level, request.fill); break;
+    case SliceDspRequest::Feature::Nr:
+        setSliceNoiseReduction(sliceId, request.enabled, request.level); break;
+    case SliceDspRequest::Feature::Anf:
+        if (request.field != SliceDspRequest::Field::Enabled) {
+            return ReceiveDispatch::Unsupported;
+        }
+        setSliceAutoNotch(sliceId, request.enabled); break;
+    case SliceDspRequest::Feature::Mn:
+        setSliceManualNotch(sliceId, request.enabled, request.level); break;
+    default: return ReceiveDispatch::Unsupported;
+    }
+    return ReceiveDispatch::Dispatched;
+}
+
+ReceiveDispatch IcomCivBackend::requestSliceAudio(int sliceId, const SliceAudioRequest& request)
+{
+    if (!m_connected || !m_session || !m_model || sliceId != 0
+        || !request.valid() || request.field != SliceAudioRequest::Field::Gain) {
+        return ReceiveDispatch::Unsupported;
+    }
+    setSliceAudioGain(sliceId, request.value);
+    return ReceiveDispatch::Dispatched;
+}
+
+ReceiveDispatch IcomCivBackend::requestSliceSquelch(int sliceId, const SliceSquelchRequest& request)
+{
+    if (request.kind != SliceSquelchRequest::Kind::Manual) {
+        return ReceiveDispatch::Unsupported;
+    }
+    if (!m_connected || !m_session || !m_model || sliceId != 0 || !request.valid()) {
+        return ReceiveDispatch::Unsupported;
+    }
+    setSliceSquelch(sliceId, request.enabled, request.level);
+    return ReceiveDispatch::Dispatched;
+}
+
+ReceiveDispatch IcomCivBackend::requestSliceRxAntenna(int sliceId, const QString& antenna)
+{
+    if (!m_connected || !m_session || sliceId != 0 || !m_model || !profileFor(*m_model).rxAntenna
+        || !profileFor(*m_model).rxAntenna->selectable
+        || (antenna.compare(QLatin1String("ANT1"), Qt::CaseInsensitive) != 0
+            && antenna.compare(QLatin1String("RX-ANT"), Qt::CaseInsensitive) != 0)) {
+        return ReceiveDispatch::Unsupported;
+    }
+    setSliceRxAntenna(sliceId, antenna);
+    return ReceiveDispatch::Dispatched;
+}
+
+ReceiveDispatch IcomCivBackend::requestSliceLock(int sliceId, bool locked)
+{
+    if (sliceId != 0) {
+        return ReceiveDispatch::Unsupported;
+    }
+    if (!capabilities().hasRadioDialLock) {
+        return ReceiveDispatch::LocalOnly;
+    }
+    if (!m_connected || !m_session) {
+        return ReceiveDispatch::Unsupported;
+    }
+    setRadioDialLock(locked);
+    return ReceiveDispatch::Dispatched;
 }
 
 void IcomCivBackend::setSliceRxAntenna(int, const QString& antenna)
@@ -4313,7 +4624,7 @@ void IcomCivBackend::setSpeechProcessor(bool on, int level)
     m_compEnable = on;
     const int maximum = m_model
         ? profileFor(*m_model).speechProcessorLevelMaximum : 2;
-    m_compLevelPercent = std::clamp(level, 0, maximum);
+    m_compLevel = std::clamp(level, 0, maximum);
     const std::uint8_t addr = m_session ? m_session->civAddress() : 0xA4;
 
     // TWO REGISTERS, not one: 16 44 enables the compressor and 14 0E sets its
@@ -4336,8 +4647,9 @@ void IcomCivBackend::setSpeechProcessor(bool on, int level)
         return;   // the level is meaningless while the compressor is bypassed
 
     // Legacy Icom profiles retain NOR / DX / DX+ thirds. A profile with an
-    // evidenced continuous control writes the normalized percent directly.
-    const int raw = speechProcessorRawLevel(maximum, m_compLevelPercent);
+    // evidenced continuous control writes its own steps (MK2 0..10, IC-9700
+    // percent); the kCompLevel readback decodes with the same maximum.
+    const int raw = speechProcessorRawLevel(maximum, m_compLevel);
     sendUserCommand(cmdSetLevel(addr, level::kCompLevel, raw));
 }
 
@@ -4408,8 +4720,15 @@ void IcomCivBackend::setSliceNoiseReduction(int, bool on, int level)
         sendUserCommand(cmdSetLevel(addr, level::kNrLevel, percentToLevelRaw(level)));
 }
 
-void IcomCivBackend::setSliceNoiseBlanker(int, bool on, int level)
+void IcomCivBackend::setSliceNoiseBlanker(int, AetherSDR::NoiseBlankerKind kind,
+                                          int level, AetherSDR::NoiseBlankerFill fill)
 {
+    // The radio has ONE blanker, so anything but Off is on and the fill is not a
+    // thing this radio has an opinion about. Not a downgrade of the operator's
+    // request: Advanced is only reachable where hasHostNoiseBlanker is set, and
+    // an Icom leaves that false.
+    Q_UNUSED(fill);
+    const bool on = kind != AetherSDR::NoiseBlankerKind::Off;
     m_nbLevelPercent = level;
     const std::uint8_t addr = m_session ? m_session->civAddress() : 0xA4;
     if (m_nbEnableSent != (on ? 1 : 0)) {
@@ -4535,13 +4854,18 @@ bool IcomCivBackend::queueTunerReadIfSupported(
 
 void IcomCivBackend::setSliceSquelch(int, bool on, int level)
 {
+    // sendUserCommand drops a write outside a connected session; record no
+    // on-at-0 intent for a write that never reaches the radio.
+    if (!m_session || !m_connected)
+        return;
     m_squelchPercent = on ? level : 0;
-    // NO SQUELCH ENABLE EXISTS on this radio — the threshold IS the control,
-    // and squelch is "off" when it sits at zero. Mapping the UI's toggle onto
-    // the threshold is the only honest translation available; the alternative
-    // is a switch that does nothing.
-    sendUserCommand(cmdSetLevel(m_session ? m_session->civAddress() : 0xA4,
-                                level::kSquelch, on ? percentToLevelRaw(level) : 0));
+    // NO SQUELCH ENABLE EXISTS on this radio — the threshold IS the control.
+    // Off writes 0; on writes the level, and on-at-0 is remembered so its own
+    // 0 readback stays on (the kSquelch decode). Mapping the UI's toggle onto
+    // the threshold is the only honest translation available.
+    const int raw = on ? percentToLevelRaw(level) : 0;
+    m_squelchOnAtZero = on && raw == 0;
+    sendUserCommand(cmdSetLevel(m_session->civAddress(), level::kSquelch, raw));
 }
 
 void IcomCivBackend::setSliceFmToneMode(int, const QString& mode)
@@ -4791,20 +5115,23 @@ void IcomCivBackend::setTransmitFrequencyCheck(bool on)
         m_session ? m_session->civAddress() : 0xA4, on));
 }
 
-void IcomCivBackend::setRitEnabled(bool on)
+void IcomCivBackend::setSliceRitEnabled(int sliceId, bool on)
 {
+    Q_UNUSED(sliceId);
     m_ritOn = on;
     sendUserCommand(cmdRitEnable(m_session ? m_session->civAddress() : 0xA4, on));
 }
 
-void IcomCivBackend::setXitEnabled(bool on)
+void IcomCivBackend::setSliceXitEnabled(int sliceId, bool on)
 {
+    Q_UNUSED(sliceId);
     m_xitOn = on;
     sendUserCommand(cmdXitEnable(m_session ? m_session->civAddress() : 0xA4, on));
 }
 
-void IcomCivBackend::setRitOffset(int hz)
+void IcomCivBackend::setSliceRitOffset(int sliceId, int hz)
 {
+    Q_UNUSED(sliceId);
     m_ritOffsetHz = hz;
     // ONE offset register serves both RIT and XIT on this radio — 21 00 is the
     // shift, and 21 01 / 21 02 decide which of receive and transmit it applies
@@ -4930,15 +5257,16 @@ void IcomCivBackend::setTune(bool on, int tunePowerPercent, const AetherSDR::TxC
             || refuseKeyingInReceiveOnlyMode()) {
             return;
         }
+        m_tuneOperation = operation;
         if (m_tuning) {
             if (tunePowerPercent >= 0) {
-                setTxPower(tunePowerPercent);
+                writeTxPowerLevel(tunePowerPercent);
             }
             return;
         }
         m_preTuneTxPowerPercent = m_txPowerPercent;
         if (tunePowerPercent >= 0) {
-            setTxPower(tunePowerPercent);
+            writeTxPowerLevel(tunePowerPercent);
         }
         // Raise the tone BEFORE keying, so no part of the keyed window is
         // silent — a tuner sampling that edge can otherwise read infinite SWR.
@@ -4960,6 +5288,35 @@ void IcomCivBackend::setTune(bool on, int tunePowerPercent, const AetherSDR::TxC
 }
 
 void IcomCivBackend::setTxPower(int percent)
+{
+    // TUNE borrows the one drive register: RF power set meanwhile is what the
+    // unkey restores, and the carrier keeps its tune drive.
+    if (m_tuning) {
+        m_preTuneTxPowerPercent = std::clamp(percent, 0, 100);
+        return;
+    }
+    writeTxPowerLevel(percent);
+}
+
+// A carrier whose admission has lapsed takes no drive change.
+void IcomCivBackend::setTunePower(int percent)
+{
+    if (!m_tuning) {
+        return;
+    }
+    // The admission setTune(true) checked: the carrier's operation and this
+    // backend's transmit context. The verb returns nothing, so a refusal is logged.
+    const qint64 now = TxCoordinator::monotonicMs();
+    if (!TxCoordinator::Command{m_tuneOperation, true}.permitsDispatch(now)
+        || !transmitContext().permitsDispatch(now)) {
+        qCWarning(lcIcomTx) << "Icom: TUNE power" << percent
+                            << "% not applied: the TUNE carrier's transmit admission has lapsed";
+        return;
+    }
+    writeTxPowerLevel(percent);
+}
+
+void IcomCivBackend::writeTxPowerLevel(int percent)
 {
     m_txPowerPercent = std::clamp(percent, 0, 100);
     sendUserCommand(cmdSetLevel(m_session ? m_session->civAddress() : 0xA4,
@@ -5512,9 +5869,9 @@ bool IcomCivBackend::scrubDrive(const icom::ControlSpec& c)
                                    : QStringLiteral("ANT1"));
         return true;
     }
-    if (id == QLatin1String("squelch"))  { setSliceSquelch(slice, m_squelchPercent > 0, m_squelchPercent); return true; }
+    if (id == QLatin1String("squelch"))  { setSliceSquelch(slice, m_squelchOn, m_squelchPercent); return true; }
     if (id == QLatin1String("agc"))      { setSliceAgc(slice, m_agcMode, 0); return true; }
-    if (id == QLatin1String("tx.power")) { setTxPower(m_txPowerPercent); return true; }
+    if (id == QLatin1String("tx.power")) { writeTxPowerLevel(m_txPowerPercent); return true; }
     if (id == QLatin1String("mic.gain")) {
         const auto mod = modulationProfileFor(*m_model);
         const int activeInput = m_dataMode ? m_dataModInput : m_dataOffModInput;
@@ -5564,9 +5921,9 @@ bool IcomCivBackend::scrubDrive(const icom::ControlSpec& c)
         setVox(m_voxOn, m_voxLevelPercent, 0);
         return true;
     }
-    if (id == QLatin1String("rit.enable")) { setRitEnabled(m_ritOn); return true; }
-    if (id == QLatin1String("xit.enable")) { setXitEnabled(m_xitOn); return true; }
-    if (id == QLatin1String("rit.offset")) { setRitOffset(m_ritOffsetHz); return true; }
+    if (id == QLatin1String("rit.enable")) { setSliceRitEnabled(slice, m_ritOn); return true; }
+    if (id == QLatin1String("xit.enable")) { setSliceXitEnabled(slice, m_xitOn); return true; }
+    if (id == QLatin1String("rit.offset")) { setSliceRitOffset(slice, m_ritOffsetHz); return true; }
     if (id == QLatin1String("repeater.tone")) {
         if (!m_repeaterToneOn) {
             return false;
@@ -5636,7 +5993,10 @@ bool IcomCivBackend::scrubDrive(const icom::ControlSpec& c)
             return false;
         const bool on = m_nbEnableSent == 1;
         m_nbEnableSent = -1;
-        setSliceNoiseBlanker(slice, on, m_nbLevelPercent);
+        setSliceNoiseBlanker(slice,
+                             on ? AetherSDR::NoiseBlankerKind::Impulse
+                                : AetherSDR::NoiseBlankerKind::Off,
+                             m_nbLevelPercent, AetherSDR::kDefaultNoiseBlankerFill);
         return true;
     }
     if (id == QLatin1String("anf")) {
@@ -5661,7 +6021,7 @@ bool IcomCivBackend::scrubDrive(const icom::ControlSpec& c)
         // Same shape: 14 0E only goes out while the compressor is enabled.
         if (id.endsWith(QLatin1String(".level")) && !m_compEnable)
             return false;
-        setSpeechProcessor(m_compEnable, m_compLevelPercent);
+        setSpeechProcessor(m_compEnable, m_compLevel);
         return true;
     }
 

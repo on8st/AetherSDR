@@ -12,6 +12,7 @@
 #include "core/backends/anan/AnanBackend.h"
 #include "core/backends/sim/SimBackend.h"
 #ifdef AETHER_BACKEND_RTL
+#include "core/backends/rtl/RtlReceivePipeline.h"
 #include "core/backends/rtl/RtlSdrBackend.h"
 #endif
 
@@ -637,9 +638,38 @@ void productionCapabilityContracts()
 #ifdef AETHER_BACKEND_RTL
     rtl::RtlSdrBackend rtl;
     const auto rtlCaps = rtl.capabilities();
-    check(rtlCaps.receiveModeControl && !rtlCaps.receiveFilterControl && rtlCaps.receiveAudioControl
-        && !rtlCaps.receivePanCenterControl && rtlCaps.receivePanBandwidthControl,
-        "RTL exposes real mixer/bandwidth controls, not unused filter edges or retuning center");
+    check(rtlCaps.receiveModeControl && rtlCaps.receiveFilterControl && rtlCaps.receiveAudioControl
+        && rtlCaps.receivePanCenterControl && rtlCaps.receivePanBandwidthControl
+        && rtlCaps.panSpanModel && !rtlCaps.panSpanModel->followsSampleRate,
+        "RTL exposes independent display center/span alongside implemented FM filter and mixer controls");
+    // WFM joins the adjustable filters only through the qualified recipe (the
+    // build gate #5973 turned on); legacy WFM never does.
+    const bool qualifiedWfm = rtl::RtlReceivePipeline::kQualifiedWfmEnabled;
+    const auto& rtlFilters = rtlCaps.receiveFilterControl;
+    check(rtlFilters && rtlFilters->modes.size() == (qualifiedWfm ? 3 : 2)
+        && rtlFilters->modes[0].mode == QStringLiteral("FM")
+        && rtlFilters->modes[1].mode == QStringLiteral("FMN")
+        && rtlFilters->modes[0].minimumLowHz == -21600
+        && rtlFilters->modes[1].maximumHighHz == 21600,
+        "RTL adjustable filters are FM and FMN, plus WFM only when qualified");
+    check(!qualifiedWfm
+        || (rtlFilters && rtlFilters->modes.size() == 3
+            && rtlFilters->modes[2].mode == QStringLiteral("WFM")
+            && rtlFilters->modes[2].minimumLowHz == -100000
+            && rtlFilters->modes[2].maximumHighHz == 100000
+            && rtlFilters->modes[2].minimumWidthHz == 30000
+            && rtlFilters->modes[2].maximumWidthHz == 200000
+            && rtlCaps.broadcastFmReceive),
+        "qualified WFM declares its own filter range and the broadcast-FM controls");
+    check(qualifiedWfm || !rtlCaps.broadcastFmReceive,
+        "without qualified WFM, RTL offers no broadcast-FM controls");
+    check(rtlCaps.squelchLevelScale && rtlCaps.squelchLevelScale->modesExclusive
+        && rtlCaps.squelchLevelScale->automaticInEngine && !rtlCaps.squelchLevelScale->spectrumComparable
+        && rtlCaps.squelchLevelScale->modes == QStringList{"FM", "FMN"}
+        && rtlCaps.squelchLevelScale->offsetDb == -120
+        && rtlCaps.squelchLevelScale->dbPerStep == 1.2
+        && rtlCaps.squelchLevelScale->unit == QStringLiteral("dBFS/2048-bin"),
+        "RTL desktop squelch declares the implemented detector's modes and units");
 #endif
 }
 

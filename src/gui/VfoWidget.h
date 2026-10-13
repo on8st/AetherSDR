@@ -39,6 +39,7 @@ namespace AetherSDR {
 class SliceModel;
 class TransmitModel;
 class RadioModel;
+class ControlAvailabilityRegistry;
 class PhaseKnob;
 class RxApplet;
 class KiwiSdrManager;
@@ -69,6 +70,8 @@ public:
     // 2-state on/off mode against the slice's squelchLevel only.
     void setRxApplet(RxApplet* rx);
     void setSignalLevel(float dbm);
+    void setRelativeSignalLevel(std::optional<float> dbfs, const QString& unavailableReason = {});
+    bool relativeSignalLevel() const { return m_relativeSignal; }
     void setReceiveMeterReading(
         const AetherSDR::KiwiSdrProtocol::MeterReading& reading);
     // SmartMTR feeds: live mic level + separately-measured mic peak (both dBFS)
@@ -412,6 +415,8 @@ private:
     void updateDspTabAccent();
     void deactivateTabButton(int closedTab);  // reset a just-closed tab's style
     void updateFreqLabel();
+    void updateCaptureStatus();
+    void updateCollapsedFrequencyLabel();
     bool cancelDirectEntry();
     void updateFilterLabel();
     void updateModeTab();
@@ -430,10 +435,20 @@ private:
     SliceModel*    m_slice{nullptr};
     TransmitModel* m_txModel{nullptr};
     RadioModel*    m_radioModel{nullptr};
+    ControlAvailabilityRegistry* m_filterAvailability{nullptr};
+    std::optional<ReceiveFilterControl> m_receiveFilterControl;
+    // exclusiveSquelchScaleValue(caps.squelchLevelScale): the receiver's own gate.
+    std::optional<SquelchLevelScale> m_exclusiveSquelch;
+    QPushButton* m_filterUnavailable{nullptr};
+    QVector<int> defaultFilterWidths(const QString& mode) const;
+    bool acceptsFilterEdges(int low, int high) const;
     KiwiSdrManager* m_kiwiSdrManager{nullptr};
     QStringList    m_antList;
     bool           m_updatingFromModel{false};
     bool           m_lastOnLeft{true};
+    bool m_relativeSignal = false;
+    bool m_relativeSignalValid = false;
+    QString m_relativeUnavailableReason;
     float          m_signalDbm{-130.0f};
     // Whether m_signalDbm is a real calibrated reading. FLEX always is; a
     // KiwiSDR slice without a calibrated meter is not, in which case the
@@ -479,6 +494,7 @@ private:
 
     // Frequency / meter
     QLabel* m_freqLabel{nullptr};
+    QLabel* m_captureStatusLabel{nullptr};
     QLineEdit* m_freqEdit{nullptr};
     QStackedWidget* m_freqStack{nullptr};
     QLabel* m_dbmLabel{nullptr};
@@ -492,6 +508,7 @@ private:
     // meter's repaint asks the spectrum overlay to refresh.
     QElapsedTimer m_labelDirtyClock;
     qint64 m_lastLabelDirtyMs{-1};
+    bool m_smartMtrLabelsVisible{false};
     float m_micDbfs{-40.0f}; // latest mic level (dBFS); SmartMTR TX scale
     float m_micPeakDbfs{-40.0f}; // latest mic peak (dBFS, radio MICPEAK stat)
     // Latest TX-meter values, cached for the SmartMTR TX scales (see the setters).
@@ -703,6 +720,14 @@ private:
     // Pick a sensible initial target from the current slice's enable
     // flags; called when m_slice is set and on mode-driven re-visibility.
     void refreshDspLevelTarget();
+    // NB2's fill row. Visible only while NB2 is the running blanker; see
+    // refreshNbControls().
+    QWidget*   m_nbFillContainer{nullptr};
+    QComboBox* m_nbFillCombo{nullptr};
+    // Button text, visibility of the fill row and the combo's index, from
+    // whatever the slice now says. One place, called from the click handler, the
+    // model signals and the slice-switch sync, so the three cannot disagree.
+    void refreshNbControls();
     QWidget* m_apfContainer{nullptr};
     QSlider* m_apfSlider{nullptr};
     QLabel*  m_apfValueLbl{nullptr};

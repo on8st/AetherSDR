@@ -7,11 +7,19 @@
 #include "models/Ctr2ProxyModel.h"
 
 #include <QCoreApplication>
+#include <QFile>
 #include <QHostAddress>
+#include <QRegularExpression>
+#include <QSet>
+#include <QTemporaryDir>
 
 #include <cstdio>
 #include <memory>
 #include <vector>
+
+#ifdef Q_OS_LINUX
+#include <unistd.h>
+#endif
 
 using AetherSDR::Ctr2ProxyModel;
 
@@ -29,18 +37,24 @@ void check(bool condition, const char* message)
 
 struct PortLog {
     int opened{0};
+    int shutdowns{0};
+    bool openOnCreate{true};
     bool closedWithClosed{false};
 };
 
 // Injected HID port: records whether the relay told the CTR2 CLOSED on close.
 class FakePort : public AetherSDR::Ctr2HidPort {
 public:
-    explicit FakePort(std::shared_ptr<PortLog> log) : m_log(std::move(log)) { ++m_log->opened; }
+    explicit FakePort(std::shared_ptr<PortLog> log) : m_log(std::move(log)), m_open(m_log->openOnCreate)
+    {
+        ++m_log->opened;
+    }
     bool isOpen() const override { return m_open; }
     void send(const std::vector<AetherSDR::ctr2hid::Report>&) override {}
     void discardQueued() override {}
     void shutdown(const std::vector<AetherSDR::ctr2hid::Report>& final) override
     {
+        ++m_log->shutdowns;
         m_log->closedWithClosed = final.size() == 1
             && final[0][3] == static_cast<std::uint8_t>(AetherSDR::ctr2hid::MessageType::Closed);
         m_open = false;
@@ -97,7 +111,183 @@ void testRelayFollowsAetherSdrsRadio()
     check(model.start(), "restart after reconnect");
     model.stop();
     check(!model.isRunning() && model.lastError().isEmpty(), "a manual Stop leaves no error behind");
+
+    // A port the relay refuses is shut down, never deleted in place: deleting
+    // waits on its I/O thread, which may still be waiting for the last port.
+    log->openOnCreate = false;
+    const int shutdownsBefore = log->shutdowns;
+    check(!model.start() && log->shutdowns == shutdownsBefore + 1,
+          "a refused port is handed back with shutdown(), which never blocks");
     QCoreApplication::processEvents();
+}
+
+// The packaged udev rule lists exactly the product patterns the app labels as
+// a CTR2: a recognised device the rule misses would loop forever on the
+// install prompt, and an extra one would open an unrelated ESP32-S3 board.
+// This compares the patterns, not the devices they match: udev's "Aether*"
+// also matches names the app refuses, which testSelfNamedDevices() pins.
+void testUdevRuleMatchesKnownCtr2s()
+{
+    QFile file(QStringLiteral(AETHER_CTR2_UDEV_RULES));
+    check(file.open(QIODevice::ReadOnly | QIODevice::Text), "the packaged CTR2 udev rule is readable");
+    const auto key = [](quint16 vid, quint16 pid, const QString& product) {
+        return QStringLiteral("%1:%2:%3")
+            .arg(vid, 4, 16, QLatin1Char('0')).arg(pid, 4, 16, QLatin1Char('0')).arg(product);
+    };
+    static const QRegularExpression attr(QStringLiteral(R"re(ATTRS\{(idVendor|idProduct|product)\}=="([^"]*)")re"));
+    QSet<QString> granted;
+    for (const QString& line : QString::fromUtf8(file.readAll()).split(QLatin1Char('\n'))) {
+        if (line.trimmed().isEmpty() || line.trimmed().startsWith(QLatin1Char('#'))) {
+            continue;
+        }
+        QString vid, pid, products;
+        for (auto it = attr.globalMatch(line); it.hasNext();) {
+            const auto m = it.next();
+            (m.captured(1) == QLatin1String("idVendor") ? vid
+             : m.captured(1) == QLatin1String("idProduct") ? pid : products) = m.captured(2);
+        }
+        check(!vid.isEmpty() && !pid.isEmpty() && !products.isEmpty(),
+              "every rule line pins VID, PID and product string");
+        for (const QString& product : products.split(QLatin1Char('|'))) {
+            granted.insert(key(vid.toUShort(nullptr, 16), pid.toUShort(nullptr, 16), product));
+        }
+    }
+    QSet<QString> known;
+    for (const auto& d : AetherSDR::Ctr2HidPort::knownCtr2Devices()) {
+        known.insert(key(d.vendorId, d.productId, QString::fromLatin1(d.product)));
+    }
+    for (const QString& k : known - granted) {
+        std::fprintf(stderr, "  recognised but not granted: %s\n", qPrintable(k));
+    }
+    for (const QString& k : granted - known) {
+        std::fprintf(stderr, "  granted but not recognised: %s\n", qPrintable(k));
+    }
+    check(granted == known, "the udev rule lists exactly the recognized CTR2 product patterns");
+
+    // Every name the app recognizes must be one the rule's glob grants, or a
+    // self-named device would loop on the install prompt.
+    const QStringList probes{QStringLiteral("AetherX"), QStringLiteral("AetherDial"), QStringLiteral("Aether ~"),
+                             QStringLiteral("Aether") + QString(26, QLatin1Char('x'))};
+    for (const QString& probe : probes) {
+        const AetherSDR::Ctr2HidPort::DeviceInfo info{QStringLiteral("p"), 0x303A, 0x1001, {}, probe, {}};
+        bool covered = false;
+        for (const QString& g : granted) {
+            const QString prefix = key(0x303A, 0x1001, QString());
+            const QRegularExpression glob(QRegularExpression::wildcardToRegularExpression(
+                g.mid(prefix.size()), QRegularExpression::NonPathWildcardConversion));
+            covered = covered || (g.startsWith(prefix) && glob.match(probe).hasMatch());
+        }
+        check(!info.ctr2Model().isEmpty(), "a self-named probe is recognized");
+        check(covered, "a recognized self-named product is granted by the rule's glob");
+    }
+}
+
+// Firmware that names itself: a 303A:1001 product string starting "Aether" is
+// shown as the model if it is a short printable name; otherwise it is unknown.
+void testSelfNamedDevices()
+{
+    const auto named = [](const QString& product, quint16 vid = 0x303A) {
+        return AetherSDR::Ctr2HidPort::DeviceInfo{QStringLiteral("p"), vid, 0x1001, QStringLiteral("AetherSDR"),
+                                                  product, QStringLiteral("0123ABCD")};
+    };
+    check(named(QStringLiteral("AetherDial")).ctr2Model() == QStringLiteral("AetherDial"),
+          "a self-named device shows its own name");
+    check(named(QStringLiteral("AetherDial")).label()
+              == QStringLiteral("AetherDial: AetherSDR AetherDial (303a:1001 #0123ABCD)"),
+          "a self-named device's label");
+    check(named(QStringLiteral("AETHER_KNOB")).ctr2Model() == QStringLiteral("AetherKnob"),
+          "the fixed AetherKnob entry is not shadowed by the prefix");
+    const QString longest = QStringLiteral("Aether") + QString(26, QLatin1Char('x'));
+    check(named(longest).ctr2Model() == longest, "a 32-character name is accepted");
+    check(named(longest + QLatin1Char('x')).ctr2Model().isEmpty(), "a 33-character name is refused");
+    check(named(QStringLiteral("Aether")).ctr2Model().isEmpty(), "the prefix alone is not a name");
+    check(named(QStringLiteral("AetherX")).ctr2Model() == QStringLiteral("AetherX"),
+          "one character past the prefix is a name");
+    check(named(QStringLiteral("Aether\tTab")).ctr2Model().isEmpty()
+              && named(QStringLiteral("Aether\u00e9")).ctr2Model().isEmpty()
+              && named(QStringLiteral("Aether\x7f")).ctr2Model().isEmpty(),
+          "a name with control or non-ASCII characters is refused");
+    check(named(QStringLiteral("Aether ~")).ctr2Model() == QStringLiteral("Aether ~"),
+          "space and tilde bound the accepted range");
+    check(named(QStringLiteral("aetherdial")).ctr2Model().isEmpty()
+              && named(QStringLiteral("AetherDial"), 0x1234).ctr2Model().isEmpty(),
+          "the prefix is case-sensitive and needs the Espressif IDs");
+}
+
+// USB is the default mode when the build can open a CTR2, and the first
+// recognized CTR2 is preselected; an explicit choice survives a rescan.
+void testUsbDefaults()
+{
+    Ctr2ProxyModel fresh;
+    check((fresh.transport() == Ctr2ProxyModel::Transport::Usb) == fresh.usbAvailable(),
+          "USB is the default mode exactly when USB HID is available");
+
+    using Info = AetherSDR::Ctr2HidPort::DeviceInfo;
+    const Info other{QStringLiteral("other"), 0x1234, 0x5678, {}, QStringLiteral("Keyboard"), {}};
+    const Info first{QStringLiteral("ctr2-a"), 0x303A, 0x1001, {}, QStringLiteral("ESP32S3_DEV"), {}};
+    const Info second{QStringLiteral("ctr2-b"), 0x303A, 0x1001, {}, QStringLiteral("M5STACK_DIAL"), {}};
+    auto devices = std::make_shared<QList<Info>>(QList<Info>{other, first, second});
+    Ctr2ProxyModel model;
+    model.setUsbBackend([devices] { return *devices; },
+                        [](const Info&, QString*) { return static_cast<AetherSDR::Ctr2HidPort*>(nullptr); });
+    check(model.usbDevicePath() == first.path, "the first recognized CTR2 is preselected");
+
+    model.setUsbDevicePath(second.path);
+    devices->append(Info{QStringLiteral("ctr2-c"), 0x303A, 0x1001, {}, QStringLiteral("ESP32S3_DEV"), {}});
+    model.refreshDevices();
+    check(model.usbDevicePath() == second.path, "a rescan keeps the operator's choice");
+
+    devices->removeIf([&](const Info& d) { return d.path == second.path; });
+    model.refreshDevices();
+    check(model.usbDevicePath() == first.path, "a vanished choice falls back to the first CTR2");
+
+    *devices = {other};
+    model.refreshDevices();
+    check(model.usbDevicePath().isEmpty(), "an unrecognized device is never preselected");
+}
+
+// The Start-time udev prompt keys off this: a node the user may not open
+// needs the rule; a missing node, an open one, or Wi-Fi mode does not.
+void testUsbAccessRuleDetection()
+{
+#ifdef Q_OS_LINUX
+    if (::geteuid() == 0) {
+        std::printf("ctr2_proxy_model_test: root ignores permissions, access-rule checks skipped\n");
+        return;
+    }
+    QTemporaryDir dir;
+    check(dir.isValid(), "temp dir for the fake device node");
+    const QString locked = dir.filePath(QStringLiteral("hidraw-locked"));
+    const QString open = dir.filePath(QStringLiteral("hidraw-open"));
+    const QString missing = dir.filePath(QStringLiteral("hidraw-missing"));
+    for (const QString& path : {locked, open}) {
+        QFile f(path);
+        check(f.open(QIODevice::WriteOnly), "create fake device node");
+    }
+    QFile::setPermissions(locked, QFileDevice::Permissions());
+
+    QList<AetherSDR::Ctr2HidPort::DeviceInfo> devices;
+    for (const QString& path : {locked, open, missing}) {
+        devices.append({path, 0x303A, 0x1001, {}, QStringLiteral("ESP32S3_DEV"), {}});
+    }
+    Ctr2ProxyModel model;
+    model.setUsbBackend([devices] { return devices; },
+                        [](const AetherSDR::Ctr2HidPort::DeviceInfo&, QString*) {
+                            return static_cast<AetherSDR::Ctr2HidPort*>(nullptr);
+                        });
+    model.setTransport(Ctr2ProxyModel::Transport::Usb);
+    model.setUsbDevicePath(QString());
+    check(!model.usbDeviceNeedsAccessRule(), "no device selected needs no rule");
+    model.setUsbDevicePath(locked);
+    check(model.usbDeviceNeedsAccessRule(), "a node the user cannot open needs the rule");
+    model.setTransport(Ctr2ProxyModel::Transport::Wifi);
+    check(!model.usbDeviceNeedsAccessRule(), "Wi-Fi mode never asks for the USB rule");
+    model.setTransport(Ctr2ProxyModel::Transport::Usb);
+    model.setUsbDevicePath(open);
+    check(!model.usbDeviceNeedsAccessRule(), "an openable node needs no rule");
+    model.setUsbDevicePath(missing);
+    check(!model.usbDeviceNeedsAccessRule(), "a vanished node is not a permissions problem");
+#endif
 }
 
 } // namespace
@@ -148,6 +338,10 @@ int main(int argc, char** argv)
           "losing the radio falls back to the default reason");
 
     testRelayFollowsAetherSdrsRadio();
+    testUsbAccessRuleDetection();
+    testUsbDefaults();
+    testUdevRuleMatchesKnownCtr2s();
+    testSelfNamedDevices();
 
     if (g_failures) {
         std::fprintf(stderr, "%d check(s) failed\n", g_failures);

@@ -1,57 +1,36 @@
-// #5637 §1: a TransmitModel control whose value already crossed the
-// IRadioBackend seam must not ALSO be reported as dropped.
-//
-// TransmitModel emits two things for RF power, mic level and the TX passband
-// (tune power is the exception: its value reaches the backend as setTune()'s
-// argument at key time, not through a setter of its own):
-// a typed intent (rfPowerCommandIssued / micLevelCommandIssued /
-// txFilterCommandIssued) that RadioModel hands to the backend, and the legacy
-// Flex wire text through commandReady. On a backend with no command plane the
-// wire text reached RadioModel::sendCmd, which logged "no command plane for
-// this backend, dropping transmit set rfpower=N" and emitted commandDropped —
-// while the backend had just applied the value. The report on #5637 was aimed
-// at that line, and the one-shot "nothing was sent to the radio" notice it
-// raises was consumed by a control that works.
-//
-// The drop notice is deliberate (#5263: it is how dead controls on non-Flex
-// radios are found), so this test pins BOTH halves:
-//   1. a routed verb reaches the backend and raises no commandDropped;
-//   2. an unrouted verb (VOX here, which this backend does not implement) and a
-//      routed verb on a backend that does not declare the capability behind it
-//      still raise commandDropped — the alarm is narrowed, not silenced.
-//
-// Socket-free: an injected backend records the seam calls. No radio, no peer.
-
+// Socket-free production routing: dispatch receipts, not capability guesses,
+// determine notices. Keying is recorded by the injected backend only.
 #include "TestSettingsProfile.h"
+#include "IcomReceiveContractTestAccess.h"
 #include "models/RadioModel.h"
 #include "models/SliceModel.h"
-#include "models/TransmitModel.h"
-
 #include <QCoreApplication>
 #include <QStringList>
-
 #include <cstdio>
 #include <memory>
+#include <vector>
 
 using namespace AetherSDR;
-
 namespace {
 int failures = 0;
-void check(bool ok, const char* message)
+void check(bool ok, const char* what)
 {
-    std::printf("[%s] %s\n", ok ? "PASS" : "FAIL", message);
+    std::printf("[%s] %s\n", ok ? "PASS" : "FAIL", what);
     failures += !ok;
 }
-
-class RecordingBackend final : public IRadioBackend {
+class Backend : public IRadioBackend {
 public:
-    RadioCapabilities caps;
-    QList<int> txPowers;
-    QList<int> micGains;
-    QList<QPair<int, int>> txFilters;
-    QList<int> cwPitches;
-    QList<QPair<bool, int>> tunes;  // (on, tunePowerPercent) per setTune()
     bool connected{true};
+    RadioCapabilities caps;
+    bool handled{false};
+    ReceiveDispatch result{ReceiveDispatch::Unsupported};
+    std::vector<TransmitControlRequest> requests;
+    std::vector<TunePowerContext> contexts;
+    QList<QPair<bool, int>> tunes;
+    QList<int> cwPitches;
+    QList<int> lineoutGains;
+    QList<bool> lineoutMutes;
+    int keyCalls{0};
     RadioCapabilities capabilities() const override { return caps; }
     bool isConnected() const override { return connected; }
     void connectRadio(const RadioConnectRequest&) override {}
@@ -61,306 +40,260 @@ public:
     void setSliceFilter(int, int, int) override {}
     void setSliceAgc(int, const QString&, int) override {}
     void setPanCenter(const QString&, double, PanCenterIntent) override {}
-    void setKeying(bool, const TxCoordinator::Operation&, const TxCoordinator::Completion&) override {}
+    void setKeying(bool, const TxCoordinator::Operation&, const TxCoordinator::Completion&) override { ++keyCalls; }
+    void setTune(bool on, int power, const TxCoordinator::Operation&, const TxCoordinator::Completion&) override
+    { tunes.append({on, power}); }
     void invokeExtension(const QString&, const QString&, quint64, const QVariant&) override {}
-    void setTxPower(int percent) override { txPowers << percent; }
-    void setMicGain(int level) override { micGains << level; }
-    void setTxFilter(int lowHz, int highHz) override { txFilters << qMakePair(lowHz, highHz); }
-    void setCwPitch(int hz) override { cwPitches << hz; }
-    // Honours tunePowerPercent the way Hl2Backend::setTune does (drive set
-    // from TUNE power at key time, PR #4551): records it rather than applying.
-    void setTune(bool on, int tunePowerPercent, const TxCoordinator::Operation&,
-                 const TxCoordinator::Completion&) override
+    void setCwPitch(int hz) override { cwPitches.append(hz); }
+    void setLineoutGain(int percent) override { lineoutGains.append(percent); }
+    void setLineoutMute(bool mute) override { lineoutMutes.append(mute); }
+    ReceiveDispatch requestTransmitControl(const TransmitControlRequest& request, TunePowerContext context) override
     {
-        tunes << qMakePair(on, tunePowerPercent);
+        requests.push_back(request);
+        contexts.push_back(context);
+        return handled ? result : IRadioBackend::requestTransmitControl(request, context);
     }
-    // setVox() is deliberately NOT overridden: this backend has no VOX, so the
-    // Flex text for it really does reach nothing.
 };
-
-// The capability set of a host-modulating transmitter with no command plane —
-// the Hermes-Lite 2's answers to the questions the gate asks.
-RadioCapabilities hostModulatingTransmitter()
-{
-    RadioCapabilities c;
-    c.family = QStringLiteral("hl2");
-    c.canTransmit = true;
-    c.hostModulates = true;
-    c.transmitDriveControl = RadioCapabilities::TransmitDriveControl{
-        SliceFrequencyControl::Authority::Engine};
-    c.hasTxFilterControls = true;
-    return c;
-}
-
 struct Fixture {
     RadioModel radio;
-    RecordingBackend* backend{nullptr};
+    Backend* backend;
     QStringList dropped;
-
-    explicit Fixture(const RadioCapabilities& caps)
+    Fixture()
     {
-        auto owned = std::make_unique<RecordingBackend>();
+        auto owned = std::make_unique<Backend>();
         backend = owned.get();
-        backend->caps = caps;
-        radio.setBackendForTest(std::move(owned), caps.family);
+        backend->caps.canTransmit = true;
+        backend->caps.transmitDriveControl = RadioCapabilities::TransmitDriveControl{
+            SliceFrequencyControl::Authority::Engine, true};
+        radio.setBackendForTest(std::move(owned), QStringLiteral("control-receipt-test"));
         QObject::connect(&radio, &RadioModel::commandDropped, &radio,
-                         [this](const QString& cmd) { dropped << cmd; });
-    }
-
-    // TUNE resolves through txSlice(); install one the way radio status would.
-    // The socket-free slice fixture is refused while connected, so the link is
-    // down only for the install.
-    bool installTxSlice()
-    {
-        backend->connected = false;
-        const bool installed = radio.automationApplySliceFixture(0, QStringLiteral("A"));
-        backend->connected = true;
-        if (!installed) {
-            return false;
-        }
-        SliceModel* slice = radio.slice(0);
-        if (!slice) {
-            return false;
-        }
+                         [this](const QString& operation) { dropped.append(operation); });
         SliceDelta delta;
-        delta.txSlice = true;
-        delta.panId = QStringLiteral("0x40000000");
-        slice->applyChanges(delta);
-        return radio.txSlice() == slice;
-    }
-
-    bool droppedStartingWith(const QString& prefix) const
-    {
-        for (const QString& cmd : dropped) {
-            if (cmd.startsWith(prefix)) {
-                return true;
-            }
-        }
-        return false;
+        delta.inUse = true; delta.frequency = 14.2; delta.mode = QStringLiteral("USB");
+        delta.filterLow = 100; delta.filterHigh = 2800;
+        delta.panId = QStringLiteral("receiver"); delta.txSlice = true;
+        emit backend->sliceChanged(0, delta);
     }
 };
-} // namespace
-
-static void premiseHasNoCommandPlane()
+void lineoutRouting()
 {
-    Fixture f(hostModulatingTransmitter());
-    check(!f.radio.hasCommandPlane(),
-          "premise: the injected non-Flex backend has no command plane");
+    Fixture f;
+    f.backend->caps.lineoutControl = RadioCapabilities::LineoutControl{};
+    f.radio.setLineoutMute(true);
+    f.radio.setLineoutMute(false);
+    f.radio.setLineoutGain(30);
+    check(f.backend->lineoutMutes == QList<bool>({true, false})
+              && f.backend->lineoutGains == QList<int>{30} && f.dropped.isEmpty(),
+          "declared line output receives each typed edit without a drop notice");
+
+    Fixture unsupported;
+    unsupported.radio.setLineoutMute(true);
+    unsupported.radio.setLineoutGain(30);
+    check(unsupported.backend->lineoutMutes.isEmpty()
+              && unsupported.backend->lineoutGains.isEmpty()
+              && unsupported.dropped.contains(QStringLiteral("mixer lineout mute 1"))
+              && unsupported.dropped.contains(QStringLiteral("mixer lineout gain 30")),
+          "absent line output receives no seam call and retains both drop notices");
 }
-
-static void rfPowerReachesSeamWithoutDropNotice()
+void receipts()
 {
-    Fixture f(hostModulatingTransmitter());
-    f.radio.transmitModel().setRfPower(90);
-    check(f.backend->txPowers == QList<int>{90},
-          "rfpower: setTxPower(90) reached the backend exactly once");
-    check(!f.droppedStartingWith(QStringLiteral("transmit set rfpower=")),
-          "rfpower: no commandDropped for a value the backend applied");
+    Fixture f;
+    f.radio.slice(0)->setActive(true);
+    check(f.radio.slice(0)->isActive() && f.dropped.isEmpty(),
+          "local slice selection never consumes the unsupported-control notice");
+    f.radio.slice(0)->applyRecalledFmRepeater(QStringLiteral("up"), 0.6,
+                                           QStringLiteral("ctcss_tx"), 88.5);
+    check(f.dropped.isEmpty() && f.radio.slice(0)->fmToneMode() == QStringLiteral("ctcss_tx"),
+          "local memory recall applies its state without consuming the refusal notice");
+    TransmitModel& tx = f.radio.transmitModel();
+    tx.setRfPower(42);
+    check(f.backend->requests.size() == 1 && f.dropped.size() == 1,
+          "advertised capability with inherited no-op still refuses");
+    f.backend->handled = true;
+    f.backend->result = ReceiveDispatch::Dispatched;
+    f.dropped.clear();
+    f.backend->requests.clear();
+    tx.setMicLevel(34);
+    tx.setTxFilter(200, 2800);
+    tx.setVoxEnable(true);
+    tx.setVoxLevel(35);
+    tx.setSbMonitor(true);
+    tx.setSpeechProcessorLevel(1);
+    check(f.backend->requests.size() == 6 && f.dropped.isEmpty(),
+          "six explicitly dispatched settings each have one route and no drop");
+    const auto& voxRequest = f.backend->requests[3];
+    const VoxSetting vox = std::get<VoxSetting>(voxRequest.value);
+    check(voxRequest.field == TransmitControlRequest::Field::VoxLevel
+              && vox.enabled && vox.level == 35,
+          "VOX request retains the edited field and paired state");
+    check(f.backend->keyCalls == 0 && f.backend->tunes.isEmpty(),
+          "settings never synthesize keying or TUNE");
+    f.backend->result = ReceiveDispatch::LocalOnly;
+    tx.setSpeechProcessorEnable(true);
+    check(f.dropped.isEmpty(), "real local application is not an unsupported control");
+    f.backend->result = ReceiveDispatch::Unsupported;
+    tx.setCwDelay(300);
+    check(f.dropped.size() == 1, "explicit refusal is surfaced");
+    const size_t count = f.backend->requests.size();
+    TransmitDelta status; status.rfPower = 55; status.micLevel = 56;
+    tx.applyChanges(status);
+    check(f.backend->requests.size() == count, "readback is observation only");
+    f.backend->connected = false;
+    tx.setMicLevel(57);
+    check(f.backend->requests.size() == count, "disconnected settings cannot reach backend");
 }
-
-static void micLevelReachesSeamWithoutDropNotice()
+void tuneOwnership()
 {
-    Fixture f(hostModulatingTransmitter());
-    f.radio.transmitModel().setMicLevel(42);
-    check(f.backend->micGains == QList<int>{42},
-          "miclevel: setMicGain(42) reached the backend exactly once");
-    check(!f.droppedStartingWith(QStringLiteral("transmit set miclevel=")),
-          "miclevel: no commandDropped for a value the backend applied");
-}
-
-static void txFilterReachesSeamWithoutDropNotice()
-{
-    Fixture f(hostModulatingTransmitter());
-    f.radio.transmitModel().setTxFilter(200, 2800);
-    check(f.backend->txFilters.size() == 1
-              && f.backend->txFilters.first() == qMakePair(200, 2800),
-          "filter: setTxFilter(200, 2800) reached the backend exactly once");
-    check(!f.droppedStartingWith(QStringLiteral("transmit set filter_low=")),
-          "filter: no commandDropped for a passband the backend applied");
-}
-
-static void cwPitchReachesSeamWithoutDropNotice()
-{
-    Fixture f(hostModulatingTransmitter());
-    f.radio.transmitModel().setCwPitch(700);
-    check(f.backend->cwPitches == QList<int>{700},
-          "cw pitch: setCwPitch(700) reached the host-modulating backend once");
-    check(!f.droppedStartingWith(QStringLiteral("cw pitch ")),
-          "cw pitch: no commandDropped for a pitch the backend applied");
-}
-
-// Tune power has no setter of its own: RadioModel hands tunePower() to
-// setTune() at key time (#4551), where a backend that owns its drive and can
-// key applies it. So the text is not a drop. The key-time half is asserted:
-// TUNE is keyed on the recording backend and the slider's value arrives.
-static void tunePowerDeliveredAtKeyTimeWithoutDropNotice()
-{
-    Fixture f(hostModulatingTransmitter());
-    check(f.installTxSlice(), "premise: a TX slice is installed");
-    f.radio.transmitModel().setTunePower(25);
-    check(!f.droppedStartingWith(QStringLiteral("transmit set tunepower=")),
-          "tunepower: no commandDropped on a backend that applies it at key time");
-    f.radio.transmitModel().startTune();
+    Fixture f;
+    f.backend->handled = true;
+    f.backend->result = ReceiveDispatch::Dispatched;
+    TransmitModel& tx = f.radio.transmitModel();
+    tx.setTunePower(25);
+    check(f.backend->contexts.back() == TunePowerContext::Deferred,
+          "idle TUNE power is a deferred setpoint");
+    tx.startTune();
     check(!f.backend->tunes.isEmpty() && f.backend->tunes.first() == qMakePair(true, 25),
-          "tunepower: TUNE keyed with setTune(true, 25), the slider's value");
-    f.radio.transmitModel().stopTune();
+          "existing TX gate starts TUNE with the requested setpoint");
+    tx.setTunePower(30);
+    check(f.backend->contexts.back() == TunePowerContext::LiveLocalCarrier,
+          "only admitted live TUNE supplies the local-carrier context");
+    const auto keyed = f.backend->tunes;
+    TransmitDelta echo; echo.tunePower = 45;
+    const size_t requests = f.backend->requests.size();
+    tx.applyChanges(echo);
+    check(f.backend->requests.size() == requests && f.backend->tunes == keyed,
+          "power readback neither reapplies power nor rekeys");
+    tx.stopTune();
+    tx.setTunePower(50);
+    check(f.backend->contexts.back() == TunePowerContext::Deferred,
+          "release retires live-carrier eligibility");
+    Fixture other;
+    TransmitDelta remote; remote.tune = true;
+    other.radio.transmitModel().applyChanges(remote);
+    other.radio.transmitModel().setTunePower(30);
+    check(other.backend->contexts.back() == TunePowerContext::UnqualifiedCarrier,
+          "radio-reported TUNE is not local ownership");
+    check(other.backend->tunes.isEmpty(), "unqualified carrier is never keyed locally");
 }
 
-// The value rides setTune() only at key-down. A change while TUNE is already
-// keyed is not re-applied to the carrier, so its text is a real drop.
-static void tunePowerChangedWhileKeyedKeepsDropNotice()
+void filterWarningReentrancy()
 {
-    Fixture f(hostModulatingTransmitter());
-    check(f.installTxSlice(), "premise: a TX slice is installed");
-    f.radio.transmitModel().setTunePower(10);
-    f.radio.transmitModel().startTune();
-    check(f.radio.transmitModel().isTuning(), "premise: TUNE is keyed");
-    const auto tunesAtKeyDown = f.backend->tunes;
-    f.dropped.clear();
-    f.radio.transmitModel().setTunePower(30);
-    check(f.backend->tunes == tunesAtKeyDown,
-          "premise: a mid-carrier tune power change reaches no seam setter");
-    check(f.droppedStartingWith(QStringLiteral("transmit set tunepower=")),
-          "tunepower changed while TUNE is keyed: the drop notice stands");
-    f.radio.transmitModel().stopTune();
+    Fixture f;
+    f.backend->handled = true;
+    f.backend->result = ReceiveDispatch::Dispatched;
+    SliceDelta status; status.frequency = 14.349;
+    f.radio.slice(0)->applyChanges(status);
+    bool corrected = false;
+    QObject::connect(&f.radio, &RadioModel::interlockNotificationRequested, &f.radio, [&] {
+        if (!corrected) {
+            corrected = true;
+            f.radio.transmitModel().setTxFilter(100, 800);
+        }
+    });
+    f.radio.transmitModel().setTxFilter(100, 3000);
+    check(corrected && f.backend->requests.size() == 1
+              && std::get<TxPassband>(f.backend->requests.front().value).highHz == 800,
+          "a filter-warning callback cannot dispatch the superseded passband after the correction");
 }
 
-// TransmitModel::setCwPitch emits `cw pitch N` on every call but
-// cwPitchChanged only on a change, and the host-modulating seam connection is
-// the change-gated one. A set that repeats the model's value therefore hands
-// the backend nothing. Withholding the notice is right only if THIS backend
-// was already handed that value; if it never was, the text is a real drop.
-static void cwPitchNeverHandedToBackendKeepsDropNotice()
+void cwPitchBackendLifetime()
 {
-    Fixture f(hostModulatingTransmitter());
-    const int pitch = f.radio.transmitModel().cwPitch();  // the model default
-    f.radio.transmitModel().setCwPitch(pitch);
-    check(f.backend->cwPitches.isEmpty(),
-          "premise: a repeat of the model's pitch reaches no seam setter");
-    check(f.droppedStartingWith(QStringLiteral("cw pitch ")),
-          "cw pitch never handed to this backend: the drop notice stands");
-}
+    Fixture f;
+    f.backend->caps.hostModulates = true;
+    TransmitModel& tx = f.radio.transmitModel();
+    tx.setCwPitch(700);
+    tx.setCwPitch(700);
+    check(f.backend->cwPitches == QList<int>{700} && f.backend->requests.empty()
+              && f.dropped.isEmpty(),
+          "host CW pitch is applied once, without duplicate dispatch or a false drop");
+    TransmitDelta status;
+    status.cwPitch = 800;
+    tx.applyChanges(status);
+    check(f.backend->cwPitches == QList<int>({700, 800}) && f.backend->requests.empty(),
+          "radio CW pitch readback updates the host BFO without inventing operator intent");
 
-// ...and the same after a backend swap: the old backend held the value, the
-// new one has never been handed anything.
-static void cwPitchHandedToPreviousBackendKeepsDropNotice()
-{
-    Fixture f(hostModulatingTransmitter());
-    f.radio.transmitModel().setCwPitch(700);
-    auto fresh = std::make_unique<RecordingBackend>();
-    RecordingBackend* second = fresh.get();
-    second->caps = hostModulatingTransmitter();
-    f.radio.setBackendForTest(std::move(fresh), second->caps.family);
+    auto fresh = std::make_unique<Backend>();
+    Backend* second = fresh.get();
+    second->caps = f.backend->caps;
+    second->handled = true;
+    second->result = ReceiveDispatch::Dispatched;
+    f.radio.setBackendForTest(std::move(fresh), QStringLiteral("control-receipt-test"));
     f.backend = second;
-    f.dropped.clear();
-    f.radio.transmitModel().setCwPitch(700);
-    check(second->cwPitches.isEmpty(),
-          "premise: the repeat reaches no setter on the new backend");
-    check(f.droppedStartingWith(QStringLiteral("cw pitch ")),
-          "pitch handed only to the previous backend: the drop notice stands");
+    tx.setCwPitch(800);
+    check(second->requests.size() == 1
+              && second->requests.front().field == TransmitControlRequest::Field::CwPitch
+              && std::get<int>(second->requests.front().value) == 800
+              && f.dropped.isEmpty(),
+          "a pitch handed only to the old backend is dispatched to its replacement");
 }
 
-// The value must match, not merely exist: a backend that holds 700 and is
-// handed nothing when the model moves to 800 (its capabilities stopped routing
-// the pitch) has not received 800.
-static void cwPitchDifferentFromHandedValueKeepsDropNotice()
+void icomMicReadbackWindow()
 {
-    Fixture f(hostModulatingTransmitter());
-    f.radio.transmitModel().setCwPitch(700);
-    f.backend->caps.hostModulates = false;
-    f.dropped.clear();
-    f.radio.transmitModel().setCwPitch(800);
-    check(f.backend->cwPitches == QList<int>{700},
-          "premise: 800 reaches no setter once the pitch is not routed");
-    check(f.droppedStartingWith(QStringLiteral("cw pitch 800")),
-          "pitch other than the one this backend holds: the drop notice stands");
+    using Access = icom::IcomCivBackendTestAccess;
+    RadioModel radio;
+    auto owned = std::make_unique<icom::IcomCivBackend>();
+    icom::IcomCivBackend* backend = owned.get();
+    radio.setBackendForTest(std::move(owned), QStringLiteral("icom-mic-readback-test"));
+    Access::prepare(*backend);
+    Access::selectModel(*backend, *icom::modelForId(0xA2));
+    QStringList dropped;
+    QObject::connect(&radio, &RadioModel::commandDropped, &radio,
+                     [&](const QString& operation) { dropped.append(operation); });
+    // IC-9700 CI-V guide: DATA OFF MOD input is SET 0115; LAN is 05.
+    icom::CivFrame input;
+    input.cmd = icom::cmd::kSetting;
+    input.hasSub = true;
+    input.sub = 0x05;
+    input.data = {0x01, 0x15, 0x05};
+    Access::observe(*backend, input);
+    const auto queued = Access::queuedCount(*backend);
+    const auto dispatched = Access::dispatchCount(*backend);
+    radio.transmitModel().setMicLevel(34);
+    check(dropped.isEmpty() && Access::queuedCount(*backend) == queued
+              && Access::dispatchCount(*backend) == dispatched,
+          "unestablished LAN mic readback neither writes a register nor reports unsupported");
+    // The radio establishes LAN MOD level via SET 0114 before an operator edit.
+    icom::CivFrame level = input;
+    level.data = {0x01, 0x14, 0x00, 0x26};
+    Access::observe(*backend, level);
+    check(Access::queuedCount(*backend) == queued && Access::dispatchCount(*backend) == dispatched,
+          "LAN level readback does not replay the earlier slider intent");
+    radio.transmitModel().setMicLevel(35);
+    Access::pump(*backend);
+    check(dropped.isEmpty()
+              && Access::dispatched(*backend, QStringLiteral("fe fe a4 e0 1a 05 01 14 00 90 fd")),
+          "after LAN readback, the routed slider dispatches the actual LAN MOD write");
 }
-
-// The control for the two above: a repeat of a value this backend WAS handed
-// (an operator tabbing out of an unchanged pitch field) stays quiet — the
-// backend holds exactly what the text carries.
-static void cwPitchRepeatOfHandedValueStaysQuiet()
+}
+void txSliceSelectionNotice()
 {
-    Fixture f(hostModulatingTransmitter());
-    f.radio.transmitModel().setCwPitch(700);
-    f.radio.transmitModel().setCwPitch(700);
-    check(f.backend->cwPitches == QList<int>{700},
-          "cw pitch: the backend was handed 700 once");
-    check(!f.droppedStartingWith(QStringLiteral("cw pitch ")),
-          "cw pitch: a repeat of the value the backend holds raises no notice");
+    Fixture receiveOnly;
+    receiveOnly.backend->caps.canTransmit = false;
+    SliceModel* slice = receiveOnly.radio.slice(0);
+    check(slice != nullptr, "receive-only fixture has a routed slice");
+    if (!slice) { return; }
+    slice->setTxSlice(true);
+    check(receiveOnly.dropped.isEmpty(),
+          "choosing a TX slice on a radio that cannot transmit spends no notice");
+    Fixture transmitting;
+    if (SliceModel* txSlice = transmitting.radio.slice(0)) { txSlice->setTxSlice(true); }
+    check(transmitting.dropped == QStringList{QStringLiteral("tx slice")},
+          "a transmit-capable radio that refuses TX-slice selection still reports it");
 }
-
-// The negative control that keeps the first four honest: the same backend,
-// the same model, a verb nothing behind the seam implements. If the fix had
-// gated the whole commandReady forward, this is what would go quiet.
-static void unroutedVerbStillRaisesDropNotice()
-{
-    Fixture f(hostModulatingTransmitter());
-    f.radio.transmitModel().setVoxEnable(true);
-    check(f.droppedStartingWith(QStringLiteral("transmit set vox_enable=")),
-          "vox: an unrouted verb still raises commandDropped");
-}
-
-// Routed on the seam is not enough: the backend must also declare the
-// capability that says the setter does something. An RX-only host-DSP backend
-// (the ANAN today: drive ownership declared, canTransmit false, setTxPower not
-// implemented) must keep its alarm.
-static void undeclaredCapabilityKeepsDropNotice()
-{
-    RadioCapabilities caps = hostModulatingTransmitter();
-    caps.canTransmit = false;
-    caps.hasTxFilterControls = false;
-    caps.hostModulates = false;
-    Fixture f(caps);
-    f.radio.transmitModel().setRfPower(80);
-    check(f.droppedStartingWith(QStringLiteral("transmit set rfpower=")),
-          "receive-only backend: rfpower still raises commandDropped");
-    f.radio.transmitModel().setMicLevel(30);
-    check(f.droppedStartingWith(QStringLiteral("transmit set miclevel=")),
-          "receive-only backend: miclevel still raises commandDropped");
-    f.radio.transmitModel().setTxFilter(300, 2700);
-    check(f.droppedStartingWith(QStringLiteral("transmit set filter_low=")),
-          "no TX filter controls declared: the passband still raises commandDropped");
-    f.radio.transmitModel().setCwPitch(650);
-    check(f.droppedStartingWith(QStringLiteral("cw pitch ")),
-          "no host CW demod or radio keyer: cw pitch still raises commandDropped");
-    f.radio.transmitModel().setTunePower(20);
-    check(f.droppedStartingWith(QStringLiteral("transmit set tunepower=")),
-          "receive-only backend: tunepower still raises commandDropped");
-}
-
-// A backend that can key but does not own its drive has nothing to apply a
-// tune power WITH: setTune()'s argument is ignored there, so the text is a
-// real drop and must stay loud.
-static void tunePowerWithoutDriveOwnershipKeepsDropNotice()
-{
-    RadioCapabilities caps = hostModulatingTransmitter();
-    caps.transmitDriveControl.reset();
-    Fixture f(caps);
-    f.radio.transmitModel().setTunePower(30);
-    check(f.droppedStartingWith(QStringLiteral("transmit set tunepower=")),
-          "no drive ownership declared: tunepower still raises commandDropped");
-}
-
 int main(int argc, char** argv)
 {
-    TestSettingsProfile profile(QStringLiteral("transmit-seam-drop-notice"));
-    if (!profile.isValid()) { return 1; }
+    TestSettingsProfile profile(QStringLiteral("transmit-control-receipts"));
+    if (!profile.isValid()) {
+        std::fprintf(stderr, "Cannot create isolated settings profile\n");
+        return 1;
+    }
     QCoreApplication app(argc, argv);
-    premiseHasNoCommandPlane();
-    rfPowerReachesSeamWithoutDropNotice();
-    micLevelReachesSeamWithoutDropNotice();
-    txFilterReachesSeamWithoutDropNotice();
-    cwPitchReachesSeamWithoutDropNotice();
-    tunePowerDeliveredAtKeyTimeWithoutDropNotice();
-    tunePowerChangedWhileKeyedKeepsDropNotice();
-    cwPitchNeverHandedToBackendKeepsDropNotice();
-    cwPitchHandedToPreviousBackendKeepsDropNotice();
-    cwPitchDifferentFromHandedValueKeepsDropNotice();
-    cwPitchRepeatOfHandedValueStaysQuiet();
-    unroutedVerbStillRaisesDropNotice();
-    undeclaredCapabilityKeepsDropNotice();
-    tunePowerWithoutDriveOwnershipKeepsDropNotice();
-    std::printf("%d failure(s)\n", failures);
-    return failures == 0 ? 0 : 1;
+    receipts();
+    lineoutRouting();
+    tuneOwnership();
+    filterWarningReentrancy();
+    cwPitchBackendLifetime();
+    icomMicReadbackWindow();
+    txSliceSelectionNotice();
+    return failures ? 1 : 0;
 }

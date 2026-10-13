@@ -1,10 +1,17 @@
 #include "core/backends/flex/FlexBackend.h"
+#include "core/AppActivity.h"
 
 #include <algorithm>
 #include <limits>
 
+#include <QDateTime>
+#include <QJsonObject>
+#include <QJsonValue>
 #include <QThread>
 
+#include "core/AppSettings.h"
+#include "core/FirmwareCurrency.h"  // publishedVersionIsStale() — the one freshness rule
+#include "core/FirmwareStager.h"    // reads FlexRadio's published release list
 #include "core/LogManager.h"
 #include "core/backends/flex/RadioConnection.h"
 #include "core/backends/flex/PanadapterStream.h"
@@ -47,7 +54,7 @@ FlexBackend::FlexBackend(QObject* parent)
     m_panStream = new PanadapterStream;   // no parent — moved to thread
     m_panStream->moveToThread(m_networkThread);
     connect(m_networkThread, &QThread::started, m_panStream, &PanadapterStream::init);
-    m_networkThread->start();
+    AetherSDR::startStreamThread(m_networkThread);   // High QoS; see AppActivity.h
 
     m_connThread = new QThread(this);
     m_connThread->setObjectName("RadioConnection");
@@ -191,9 +198,148 @@ void FlexBackend::setRadioReportedCapacity(int maxSlices, int maxPanadapters)
     emit capabilitiesChanged();
 }
 
+// Publish the newest SmartSDR release, looking it up only when we must.
+//
+// Called on every connect to a Flex. The cache is a family-wide AppSettings
+// feature document — not per-radio, because what FlexRadio publishes is the
+// same answer for every radio this backend will ever reach, and not in-memory,
+// because the point is that a later LAUNCH reuses it too. A whole-document
+// write is the atomic update (Principle V, XIV).
+//
+// Order matters: the cached answer is adopted first, so a station with no route
+// to the internet still shows a verdict from whatever it learned last, and the
+// status bar never blanks while a lookup is in flight.
+//
+// Reaching a radio is the only thing that may contact flexradio.com, and even
+// then only if the cached answer has aged out. Hung off the seam's
+// session-established verb rather than this backend's own RadioConnection,
+// because a SmartLink session never dials that connection — RadioModel drives a
+// WanConnection the backend never sees, so the LAN-only hook left every WAN
+// operator without a verdict (PR #6177 review).
+void FlexBackend::onRadioSessionEstablished()
+{
+    refreshPublishedFirmwareVersion();
+}
+
+// Record a completed lookup: cache it, and publish it if it changed.
+//
+// Split out of the completion lambda so it can be driven directly in a test —
+// the schema re-read below is the whole point of the split, and pinning it
+// otherwise would need a live HTTP peer.
+void FlexBackend::applyPublishedReleases(const QMap<int, QString>& releases)
+{
+    m_firmwareLookupInFlight = false;
+
+    QJsonObject doc;
+    QJsonObject obj;
+    for (auto it = releases.constBegin(); it != releases.constEnd(); ++it)
+        obj.insert(QString::number(it.key()), it.value());
+    doc.insert(QLatin1String("releases"), obj);
+    doc.insert(QLatin1String("checkedAt"),
+               QDateTime::currentDateTimeUtc().toString(Qt::ISODate));
+    // RE-READ THE SCHEMA HERE, not at the start of the lookup. This
+    // connection is made once, when the stager is first created, so a
+    // schema captured then would be frozen for the life of the backend:
+    // every later session would judge its write against the first
+    // session's answer. The document can also change while a request is
+    // in flight. The only value worth trusting is the one read
+    // immediately before the write.
+    int storedSchema = 0;
+    AppSettings::instance().radioFeatureExact(
+        QStringLiteral("flex"), QString(),
+        QLatin1String(kPublishedFirmwareFeature), &storedSchema);
+
+    // Never overwrite a document a NEWER client wrote: its shape is
+    // one this build does not know, and replacing it would silently
+    // downgrade that client's cache (docs/agents/settings.md).
+    if (storedSchema > kPublishedFirmwareSchema) {
+        qCWarning(lcFirmware).nospace()
+            << "FlexBackend: published-release cache left alone; stored "
+               "schema " << storedSchema << " is newer than this build's "
+            << kPublishedFirmwareSchema;
+    } else if (!AppSettings::instance().setRadioFeature(
+                   QStringLiteral("flex"), QString(),
+                   QLatin1String(kPublishedFirmwareFeature),
+                   kPublishedFirmwareSchema, doc)) {
+        // A refused write is the worst shape to swallow: the verdict
+        // would repaint from memory while nothing persisted, and the
+        // next launch would silently ask again.
+        qCWarning(lcFirmware)
+            << "FlexBackend: published-release cache did not persist";
+    }
+
+    if (m_publishedReleases == releases)
+        return;
+    m_publishedReleases = releases;
+    // A real revision of the descriptor, announced like any other.
+    emit capabilitiesChanged();
+}
+
+void FlexBackend::refreshPublishedFirmwareVersion()
+{
+    // EXACT read, not the family-wide fallback: docs/agents/settings.md reserves
+    // the fallback for consumers, and a writer must judge the row it is about to
+    // replace. This read is for the cached RELEASES only — deliberately not for
+    // the schema, which is re-read at the write below. See there for why.
+    const QJsonObject cache = AppSettings::instance().radioFeatureExact(
+        QStringLiteral("flex"), QString(),
+        QLatin1String(kPublishedFirmwareFeature));
+    const QJsonObject cachedReleases =
+        cache.value(QLatin1String("releases")).toObject();
+    const QDateTime checkedAt = QDateTime::fromString(
+        cache.value(QLatin1String("checkedAt")).toString(), Qt::ISODate);
+
+    QMap<int, QString> fromCache;
+    for (auto it = cachedReleases.constBegin(); it != cachedReleases.constEnd(); ++it) {
+        bool ok = false;
+        const int major = it.key().toInt(&ok);
+        if (ok && it.value().isString())
+            fromCache.insert(major, it.value().toString());
+    }
+
+    if (!fromCache.isEmpty() && fromCache != m_publishedReleases) {
+        m_publishedReleases = fromCache;
+        emit capabilitiesChanged();
+    }
+
+    if (!FirmwareCurrency::publishedVersionIsStale(
+            fromCache.isEmpty() ? QString() : QStringLiteral("cached"),
+            checkedAt, QDateTime::currentDateTimeUtc())) {
+        return;
+    }
+    // One in flight is enough: a reconnect while the first is outstanding must
+    // not start a second.
+    if (m_firmwareLookupInFlight)
+        return;
+
+    if (!m_firmwareVersions) {
+        m_firmwareVersions = new FirmwareStager(this);
+        connect(m_firmwareVersions, &FirmwareStager::publishedReleasesKnown, this,
+                [this](const QMap<int, QString>& releases) {
+            applyPublishedReleases(releases);
+        });
+        connect(m_firmwareVersions, &FirmwareStager::latestVersionUnavailable, this,
+                [this](const QString& reason) {
+            // Not an error state: nothing is written, nothing is retried, and
+            // whatever was already cached stays. Because nothing is written, no
+            // window starts either, so the next connect asks again.
+            m_firmwareLookupInFlight = false;
+            // Warning, not info: `aether.firmware` defaults to Warning, so an
+            // info line would not appear in the log the Known limits section
+            // points an operator at (PR #6177 review, N4).
+            qCWarning(lcFirmware)
+                << "FlexBackend: published SmartSDR releases unknown:" << reason;
+        });
+    }
+
+    m_firmwareLookupInFlight = true;
+    m_firmwareVersions->fetchLatestVersion();
+}
+
 RadioCapabilities FlexBackend::capabilities() const
 {
     RadioCapabilities caps;
+    caps.broadcastFmReceive = std::nullopt;
     // FlexLib 4.2.18 Slice.Freq delegates range refusal to firmware; its old
     // bounds are commented out. Do not guess coverage (including transverters).
     caps.sliceFrequencyControl = {SliceFrequencyControl::Authority::Radio, 0, 0};
@@ -212,6 +358,7 @@ RadioCapabilities FlexBackend::capabilities() const
         {QStringLiteral("SAM"), -12000, -10, 10, 12000, 20, 24000},
         {QStringLiteral("DSB"), -12000, -10, 10, 12000, 20, 24000}}};
     caps.receiveAudioControl = std::nullopt; // legacy wire mixer path has not migrated
+    caps.receiveAudioExport = std::nullopt; // native DAX export not qualified for this backend
     caps.receivePanCenterControl = std::nullopt; // unknown coverage including transverters
     caps.receivePanBandwidthControl = std::nullopt; // legacy coupled geometry path
     caps.txPowerBands = {};
@@ -222,9 +369,25 @@ RadioCapabilities FlexBackend::capabilities() const
     caps.twoToneGenerator = RadioCapabilities::TwoToneGenerator{
         QStringLiteral("transmit set tune_mode=two_tone")};
     caps.manufacturer = QStringLiteral("FlexRadio");
+    // A Flex reports a SmartSDR version, and SmartSDR versions are published on
+    // FlexRadio's software page — which FirmwareStager already reads. Declaring
+    // this is what lets the status bar say the firmware is behind without any
+    // part of the shared chrome knowing which family answered. The version is
+    // empty until a connect has filled it (refreshPublishedFirmwareVersion).
+    //
+    // Only the release-notes URL shape is family knowledge worth compiling in;
+    // the version itself is fetched, never hard-coded. The "%1" is the release
+    // with dots as dashes, verified against every release from 3.8.23 to 4.2.20.
+    caps.firmwareUpdateSource = FirmwareUpdateSource{
+        QStringLiteral(
+            "https://www.flexradio.com/documentation/smartsdr-v%1-release-notes/"),
+        m_publishedReleases};
     caps.model = m_modelProvider ? m_modelProvider() : QString();
     caps.fmTonePresentation = FmTonePresentation::Legacy;
     caps.fmDtcsCodes = {};
+    // squelch_level 0..100 is dBm above -160 on the calibrated pan axis, in
+    // every mode, so the pan floor plus a margin is the level to send.
+    caps.squelchLevelScale = legacyDbmSquelchScale();
 
     // Seed from the FlexLib-sourced platform table (Principle I). This is the
     // derived-from-name truth used to *seed* the reported capabilities; a fuller
@@ -263,6 +426,10 @@ RadioCapabilities FlexBackend::capabilities() const
     // engaged (gui/PanZoomModeGate.h).
     caps.panZoomModes = RadioCapabilities::PanZoomModes{
         QStringLiteral("display pan set")};
+    // The radio stores a pan's FFT frame rate and reports it on connect.
+    caps.panFrameRateShaping = std::nullopt;
+    // Likewise the waterfall line duration: the radio's, never the client's.
+    caps.panWaterfallRateShaping = std::nullopt;
     // A Flex blanks impulses in its OWN DDC, so NB is already the radio's under
     // hasRadioSideDsp above and the host has nothing to add. This flag says
     // where the blanker runs, not whether the radio has one.
@@ -277,8 +444,9 @@ RadioCapabilities FlexBackend::capabilities() const
     // `transmit rfpower=` is parsed off radio status, so the value the model
     // carries is confirmed radio state rather than this client's request
     // (#5518, Principle II).
+    // Tune power reaches a Flex as command-plane text, not setTunePower().
     caps.transmitDriveControl = RadioCapabilities::TransmitDriveControl{
-        SliceFrequencyControl::Authority::Radio};
+        SliceFrequencyControl::Authority::Radio, /*tunePowerAppliesLive=*/false};
     // A Flex transmits in every mode it demodulates, so there is nothing for the
     // receive-only mode guard to refuse. Stated rather than defaulted, per the
     // "adding a field" rule in RadioCapabilities.h.
@@ -312,7 +480,11 @@ RadioCapabilities FlexBackend::capabilities() const
     caps.hasDownwardExpander = true;
     caps.hasAgcThreshold = true;
     caps.hasAmCarrierLevel = true;
-    caps.hasVoxDelay = true;
+    caps.voxControl = RadioCapabilities::VoxControl{/*hasDelay*/ true};
+    caps.txMonitorControl = RadioCapabilities::TxMonitorControl{};
+    caps.lineoutControl = RadioCapabilities::LineoutControl{};
+    // The radio stores "Show TX in Waterfall" and echoes it in transmit status.
+    caps.txWaterfallClientFlag = std::nullopt;
 
     // FALSE, and stated rather than left to the default. A Flex modulates on
     // the radio AND takes its transmit audio over DAX/VITA-49, so it is the one
@@ -399,8 +571,8 @@ RadioCapabilities FlexBackend::capabilities() const
     // FLEX PACURRENT is known to clip below real full-power draw, so it is not
     // an honest substitute for the calibrated PA-temperature instrument.
     caps.hasPaCurrentTelemetry = false;
-    caps.speechProcessorLevelMaximum = 2;
-    caps.speechProcessorLabel = QStringLiteral("PROC");
+    caps.speechProcessorControl = RadioCapabilities::SpeechProcessorControl{
+        2, QStringLiteral("PROC")};
     caps.hasMainFanTelemetry = true;
 
     // Advertise the "flex" extension namespace: the amp/tuner operate/bypass/
@@ -474,6 +646,110 @@ void FlexBackend::requestSliceAgc(int sliceId, const SliceAgcRequest& request)
         sendSlice(QStringLiteral("slice set %1 agc_off_level=%2").arg(sliceId).arg(request.offLevel));
         break;
     }
+}
+
+ReceiveDispatch FlexBackend::requestSliceDsp(int sliceId, const SliceDspRequest& request)
+{
+    if (sliceId < 0 || !request.valid()) {
+        return ReceiveDispatch::Unsupported;
+    }
+    // FlexLib 4.2.18 Slice.cs: the enable and level setters are independent.
+    // Manual notch is not a Flex slice feature (TNF is a different resource).
+    QString key;
+    switch (request.feature) {
+    case SliceDspRequest::Feature::Nb: key = QStringLiteral("nb"); break;
+    case SliceDspRequest::Feature::Nr: key = QStringLiteral("nr"); break;
+    case SliceDspRequest::Feature::Anf: key = QStringLiteral("anf"); break;
+    case SliceDspRequest::Feature::Apf: key = QStringLiteral("apf"); break;
+    case SliceDspRequest::Feature::Nrl: key = QStringLiteral("lms_nr"); break;
+    case SliceDspRequest::Feature::Nrs: key = QStringLiteral("speex_nr"); break;
+    case SliceDspRequest::Feature::Rnn: key = QStringLiteral("rnnoise"); break;
+    case SliceDspRequest::Feature::Nrf: key = QStringLiteral("nrf"); break;
+    case SliceDspRequest::Feature::Anfl: key = QStringLiteral("lms_anf"); break;
+    case SliceDspRequest::Feature::Anft: key = QStringLiteral("anft"); break;
+    case SliceDspRequest::Feature::Mn: return ReceiveDispatch::Unsupported;
+    }
+    // The blanker fill belongs to a host-side blanker; a Flex has no command
+    // for it. (A change of blanker arrives as Enabled, which a Flex reads as
+    // its one blanker on or off.)
+    if (request.field == SliceDspRequest::Field::Fill) {
+        return ReceiveDispatch::Unsupported;
+    }
+    if (request.field == SliceDspRequest::Field::Level) {
+        if (request.feature == SliceDspRequest::Feature::Rnn
+            || request.feature == SliceDspRequest::Feature::Anft) {
+            return ReceiveDispatch::Unsupported;
+        }
+        key += QStringLiteral("_level");
+    }
+    sendSlice(QStringLiteral("slice set %1 %2=%3").arg(sliceId).arg(key)
+                  .arg(request.field == SliceDspRequest::Field::Enabled
+                           ? int(request.enabled) : request.level));
+    return ReceiveDispatch::Dispatched;
+}
+
+ReceiveDispatch FlexBackend::requestSliceAudio(int sliceId, const SliceAudioRequest& request)
+{
+    if (sliceId < 0 || !request.valid()) {
+        return ReceiveDispatch::Unsupported;
+    }
+    QString key;
+    switch (request.field) {
+    case SliceAudioRequest::Field::Gain: key = QStringLiteral("audio_level"); break;
+    case SliceAudioRequest::Field::Mute: key = QStringLiteral("audio_mute"); break;
+    case SliceAudioRequest::Field::Pan: key = QStringLiteral("audio_pan"); break;
+    }
+    sendSlice(QStringLiteral("slice set %1 %2=%3").arg(sliceId).arg(key).arg(request.value));
+    return ReceiveDispatch::Dispatched;
+}
+
+ReceiveDispatch FlexBackend::requestSliceSquelch(int sliceId, const SliceSquelchRequest& request)
+{
+    if (request.kind != SliceSquelchRequest::Kind::Manual) {
+        return ReceiveDispatch::Unsupported;
+    }
+    if (sliceId < 0 || !request.valid()) {
+        return ReceiveDispatch::Unsupported;
+    }
+    // FlexLib uses separate commands; a combined write is rejected by some
+    // firmware/mode combinations. Repeated UI intent need not rewrite either.
+    if (request.enabledChanged) {
+        sendSlice(QStringLiteral("slice set %1 squelch=%2").arg(sliceId).arg(int(request.enabled)));
+    }
+    if (request.levelChanged) {
+        sendSlice(QStringLiteral("slice set %1 squelch_level=%2").arg(sliceId).arg(request.level));
+    }
+    return ReceiveDispatch::Dispatched;
+}
+
+ReceiveDispatch FlexBackend::requestSliceRxAntenna(int sliceId, const QString& antenna)
+{
+    // Port names are a single protocol token, not caller-supplied wire text.
+    if (sliceId < 0 || antenna.isEmpty() || antenna.size() > 64) {
+        return ReceiveDispatch::Unsupported;
+    }
+    for (const QChar ch : antenna) {
+        if (!((ch >= QLatin1Char('A') && ch <= QLatin1Char('Z'))
+              || (ch >= QLatin1Char('a') && ch <= QLatin1Char('z'))
+              || (ch >= QLatin1Char('0') && ch <= QLatin1Char('9'))
+              || ch == QLatin1Char('_') || ch == QLatin1Char('-')
+              || ch == QLatin1Char('/'))) {
+            return ReceiveDispatch::Unsupported;
+        }
+    }
+    sendSlice(QStringLiteral("slice set %1 rxant=%2").arg(sliceId).arg(antenna));
+    return ReceiveDispatch::Dispatched;
+}
+
+ReceiveDispatch FlexBackend::requestSliceLock(int sliceId, bool locked)
+{
+    if (sliceId < 0) {
+        return ReceiveDispatch::Unsupported;
+    }
+    // Per-slice lock, NOT the radio-wide hasRadioDialLock capability.
+    sendSlice(QStringLiteral("slice %1 %2")
+                  .arg(locked ? QStringLiteral("lock") : QStringLiteral("unlock")).arg(sliceId));
+    return ReceiveDispatch::Dispatched;
 }
 
 void FlexBackend::setSliceMode(int sliceId, const QString& mode)

@@ -1,9 +1,11 @@
 #include "RadioStateMemory.h"
 
 #include <QDebug>
+#include <QJsonArray>
 #include <QJsonDocument>
 
 #include <cmath>
+#include <utility>
 
 namespace AetherSDR {
 namespace RadioStateMemory {
@@ -17,6 +19,13 @@ bool has(const RadioCapabilities& caps, Domain domain)
     return caps.clientSettingsDomains.testFlag(domain);
 }
 
+// The AGC-off level is client-owned only where the client owns the AGC and the
+// backend declares a writable threshold/off level. Never a family check.
+bool ownsAgcOffLevel(const RadioCapabilities& caps)
+{
+    return has(caps, Domain::Agc) && caps.hasAgcThreshold;
+}
+
 // The extension document's domain sub-keys (PR #4614 review): the engine
 // gates the extension PER DOMAIN by copying only the sub-object named for a
 // declared domain. The CONTENTS of each sub-object stay opaque here — the
@@ -25,6 +34,27 @@ bool has(const RadioCapabilities& caps, Domain domain)
 // feature documents (one domain, one document — PR 6).
 constexpr const char* kExtRfGainKey = "rfGain";
 constexpr const char* kExtTxSetpointsKey = "txSetpoints";
+constexpr const char* kExtReceiversKey = "receivers";
+constexpr const char* kExtNotchesKey = "notches";
+
+// The declared domains' sub-objects of `ext`; load() and store() share it so
+// the two gates cannot drift apart.
+QJsonObject gateExtension(const RadioCapabilities& caps, const QJsonObject& ext)
+{
+    const std::pair<Domain, const char*> domains[] = {
+        {Domain::RfGain, kExtRfGainKey},
+        {Domain::TxSetpoints, kExtTxSetpointsKey},
+        {Domain::Receivers, kExtReceiversKey},
+        {Domain::Notches, kExtNotchesKey},
+    };
+    QJsonObject gated;
+    for (const auto& [domain, key] : domains) {
+        if (has(caps, domain) && ext.contains(QLatin1String(key))) {
+            gated.insert(QLatin1String(key), ext.value(QLatin1String(key)));
+        }
+    }
+    return gated;
+}
 
 } // namespace
 
@@ -58,6 +88,7 @@ RestoredRadioState load(const RadioSettingsScope& scope,
     if (has(caps, Domain::Tuning)) {
         state.rfFrequencyHz = doc.value(QStringLiteral("rfFrequencyHz")).toDouble();
         state.mode = doc.value(QStringLiteral("mode")).toString();
+        state.tuningStepHz = doc.value(QStringLiteral("tuningStepHz")).toInt();
     }
     if (has(caps, Domain::Passband)) {
         state.filterLowHz = doc.value(QStringLiteral("filterLowHz")).toDouble();
@@ -73,6 +104,15 @@ RestoredRadioState load(const RadioSettingsScope& scope,
         state.agcThreshold =
             doc.value(QStringLiteral("agcThreshold")).toInt(-1);
     }
+    if (ownsAgcOffLevel(caps)) {
+        // One entry per receiver. A missing key gives an empty list, and an
+        // entry that is not a whole number reads as -1: "not restored".
+        const QJsonArray levels =
+            doc.value(QStringLiteral("agcOffLevels")).toArray();
+        for (const QJsonValue& level : levels) {
+            state.agcOffLevels.append(level.toInt(-1));
+        }
+    }
     if (has(caps, Domain::Cw)) {
         state.cwSpeed = doc.value(QStringLiteral("cwSpeed")).toInt();
         state.cwPitch = doc.value(QStringLiteral("cwPitch")).toInt();
@@ -86,23 +126,19 @@ RestoredRadioState load(const RadioSettingsScope& scope,
         state.monGainCw = doc.value(QStringLiteral("monGainCw")).toInt(-1);
         state.monPanCw = doc.value(QStringLiteral("monPanCw")).toInt(-1);
     }
+    if (has(caps, Domain::ReceiveOutputLevel)) {
+        // Out of range reads as absent, not clamped: the backend's default
+        // applies rather than a level nobody chose.
+        const int pct = doc.value(QStringLiteral("receiveOutputLevelPct")).toInt(-1);
+        state.receiveOutputLevelPct = (pct >= 0 && pct <= 100) ? pct : -1;
+    }
 
     // The extension is gated per domain too: only a declared domain's
     // sub-object is handed over, so a narrowed declaration cannot smuggle
     // another domain's data to the backend (PR #4614 review — previously the
     // whole blob rode on any one of the ext domains).
-    const QJsonObject storedExt = doc.value(QStringLiteral("ext")).toObject();
-    QJsonObject gatedExt;
-    if (has(caps, Domain::RfGain)
-        && storedExt.contains(QLatin1String(kExtRfGainKey))) {
-        gatedExt.insert(QLatin1String(kExtRfGainKey),
-                        storedExt.value(QLatin1String(kExtRfGainKey)));
-    }
-    if (has(caps, Domain::TxSetpoints)
-        && storedExt.contains(QLatin1String(kExtTxSetpointsKey))) {
-        gatedExt.insert(QLatin1String(kExtTxSetpointsKey),
-                        storedExt.value(QLatin1String(kExtTxSetpointsKey)));
-    }
+    const QJsonObject gatedExt =
+        gateExtension(caps, doc.value(QStringLiteral("ext")).toObject());
     if (!gatedExt.isEmpty()) {
         state.extension = gatedExt;
         state.extensionSchemaVersion =
@@ -146,6 +182,9 @@ bool store(const RadioSettingsScope& scope, const RadioCapabilities& caps,
         if (!state.mode.isEmpty()) {
             doc.insert(QStringLiteral("mode"), state.mode);
         }
+        if (state.tuningStepHz > 0) {
+            doc.insert(QStringLiteral("tuningStepHz"), state.tuningStepHz);
+        }
     }
     if (has(caps, Domain::Passband)
         && (state.filterLowHz != 0.0 || state.filterHighHz != 0.0)) {
@@ -162,6 +201,19 @@ bool store(const RadioSettingsScope& scope, const RadioCapabilities& caps,
         // >= 0, so a threshold of 0 IS written — the sentinel is -1.
         if (state.agcThreshold >= 0) {
             doc.insert(QStringLiteral("agcThreshold"), state.agcThreshold);
+        }
+    }
+    if (ownsAgcOffLevel(caps)) {
+        // Written only when at least one receiver has a level; -1 holds the
+        // place of a receiver without one.
+        QJsonArray levels;
+        bool any = false;
+        for (const int level : state.agcOffLevels) {
+            levels.append(level >= 0 ? level : -1);
+            any = any || level >= 0;
+        }
+        if (any) {
+            doc.insert(QStringLiteral("agcOffLevels"), levels);
         }
     }
     if (has(caps, Domain::Cw)) {
@@ -199,19 +251,13 @@ bool store(const RadioSettingsScope& scope, const RadioCapabilities& caps,
             doc.insert(QStringLiteral("monPanCw"), state.monPanCw);
         }
     }
+    // >= 0, so a level of 0 IS written — the sentinel is -1.
+    if (has(caps, Domain::ReceiveOutputLevel) && state.receiveOutputLevelPct >= 0) {
+        doc.insert(QStringLiteral("receiveOutputLevelPct"), state.receiveOutputLevelPct);
+    }
 
     // Extension: same per-domain sub-object gate as load().
-    QJsonObject gatedExt;
-    if (has(caps, Domain::RfGain)
-        && state.extension.contains(QLatin1String(kExtRfGainKey))) {
-        gatedExt.insert(QLatin1String(kExtRfGainKey),
-                        state.extension.value(QLatin1String(kExtRfGainKey)));
-    }
-    if (has(caps, Domain::TxSetpoints)
-        && state.extension.contains(QLatin1String(kExtTxSetpointsKey))) {
-        gatedExt.insert(QLatin1String(kExtTxSetpointsKey),
-                        state.extension.value(QLatin1String(kExtTxSetpointsKey)));
-    }
+    const QJsonObject gatedExt = gateExtension(caps, state.extension);
     if (!gatedExt.isEmpty()) {
         doc.insert(QStringLiteral("ext"), gatedExt);
         doc.insert(QStringLiteral("extVersion"), state.extensionSchemaVersion);

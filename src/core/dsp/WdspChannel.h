@@ -3,6 +3,7 @@
 #include <QMetaType>
 
 #include <atomic>
+#include "core/WfmReceptionDiagnostics.h"
 #include <array>
 #include <cstddef>
 #include <memory>
@@ -41,6 +42,57 @@ public:
         Wbfm
     };
 
+    // WHICH of WDSP's two impulse blankers runs ahead of the channel. Both are
+    // created for the life of a receive channel and at most one runs; see
+    // openNoiseBlanker().
+    //
+    // Values are the seam's (AetherSDR::NoiseBlankerKind) and are asserted equal
+    // where the two meet, in core/backends/WdspNoiseBlanker.h. This enum is
+    // declared here rather than included from there because core/dsp is a leaf:
+    // it depends on Qt and the standard library and nothing else in this tree,
+    // and an engine that had to include the seam's vocabulary to blank an
+    // impulse would be the wrong dependency direction to open for two enums.
+    enum class NoiseBlanker
+    {
+        Off = 0,
+        Impulse = 1,   // ANB, nob.c — zeroes the window
+        Advanced = 2,  // NOB, nobII.c — reconstructs it, per NoiseBlankerFill
+    };
+
+    // WDSP's own numbering for what fills the blanked window (nobII.c, the
+    // switch on a->mode), so pushing it to SetEXTNOBMode is a cast and not a
+    // table. Advanced only; Impulse always zeroes.
+    enum class NoiseBlankerFill
+    {
+        Zero = 0,
+        SampleHold = 1,
+        MeanHold = 2,
+        HoldSample = 3,
+        Interpolate = 4,
+    };
+
+    // Opt-in receive FM recipe. Other channel owners retain their existing
+    // settings. The FM limiter and unity output panel normalize demodulated
+    // audio before it reaches a speaker mixer or an independent receiver tap.
+    struct FmReceive
+    {
+        // Deviation has one owner: Config::fmDeviationHz, including runtime setters.
+        bool operator==(const FmReceive&) const = default;
+    };
+
+    // Broadcast receive recipe from WDSP Guide section 5.3.10. This opt-in
+    // owns an RF FIR before WDSP's 384 -> 192 kHz conversion and normalizes
+    // paired audio before any receiver tap. Other channel owners are unchanged.
+    struct WbfmReceive
+    {
+        enum class Deemphasis { Us75, Us50 };
+        Deemphasis deemphasis = Deemphasis::Us75;
+        double outputGain = 0.25;
+        bool forceMono = false;
+        static constexpr double kRfTransitionGuardHz = 3000.0;
+        bool operator==(const WbfmReceive&) const = default;
+    };
+
     struct Config
     {
         Direction direction = Direction::Receive;
@@ -50,6 +102,11 @@ public:
         int dspSampleRate = 48000;
         int outputSampleRate = 48000;
         Mode mode = Mode::Usb;
+        std::optional<FmReceive> fmReceive;
+        std::optional<WbfmReceive> wbfmReceive;
+        // RXA output panel gain, linear, applied after the AGC. Unset keeps
+        // WDSP's create_rxa() default of 4.0 (+12.04 dB, #5942).
+        std::optional<double> rxPanelGain;
         double filterLowHz = 150.0;
         double filterHighHz = 3000.0;
         int agcMode = 3;
@@ -92,16 +149,24 @@ public:
         static constexpr double kMinFmDeviationHz = 100.0;
         static constexpr double kMaxFmDeviationHz = 100000.0;
         double fmDeviationHz = 5000.0;
+        // true: fexchange waits for each output block. The r1/r2 buffer phase is
+        // still set per channel open (flush_iobuffs() drains with a 1 ms timed
+        // wait), so two opens fed the same burst can differ (#5629).
         bool blockForOutput = false;
         // Impulse noise blanker — see the setNoiseBlanker() block below. Kept
         // in Config, not just as a runtime setter, so that reconfigure() (a
         // sample-rate or block-size change) rebuilds the channel with the
         // operator's blanker rather than silently switching it off, the same
         // way the shift and the AGC are carried.
-        bool noiseBlankerEnabled = false;
+        NoiseBlanker noiseBlanker = NoiseBlanker::Off;
         // 0..100, the seam's units. Mapped to WDSP's threshold by
-        // noiseBlankerThresholdForLevel().
+        // noiseBlankerThresholdForLevel(). Shared by both blankers, as it is in
+        // deskHPSDR — the trigger is the same detector in both stages, so one
+        // number keeps a switch between them from also changing sensitivity.
         int noiseBlankerLevel = 50;
+        // What Advanced puts in the blanked window. Carried even while Impulse
+        // runs, so switching between them does not reset the operator's choice.
+        NoiseBlankerFill noiseBlankerFill = NoiseBlankerFill::Zero;
         // CW audio peaking filter (setApf()). In Config because reconfigure()
         // frees the peaking stages; defaults are RXA.c's own (off, 600 Hz,
         // 100 Hz, linear gain 2.0).
@@ -116,6 +181,9 @@ public:
         // the seam's 0..100 (SliceModel's), and 20 is SliceModel's default.
         bool squelchEnabled = false;
         int squelchLevel = 20;
+        // Added to the amsq map; see setSquelch().
+        double levelSquelchOffsetDb = 0.0;
+        bool operator==(const Config&) const = default;
     };
 
     // Which WDSP squelch stage a mode uses — see squelchStageFor().
@@ -231,6 +299,16 @@ public:
     bool reconfigure(const Config& config, std::string* error = nullptr) noexcept;
     bool setMode(Mode mode) noexcept;
     bool setFilter(double lowHz, double highHz) noexcept;
+    bool setWbfmDeemphasis(WbfmReceive::Deemphasis deemphasis) noexcept;
+    // Lock-free latest completed output-mode observation, sampled by processIq().
+    // Forced Mono is false independently of reception diagnostics.pilotLocked.
+    // It is not an exact PCM-ring timestamp. False after stop/open; absent for
+    // channels that do not own the broadcast recipe. Caller owns the lifetime.
+    [[nodiscard]] std::optional<bool> wbfmStereoDetected() const noexcept;
+    // Acquisition thread only, immediately after processIq; control may read
+    // after joining/quiescing acquisition. Never reaches into mutable WDSP.
+    [[nodiscard]] const std::optional<AetherSDR::WfmReceptionDiagnostics>&
+        wbfmReceptionDiagnostics() const noexcept { return m_wbfmReception; }
     // Runtime RX AGC change. agcMode is the WDSP RXA AGC mode (0 off, 1 long,
     // 2 slow, 3 medium, 4 fast); maximumGainDb is the AGC "top", the ceiling on
     // how much gain the AGC may apply. Receive channels only — returns false on
@@ -281,26 +359,34 @@ public:
     // level 100 is tightest, and setMode() re-applies it.
     //   level 0                  nothing runs, in every mode ("0 = open")
     //   FM                       fmsq, threshold 10^(-2 * level / 100)
-    //   AM, SAM, DSB, LSB, USB   amsq, threshold -140 + 0.7 * level dBFS
+    //   AM, SAM, DSB, LSB, USB   amsq, threshold -140 + 0.7 * level + offset dBFS
     //   CW, DIG, WBFM, other     none
-    // amsq's map is fitted to HL2-measured dBFS levels, so it moves with RF gain;
-    // SSB is on amsq because ssql never opens at this chain's audio level (#5982).
+    // amsq gates raw dBFS, so a front-end gain change moves its antenna-referred
+    // point; `levelOffsetDb` is how the caller, which owns that gain, refers it
+    // back. The channel has no gain of its own to refer to (#6092). SSB is on
+    // amsq because ssql never opens at this chain's audio level (#5982).
     // Receive only; false while a control operation is in flight; not from processIq().
-    bool setSquelch(bool on, int level) noexcept;
+    bool setSquelch(bool on, int level, double levelOffsetDb) noexcept;
     [[nodiscard]] static SquelchStage squelchStageFor(Mode mode) noexcept;
+    static constexpr double kLevelSquelchBaseDbfs = -140.0;
+    static constexpr double kLevelSquelchDbPerStep = 0.7;
     // The two maps above, each clamping level to 0..100, so tests can pin them.
     [[nodiscard]] static double fmSquelchThresholdForLevel(int level) noexcept;
-    [[nodiscard]] static double levelSquelchThresholdDbfsForLevel(int level) noexcept;
+    [[nodiscard]] static double levelSquelchThresholdDbfsForLevel(int level,
+                                                                  double offsetDb) noexcept;
     // A snapshot by value, safe from any thread: guarded by its own mutex, not
     // g_setupMutex (the FFTW planner lock, which can be held for a whole plan).
     [[nodiscard]] AppliedSquelch appliedSquelch() const;
 
-    // Impulse noise blanker: WDSP ANB (nob.c) on the RAW IQ ahead of the channel,
-    // before the bandpass smears impulses. RX only; TX returns false. `level` is
-    // 0..100 in seam units (larger = more aggressive); WDSP's threshold runs the
-    // other way, inverted only in noiseBlankerThresholdForLevel(). Guarded like
-    // setMode(); never from processIq(). Enabling flushes the blanker first.
-    bool setNoiseBlanker(bool on, int level) noexcept;
+    // Impulse noise blankers: WDSP ANB (nob.c) and NOB (nobII.c) on the RAW IQ
+    // ahead of the channel, before the bandpass smears impulses. AT MOST ONE
+    // RUNS: both watch the same detector and window, so the second would
+    // reconstruct what the first zeroed. RX only; TX returns false. `level` is
+    // 0..100 in seam units (larger = more aggressive), inverted for WDSP only in
+    // noiseBlankerThresholdForLevel(); `fill` is Advanced's parameter and is
+    // pushed whatever the kind. Guarded like setMode(); never from processIq().
+    // Enabling flushes the stage being started.
+    bool setNoiseBlanker(NoiseBlanker kind, int level, NoiseBlankerFill fill) noexcept;
     // Real-time-safe suspend for backends that clock the channel with silence
     // during TX. The blanker fires on magnitude > threshold * running average, so
     // zeros would decay the average and gate off the start of every RX period.
@@ -308,9 +394,19 @@ public:
     // (that leaves it blind ~200 ms; see processIq()). Safe from the processIq()
     // thread: it only stores an atomic.
     void setNoiseBlankerHold(bool hold) noexcept;
+    // Kept as a bool question because that is what most callers ask — a meter,
+    // a readback or a test that wants to know whether anything is blanking.
     [[nodiscard]] bool noiseBlankerEnabled() const noexcept
     {
-        return m_config.noiseBlankerEnabled;
+        return m_config.noiseBlanker != NoiseBlanker::Off;
+    }
+    [[nodiscard]] NoiseBlanker noiseBlankerKind() const noexcept
+    {
+        return m_config.noiseBlanker;
+    }
+    [[nodiscard]] NoiseBlankerFill noiseBlankerFill() const noexcept
+    {
+        return m_config.noiseBlankerFill;
     }
     // The seam-level -> WDSP-threshold map, exposed because it is a policy
     // decision rather than an implementation detail and a test should be able
@@ -387,14 +483,44 @@ public:
     // channelId(); this spelling says only "a test wrote it first".
     [[nodiscard]] int channelIdForTest() const noexcept { return channelId(); }
 
+    // Tests reach WDSP only through this class: under AETHER_SHARED_CORE
+    // libaethercore.so exports none of WDSP's symbols, and a test that links
+    // aether_wdsp itself gets a second WDSP copy the core never touches.
     static uint64_t allocationSequenceForTest() noexcept;
     static uint64_t outstandingAllocationsForTest() noexcept;
+    // This thread's WDSP allocation count (wdspPortThreadAllocationSequence).
+    static uint64_t threadAllocationSequenceForTest() noexcept;
+    // Test only, a refusal probe: WDSP's OpenChannelWithExchangeDepth with the
+    // prepared-WBFM geometry, under the same lock and setup as open(). A call
+    // WDSP would accept (id 0..31 with depth 2..8) would open a channel nothing
+    // owns or rebuild a live one, so it returns kOpenProbeWouldOpen without
+    // reaching WDSP. Otherwise returns WDSP's result, 0 for its refusal.
+    static constexpr int kOpenProbeWouldOpen = -1;
+    [[nodiscard]] static int openWithExchangeDepthForTest(int channelId, int exchangeDepth) noexcept;
     // Process-global, test only (#5734, AetherSDR WDSP patch 13): the DSP
     // worker sleeps this long right after it has released a blocked
     // processIq(). That is the window in which, before patch 13, the host
     // overwrote the input block the worker had not yet copied out. 0 restores
     // the shipping path.
     static void setWorkerHandoffPauseForTest(unsigned microseconds) noexcept;
+    // Test-only deterministic counterpart: arm the next worker handoff, then
+    // acknowledge that one worker is held until explicitly released. Fixtures
+    // serialize use, keep other channels idle, and release BEFORE destruction
+    // or reconfiguration. The default is inactive; this never holds acquisition.
+    static void setWorkerHandoffHoldForTest(bool enabled) noexcept;
+    [[nodiscard]] static bool workerHandoffHeldForTest() noexcept;
+    // Same serialized-fixture lifetime contract, before output bytes/credit.
+    static void setWorkerOutputCopyHoldForTest(bool enabled) noexcept;
+    [[nodiscard]] static bool workerOutputCopyHeldForTest() noexcept;
+    // Test/control thread only: locks existing exchange/output-count sections. The
+    // caller owns this open channel and excludes control/destruction.
+    [[nodiscard]] int outputSamplesReadyForTest() const noexcept;
+    // After output-count readiness, wait for the last hook and DSP body before
+    // arming another hold. Test/control only; NEVER call while a hold is armed.
+    void synchronizeWorkerForTest() const noexcept;
+    // Test only (#6179, WDSP patch 22): queue PSRestoreCorr(path) on this TX
+    // channel's PureSignal correction thread, on the WDSP the core drives.
+    void restorePureSignalCorrectionForTest(const char* path) const noexcept;
     // Test only: the next `count` control operations on THIS channel are
     // refused exactly as a racing processIq() callback would refuse them, so
     // a caller's refused-then-converges path can be driven deterministically.
@@ -426,19 +552,28 @@ private:
     void applySquelchLocked(Mode mode) noexcept;
     static std::size_t computeOutputBlockSize(const Config& config) noexcept;
 
-    void open() noexcept;
+    [[nodiscard]] bool open() noexcept;
     void close() noexcept;
-    // Create/destroy the ANB stage alongside the channel. The blanker's id IS
-    // the channel id: nob.c keeps its own table of 32, WDSP's channel table is
-    // also 32, and this class already owns the allocation and release of that
-    // number — so borrowing it gives the two objects one lifetime instead of
-    // two that can fall out of step. Nothing else in this process may create an
-    // ANB without going through here.
+    // Create/destroy BOTH blanker stages alongside the channel. Each blanker's
+    // id IS the channel id: nob.c and nobII.c each keep their own table of 32,
+    // WDSP's channel table is also 32, and this class already owns the
+    // allocation and release of that number — so borrowing it gives the objects
+    // one lifetime instead of three that can fall out of step. Nothing else in
+    // this process may create an ANB or a NOB without going through here.
+    //
+    // Both are created even though at most one runs, and even when the operator
+    // has no blanker on at all: create_nobEXT allocates, and a channel that
+    // built its stages lazily would be allocating on a live real-time path the
+    // first time someone clicked NB2.
     void openNoiseBlanker() noexcept;
     void closeNoiseBlanker() noexcept;
     bool beginControlOperation() noexcept;
     void endControlOperation() noexcept;
 
+    struct WbfmState;
+    std::unique_ptr<WbfmState> m_wbfm;
+    std::atomic<int> m_wbfmStereo {-1};
+    std::optional<AetherSDR::WfmReceptionDiagnostics> m_wbfmReception;
     int m_channelId = -1;
     Config m_config;
     // Fixed for a given Config; cached at open()/reconfigure() so the real-time
@@ -467,19 +602,26 @@ private:
 
     // ── Noise blanker state ───────────────────────────────────────────────
     //
-    // m_nbOpen tracks the WDSP-side stage (created for the life of a receive
-    // channel whether or not it is running); m_nbActive is what processIq()
-    // reads to decide whether to pay for the interleave at all. Separate,
-    // because the stage exists while switched off and the real-time path must
-    // not consult m_config across a control-thread write.
+    // m_nbOpen tracks the WDSP-side stages (created for the life of a receive
+    // channel whether or not either is running); m_nbActive is what processIq()
+    // reads to decide whether to pay for the interleave at all, and m_nbKind
+    // which of the two to feed. Separate from m_config, because the stages exist
+    // while switched off and the real-time path must not consult m_config across
+    // a control-thread write.
+    //
+    // TWO atomics rather than one enum atomic the real-time path compares
+    // against Off: the gate is read every block and the kind only inside it, and
+    // keeping the gate a bool leaves the hot check exactly what it was before
+    // NB2 existed.
     bool m_nbOpen = false;
     std::atomic<bool> m_nbActive {false};
+    std::atomic<NoiseBlanker> m_nbKind {NoiseBlanker::Off};
     // Set on a transmit edge; processIq() skips the stage while it is true so
     // the running average is FROZEN rather than dragged into the mute path's
     // silence. No companion "flush on release" flag: re-arming the stage on
     // every T->R edge is the defect this hold exists to avoid, not part of it.
     std::atomic<bool> m_nbHold {false};
-    // ANB works on WDSP's interleaved-double buffer, in place; processIq()
+    // Both blankers work on WDSP's interleaved-double buffer, in place; processIq()
     // takes separate float planes. These three are the staging buffers for
     // that conversion, sized once in open() so the real-time path never
     // allocates. Blanking has to happen before the channel sees the samples,
@@ -494,3 +636,8 @@ private:
 // invokeMethod just warns and DROPS the call, which would silently break mode
 // switching.
 Q_DECLARE_METATYPE(WdspChannel::Mode)
+// Same reason, for the same reason it matters: both backends marshal the blanker
+// verb onto the thread that owns the DSP object, so an unregistered enum here
+// would silently drop every NB and NB2 click instead of failing.
+Q_DECLARE_METATYPE(WdspChannel::NoiseBlanker)
+Q_DECLARE_METATYPE(WdspChannel::NoiseBlankerFill)

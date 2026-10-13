@@ -439,6 +439,17 @@ void testCredentialExodus()
            "a credential field re-added to a document is stripped at the seam");
     expect(SettingsSanitizer::isSecretKey(QStringLiteral("MqttPass")),
            "the sanitizer redacts the exact exodus names (MqttPass drift hole)");
+    for (const QString& key : {QStringLiteral("tgxl_auth_code"),
+                               QStringLiteral("TGXL_AuthCode"),
+                               QStringLiteral("pgxl_auth_code"),
+                               QStringLiteral("PGXL_AuthCode"),
+                               QStringLiteral("antenna_genius_auth_code"),
+                               QStringLiteral("AG_AuthCode")}) {
+        settings.setValue(key, QStringLiteral("test-secret"));
+        settings.save();
+        expect(!dbHas(key) && SettingsSanitizer::isSecretKey(key),
+               "peripheral authorization codes cannot enter or leave settings");
+    }
 }
 
 void testCorruptDbRestoresFromBackup()
@@ -1164,10 +1175,10 @@ int main(int argc, char** argv)
         expect(remaining.open(QIODevice::ReadOnly) && remaining.readAll() == bytes,
                "profile legacy source stays byte-identical");
     } else if (scenario == QStringLiteral("explicit-profile-path-isolation")) {
-#if defined(Q_OS_MAC) || defined(Q_OS_WIN)
+#if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
         // Windows known folders do not honor HOME overrides. Keep Qt test
         // mode there, and skip rather than create a fixture outside our root.
-#ifdef Q_OS_MAC
+#ifdef Q_OS_MACOS
         QStandardPaths::setTestModeEnabled(false);
 #endif
         const QString oldPath = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation)

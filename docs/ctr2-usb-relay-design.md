@@ -142,8 +142,8 @@ Message types:
 | Type | Name | Direction | Payload | Meaning |
 | --- | --- | --- | --- | --- |
 | `0x00` | DATA | both | 1-512 bytes | Radio TCP bytes, unchanged |
-| `0x01` | HELLO | device -> host | none | Start or restart the link |
-| `0x02` | READY | host -> device | none | Radio connection is open; DATA may flow |
+| `0x01` | HELLO | both | none | Host: "are you there?" (sent on Start, repeated until answered). Device: "restart the link" |
+| `0x02` | READY | both | none | Device: "here, ready" (the answer to HELLO). Host: "radio connection is open; DATA may flow" |
 | `0x03` | CLOSED | both | none | The radio connection has ended |
 | `0x04` | DATAGRAM | both | 3-1474 bytes | One UDP datagram: radio UDP port (2 bytes, MSB first), then 1-1472 datagram bytes |
 
@@ -158,34 +158,51 @@ are preserved; datagrams over 1472 bytes are not carried.
 Control messages (HELLO, READY, CLOSED) are always a single header report
 with packet count 1 and payload count 0. A receiver accepts a control
 message with any counter and expects the next DATA to carry that counter + 1;
-this is how both sides resynchronize. A sender starts its counter at 0 with
-the message that starts a link: HELLO from the device, READY from the host.
+this is how both sides resynchronize. A sender resets its counter to 0 each
+time it sends HELLO or READY.
 
 ### Link flow
 
+The operator presses Start in AetherSDR; nothing needs pressing on the CTR2.
+
 ```text
 CTR2                                   AetherSDR                    Radio
-  | -- HELLO (counter 0) ------------->  |                            |
+  | <-------------------------- HELLO -  |  (Start; repeated ~1 s     |
+  |                                      |   until answered)          |
+  | -- READY ------------------------->  |                            |
   |                                      | -- new TCP connection ---> |
-  | <------------ READY (counter 0) ---  |  (connected)               |
+  | <-------------------------- READY -  |  (connected)               |
   | -- DATA "C1|..." ----------------->  | -- bytes ----------------> |
   | <-------------------------- DATA --  | <-- replies / status ----- |
   |              ...                     |              ...           |
   | <------------------------- CLOSED -  | <-- radio closed --------- |
-  | -- HELLO --------------------------> |  (start again)             |
+  | <-------------------------- HELLO -  |  (calling again)           |
 ```
 
-Treat READY exactly like the Wi-Fi TCP socket connecting and CLOSED exactly
-like it disconnecting. Every HELLO gets a **fresh** radio connection, so the
-CTR2's normal registration and binding sequence runs again.
+Treat the host's READY exactly like the Wi-Fi TCP socket connecting and
+CLOSED exactly like it disconnecting. Every link gets a **fresh** radio
+connection, so the CTR2's normal registration and binding sequence runs
+again. Plug order does not matter, and a CTR2 that resets simply answers the
+next HELLO.
 
 Host behavior:
 
-- **HELLO received:** close any existing radio connection, discard all link
-  state, including every report still queued for the device, and open a
-  new radio connection (10 s timeout). On success send READY
-  and start forwarding, including any radio output that arrived first. On
-  failure send CLOSED.
+- **Start pressed, or no link up:** send HELLO, and repeat it about once a
+  second until the device answers. After a failure (the radio connection
+  failed, or a link fault below) repeat it every 5 s instead, until a link
+  ends cleanly or the operator presses Start again. Never queue a HELLO
+  while earlier output to the device is still undelivered, so a device that
+  is not reading cannot accumulate them.
+- **READY received while no link is up and after a HELLO the host has sent
+  since the last link ended** (the answer to that HELLO), **or HELLO received
+  at any time** (the device asking for a restart): close any
+  existing radio connection, discard all link state, including every report
+  still queued for the device, and open a new radio connection (10 s
+  timeout). On success send READY and start forwarding, including any radio
+  output that arrived first. On failure send CLOSED.
+- **Any other READY** (during a link, during the back-off after a failure, or
+  while a CLOSED is still undelivered): a late answer to an earlier HELLO;
+  ignored. It never discards a pending CLOSED or skips the back-off.
 - **DATA received:** forward the payload to the radio.
 - **DATAGRAM received:** send the datagram bytes to the radio's IP on the
   given UDP port, from one UDP socket the host opens for this link.
@@ -194,16 +211,18 @@ Host behavior:
   delays the TCP stream: if more than about 3 KB of datagrams are already
   waiting on the USB link, newer ones are dropped and counted, as UDP allows.
 - **CLOSED received:** forward any DATA that came before it, then close the
-  radio connection. No reply is sent.
+  radio connection. No reply is sent. The next HELLO waits until that drain
+  has finished.
 - **Radio connection closes:** forward the radio's remaining bytes, then send
   CLOSED.
-- **Framing error, DATA or DATAGRAM with no radio connection, READY from the
-  device during a link, or a message still incomplete 1 s after it began:**
-  close the radio connection, discard queued output, send CLOSED, and wait
-  for HELLO. A link gets at most one CLOSED; anything else the device sends
-  before its next HELLO, including READY, is ignored.
+- **Framing error, DATA or DATAGRAM with no radio connection, or a message
+  still incomplete 1 s after it began:** close the radio connection, discard
+  queued output, send CLOSED, and call the device again with HELLO. A link
+  gets at most one CLOSED; DATA the device sends before answering is
+  ignored.
 - **USB device removed, or Stop pressed:** close the radio connection (and
-  send CLOSED if the device is still there).
+  send CLOSED if the device is still there). If Start follows at once, that
+  CLOSED reaches the device before the new link's first HELLO.
 - **AetherSDR disconnects from the radio or switches radios:** stop the
   relay as for Stop. The relay always targets the radio AetherSDR is
   connected to, and AetherSDR's transmit indicator must keep showing that
@@ -211,27 +230,96 @@ Host behavior:
 
 Device behavior:
 
-- On entering USB mode, reset the counter and send HELLO. Until READY or
-  CLOSED arrives, ignore every received report that is not a header
-  (byte 0 `0xFF`) of type READY or CLOSED, then reset the receiver and
-  process that header. Data reports never start with `0xFF`, so this skips
-  the tail of anything sent before the HELLO without misreading it.
-- Send DATA only after READY, and only until CLOSED.
+- **At power-up or on entering USB mode:** start in the waiting state
+  described next, as if READY had just been sent. The host's next HELLO
+  starts the link. A device that may have reset while a link was up can
+  instead send HELLO at once, so the host restarts without waiting.
+- **On HELLO from the host:** reset the counter and answer READY. Then,
+  until the host's READY or CLOSED arrives, ignore every received report
+  that is not a header (byte 0 `0xFF`) of type READY, CLOSED or HELLO; reset
+  the receiver and process that header. (A further HELLO means the host is
+  still calling: answer READY again.) Data reports never start with `0xFF`,
+  so this skips the tail of anything sent earlier without misreading it.
+- **Host READY:** the radio connection is open, exactly like the Wi-Fi socket
+  connecting. Send DATA only after it, and only until CLOSED.
 - **Payload is a byte stream.** The host splits radio output at arbitrary
   points, so a DATA message may end mid-line and one line may span several
   messages. Feed received payload into the same parser the Wi-Fi TCP path
   uses. Commands the CTR2 sends may be one per message or batched; either
   works.
 - **UDP:** send each datagram for the radio as a DATAGRAM with the radio's
-  UDP port, exactly as the Wi-Fi path would send it. Register for the
-  radio's UDP by sending a datagram to radio port 4992 this way (the radio
-  learns the return address from it) rather than with the TCP
-  `client udpport` command: the host cannot see that command, and the
-  port it names would be on the PC, possibly AetherSDR's own. Datagrams
-  from the radio arrive as DATAGRAM messages, one per datagram.
-- On CLOSED, behave as when the Wi-Fi socket drops; send HELLO to reconnect.
-- On a framing error in what it receives, send HELLO to restart the link
-  (and resynchronize as above).
+  UDP port, exactly as the Wi-Fi path would send it. Datagrams from the
+  radio arrive as DATAGRAM messages, one per datagram. On a LAN the radio
+  sends a client's UDP to the TCP peer's address, which here is the host,
+  at the port the client names with `client udpport <port>`. It does not
+  learn an endpoint from a registration datagram: `client udp_register`
+  sent to port 4992 got no UDP back on a FLEX-8600 (firmware 4.2.18). The
+  port to name is the host's own UDP socket for the link, which a device
+  learns by negotiating the RELAY_UDP_PORT extension (below). Then send
+  `client udpport <port>`, and a one-byte datagram to radio port 4992,
+  which covers firmware that rejects `udpport`, as AetherSDR's own LAN
+  connection does. Without that extension a device cannot register for UDP
+  over USB.
+- On CLOSED, behave as when the Wi-Fi socket drops, then wait: the host
+  calls again with HELLO.
+- On a framing error in what it receives, or to force a restart, send HELLO
+  and resynchronize as above; the host answers with a fresh radio connection
+  and READY (or CLOSED).
+
+### Extensions (negotiated per device)
+
+Version 0 above is complete on its own, and a CTR2 never needs anything in
+this section. Controllers that want more than the relayed radio stream can
+offer link extensions. AetherSDR uses them only with a device that offers
+them, so new extensions never need a change to the CTR2 or to version 0.
+
+**Discovery.** Right after opening the device, before the first report is
+read, the host sends GET_REPORT for HID Feature report `0x02`. The device
+answers with 8 bytes after the report ID:
+
+```text
+['C'] ['X'] [extension version 0x01] [0x00] [capabilities, 32 bits MSB first]
+```
+
+The report is exactly 8 bytes after the report ID (9 with it). Capability
+bit *n* stands for extension message type `0x40 + n`. A device
+without this Feature report (every CTR2) fails the request. So does a reply
+that is not exactly this shape. Either way the device offers nothing and the
+link is plain version 0.
+
+**Acceptance.** When the offer shares bits with what the host supports, the
+host sends SET_REPORT for Feature report `0x02` in the same layout. It
+carries only the shared bits: the extensions the host will use. Those bits,
+and no others, are allowed on the link in either direction. They stay in
+force until the device leaves the bus (unplugged, reset or re-enumerated),
+across any number of HELLO/READY link restarts. If the SET fails, the host
+uses no extensions.
+
+**Messages.** Extension types `0x40`–`0x5F` use the version 0 header and
+data reports. Each type has its own maximum length (the table below); a
+longer header is a framing error, and so is any type with no defined
+length, even when its bit was negotiated. They are sequenced like DATA and
+DATAGRAM and share their counter: one counter, one receiver state machine. A receiver treats a type that was not accepted exactly
+like any other unknown type: a framing error. The host sends extension
+messages only while the link is relaying (after its READY). It drops them
+rather than queue them when about 130 queued reports (~130 ms; one meter
+datagram plus headroom) are already waiting, so they never delay the radio
+stream. Their reports carry no TCP cost, so the backlog statistic still
+counts radio bytes only. Each AUDIO_SPECTRUM frame of 32 bars is 7 reports
+(header + 6 data), so 20 frames a second use about 14% of the link.
+
+| Type | Bit | Direction | Payload (max length) |
+| --- | --- | --- | --- |
+| `0x40` AUDIO_SPECTRUM | 0 | host → device | (69 bytes) `[bars N, 1..64][low Hz hi][low Hz lo][span Hz hi][span Hz lo][N levels]`. Receiving: what the operator hears (the Client EQ RX tap: after the radio's DSP, client NR and the RX chain up to and including the EQ; not stages after the EQ, output conversion or volume) over the active slice's passband width. Transmitting: the transmit audio (the TX EQ tap) over the TX filter width. The span is that width rounded up to a clean step (500 Hz–20 kHz, capped at the audio's Nyquist frequency: 12 kHz for 24 kHz audio). With low > 0 the bars are log-spaced from low to span Hz, bar *i* covering low·(span/low)^(i/N) to low·(span/low)^((i+1)/N); AetherSDR sends low = span/60 within 20–100 Hz. With low = 0 they split 0..span evenly. Each level is 0..255, linear in dB from −90 dB (0) to 0 dBFS (255). About 20 a second. |
+| `0x41` RELAY_UDP_PORT | 1 | host → device | (2 bytes) `[port hi][port lo]`: the host's UDP socket for this link, sent once right after the host's READY. The device registers for UDP with `client udpport <port>` (and a one-byte datagram to radio port 4992). |
+| `0x42` AUDIO_SPECTRUM_LINEAR | 2 | host → device | (69 bytes) The same payload as AUDIO_SPECTRUM, `[bars N][low Hz hi][low Hz lo][span Hz hi][span Hz lo][N levels]`, but the bars always split low..span evenly, bar *i* covering low + (span − low)·i/N to low + (span − low)·(i+1)/N, whatever low is. A device that negotiates it gets it in place of AUDIO_SPECTRUM for windows that do not start at 0. AetherSDR sends it while receiving CW: a window centered on the CW pitch covering the passband (pitch + filter low to pitch + filter high) with half its width to spare on each side, kept within 0 Hz and Nyquist, so a controller can show how far a signal is from zero beat. Requires AUDIO_SPECTRUM. |
+| `0x43` CW_TEXT | 3 | host → device | (2–33 bytes) `[confidence 0..3][1..32 bytes of text]`: CW decoded by AetherSDR's CW decoder from the active slice (while it runs: the slice in CW and RX decoding on), as it arrives, about a character at a time with word gaps as spaces. Filtered by the CW panel's sensitivity threshold; newlines become spaces and only printable ASCII is sent. Confidence 0 is the most certain (decoder cost < 0.15), then 1 (< 0.35), 2 (< 0.60) and 3, the bands the CW panel colors. |
+
+The reference implementation in `tools/ctr2-firmware-reference` covers the
+Feature report layout (`ctr2_caps_encode` / `ctr2_caps_decode`), sending
+(`ctr2_tx_send_extension`) and the accepted set
+(`ctr2_rx_set_extensions`). AetherSDR's tests cross-check it against the
+application in both directions.
 
 ### Test vectors
 
@@ -300,13 +388,17 @@ USB a complete replacement for Wi-Fi.
 | HID device access on its own I/O thread (hidapi) | `src/core/Ctr2HidPort.{h,cpp}` |
 | Link state machine, radio TCP connection and per-link UDP socket | `src/core/Ctr2UsbRelay.{h,cpp}` |
 | Applet: Wi-Fi or USB, device list; radio follows AetherSDR's connection | `src/models/Ctr2ProxyModel`, `src/gui/Ctr2ProxyApplet` |
+| Extension negotiation (Feature report `0x02`), on the HID I/O thread | `src/core/Ctr2HidThreadPort.cpp`, `src/core/Ctr2HidapiPort.cpp` |
+| AUDIO_SPECTRUM producer: the Client EQ RX tap (post-EQ), or the TX EQ tap while transmitting, its own 2048-point analyzer (reset on each RX/TX switch), 32 bars at 20 Hz, floor-level bars while the tap in use is not being written, only while a negotiating device is relaying | `src/gui/Ctr2AudioSpectrumFeeder` |
 
 HID I/O runs on one dedicated worker thread because hidapi reads and writes
 block; a stalled controller can then never freeze the UI or other
 controllers. Nothing waits on that thread: queued output is cancelled
 between writes, a restart fences the queue (late acknowledgements from
 before the fence are ignored), and shutdown hands the port its final
-CLOSED and lets it delete itself once its writes finish. The per-link UDP
+CLOSED and lets it delete itself once its writes finish. A port reopened
+on the same device waits on its own thread, up to 1 s, until the previous
+port has closed it, so the old CLOSED cannot overtake the new link. The per-link UDP
 socket is bound to the interface that reaches the radio, and only that
 radio's datagrams are relayed back. Each direction's relay budget is 16 KiB
 in USB mode (256 KiB over Wi-Fi) so a drain fits the link's ~7 KB/s. Everything else runs on the GUI event loop, as the TCP relay
@@ -329,8 +421,9 @@ byte 3, exact payload count, no checksum, 512-byte DATA buffering) and is
 implementing it, Output report included.
 
 The CTR2 runs on three ESP32-S3 boards, each enumerating with its board's
-own USB IDs. AetherSDR names these in its device list and sorts them first;
-the operator still picks the device, since `303A:1001` is Espressif's
+own USB IDs. AetherSDR names these in its device list, sorts them first and
+preselects the first one (USB is the applet's default mode). The operator
+can still pick another device, since `303A:1001` is Espressif's
 default for any ESP32-S3 and only the product string tells them apart:
 
 | VID:PID | Product string | CTR2 model |
@@ -338,10 +431,14 @@ default for any ESP32-S3 and only the product string tells them apart:
 | `303A:1001` (Espressif) | `ESP32S3_DEV` | CTR2-Max, and the CTR2-Nano in development |
 | `303A:1001` (Espressif) | `M5STACK_DIAL` | CTR2 units based on the M5Stack M5Dial |
 | `2886:0056` (Seeed) | `XIAO_ESP32S3` | CTR2-MIDI (Seeed XIAO) |
+| `303A:1001` (Espressif) | `AETHER_KNOB` | AetherKnob (Elecrow CrowPanel 2.1" rotary display) |
+| `303A:1001` (Espressif) | `Aether*` | Other controller firmware on the same link, named by its product string (case-sensitive prefix plus at least one character; printable ASCII, at most 32 characters) |
 
-Still open: UDP registration through a DATAGRAM to port 4992 rather than
-`client udpport`, and, for CW testing, what the CTR2 does if CLOSED arrives
-while it is keying.
+UDP registration is settled on hardware: the radio ignores a registration
+datagram on a LAN, so a device registers with `client udpport` naming the
+host's socket, learned through the RELAY_UDP_PORT extension (see "UDP" under
+Device behavior). Still open for CW testing: what the CTR2 does if CLOSED
+arrives while it is keying.
 
 ## Next steps and acceptance
 

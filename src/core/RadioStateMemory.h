@@ -17,7 +17,7 @@ namespace RadioStateMemory {
 
 // The feature document name in radio_settings, and its current schema.
 inline QString featureName() { return QStringLiteral("OperatingState"); }
-constexpr int kSchemaVersion = 2;
+constexpr int kSchemaVersion = 3;   // 3: tuningStepHz, receiveOutputLevelPct
 
 // The single engagement predicate: restore/capture happen only for declared
 // domains. Deliberately a function so tests and call sites share one truth.
@@ -38,7 +38,7 @@ RestoredRadioState load(const RadioSettingsScope& scope,
 bool store(const RadioSettingsScope& scope, const RadioCapabilities& caps,
            const RestoredRadioState& state);
 
-// Explicit RFC #5468 cutover helpers. No current runtime caller. Exact rows
+// Explicit RFC #5468 cutover helpers for the RTL accepted-state owner. Exact rows
 // only; the new owner must claim successfully before overlapping old-domain
 // capture is disabled. The legacy document stays as a downgrade snapshot.
 struct RtlMigrationSource {
