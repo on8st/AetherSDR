@@ -160,7 +160,6 @@ RIT and XIT work per receiver, ±9999 Hz. When transmit passes to another receiv
 
 ## Known issues
 
-- Graphic EQ band values are lost when you restart AetherSDR ([#5611](https://github.com/aethersdr/AetherSDR/issues/5611)).
 - Keying with the HL2's hardware PTT jack does not show as transmit in AetherSDR, and does not carry host audio ([#5998](https://github.com/aethersdr/AetherSDR/issues/5998)).
 - Each over starts with about 100 ms of keyed silence before your audio is transmitted ([#6052](https://github.com/aethersdr/AetherSDR/issues/6052)).
 - Changing CW break-in or its delay shows a "nothing was sent to the radio" notice, although both settings take effect ([#6153](https://github.com/aethersdr/AetherSDR/issues/6153)).
