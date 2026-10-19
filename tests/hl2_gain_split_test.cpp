@@ -369,6 +369,29 @@ int main(int argc, char** argv)
               "and a negative one resolves to zero — 'may take no gain at all'");
     }
 
+    // ---- Arming from a FRESHLY CONSTRUCTED backend, which is what a first
+    // connect with no stored per-band gain looks like ----
+    //
+    // This PR arms the control by default, and Hl2Backend.cpp's own comment
+    // says "With the ceiling at +19 and the default at 0 dB, arming from a
+    // fresh connect works". The default is NOT 0 dB. `m_lnaGainDb` is seeded
+    // with `hl2::kLnaDefaultGainDb`, which is 20 on this branch and on merged
+    // main -- and setAutoRfGain refuses when the baseline exceeds
+    // kAutoRfGainMaxBaselineDb, which is 19.
+    //
+    // An operator with a stored gain of 19 or less never sees this, which is
+    // why it has not shown up on the bench. A fresh install has no stored gain.
+    {
+        hl2::Hl2Backend fresh;
+        const int seeded = AetherSDR::hl2::kLnaDefaultGainDb;
+        std::printf("\n  fresh backend: kLnaDefaultGainDb=%d, ceiling=%d\n",
+                    seeded, hl2::Hl2Backend::kAutoRfGainMaxBaselineDb);
+        fresh.setAutoRfGain(true);
+        check(fresh.autoRfGainEnabled(),
+              "auto RF gain ARMS from a freshly constructed backend "
+              "(no stored per-band gain, i.e. a first connect)");
+    }
+
     if (failures == 0) {
         std::printf("\nALL PASS\n");
         return 0;
