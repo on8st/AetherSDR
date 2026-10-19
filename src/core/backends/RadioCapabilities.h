@@ -106,6 +106,8 @@ struct WidebandConverterView {
     // measured on the family that would pay it, and no such measurement exists.
     QString frameNamespace;
     QString frameVerb;
+};
+
 // What the panadapter's SPAN is made of. Absent means NO BACKEND HAS BEEN READ
 // on the question — not "no". That distinction is the whole reason this is a
 // record and not two bools (#5262 M2): a bool that nobody set reports a

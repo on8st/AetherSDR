@@ -169,9 +169,16 @@ AetherialAudioStrip::AetherialAudioStrip(AudioEngine* engine, QWidget* parent)
         maxBtn->setFixedSize(16, 16);
         maxBtn->setCursor(Qt::ArrowCursor);
         maxBtn->setStyleSheet(btnStyle);
-        maxBtn->setToolTip("Maximize");
+        // FULL SCREEN, not maximize, and the distinction is the point.
+        // showMaximized() fills the desktop but keeps the menu bar, the dock
+        // and this window's own frame; the platform's "Enter Full Screen" --
+        // which is what an operator reaches for when they want the panadapter
+        // to BE the screen -- takes the lot. ON8ST asked for this button to do
+        // the second thing, 2026-09-16: "kan je het klikken op de icoon links
+        // van het sluit x icoon equivalent maken aan enter fullScreenMode".
+        maxBtn->setToolTip("Enter full screen");
         connect(maxBtn, &QPushButton::clicked, this, [this]() {
-            if (isMaximized()) showNormal(); else showMaximized();
+            if (isFullScreen()) showNormal(); else showFullScreen();
         });
         row->addWidget(maxBtn);
 

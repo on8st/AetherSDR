@@ -260,6 +260,8 @@ public:
     [[nodiscard]] WdspProcessTally::Counts processTally() const noexcept
     {
         return m_processTally.snapshot();
+    }
+
     // ── Panadapter integrity across a transport gap ───────────────────────
     //
     // How many partial FFT frames were thrown away because EP6 packets went
