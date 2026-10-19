@@ -6760,3 +6760,17 @@ target_include_directories(cw_rx_model_test PRIVATE src)
 target_link_libraries(cw_rx_model_test PRIVATE aethercore Qt6::Core)
 add_test(NAME cw_rx_model_test COMMAND cw_rx_model_test)
 set_tests_properties(cw_rx_model_test PROPERTIES TIMEOUT 15)
+
+# TEMPORARY INSTRUMENT — not part of v26.9.4. Measures wanted/image/CARRIER for
+# the HL2 TX modulator. Added by the LSB-sounds-like-AM investigation; the code
+# under test is untouched.
+add_executable(hl2_lsbam_probe tests/hl2_lsbam_probe.cpp)
+target_include_directories(hl2_lsbam_probe PRIVATE src)
+target_link_libraries(hl2_lsbam_probe PRIVATE aethercore Qt6::Core)
+
+# TEMPORARY INSTRUMENT — not part of v26.9.4. Two-tone IMD and comb-filter
+# probe for the HL2 TX modulator + level chain. Added by the "metallic/boxy
+# speech" investigation; the code under test is untouched.
+add_executable(hl2_twotone_probe tests/hl2_twotone_probe.cpp)
+target_include_directories(hl2_twotone_probe PRIVATE src)
+target_link_libraries(hl2_twotone_probe PRIVATE aethercore Qt6::Core)
