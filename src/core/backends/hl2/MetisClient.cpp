@@ -1718,6 +1718,13 @@ std::array<std::uint8_t, kUsbPacketSize> MetisClient::buildNextControlPacket(qin
             m_txUnderflowRunSamples += shortBy;
             // Still starving: whatever gap was accumulating was not a recovery.
             m_txUnderflowRunQuietPackets = 0;
+            // A whole packet with nothing queued: the margin is spent, so prime
+            // again rather than resume with none. A short packet (drift, a
+            // partial block) does not re-arm.
+            if (n == 0 && m_txIqPrimeTarget == 0) {
+                armTxIqPrime();
+                ++m_txPrimeRearms;
+            }
         } else if (m_txUnderflowRunPackets > 0) {
             // A full packet does NOT end the run on its own -- see
             // kUnderflowRunQuietPackets. It only starts the clock on the gap

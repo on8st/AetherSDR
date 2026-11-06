@@ -1623,8 +1623,8 @@ int main(int argc, char** argv)
               "THE PRIME: two packets were held, and the target let it go, not the deadline");
         check(log.primeLines().size() == 1, "THE PRIME: one log line when it lets go");
 
-        // NOT DEFENDED. Below the target again, the queue keeps draining: the
-        // margin is not restored until the queue is abandoned and re-primed.
+        // Below the target again, the queue keeps draining: only an EMPTY keyed
+        // packet re-arms the prime (see A MID-OVER STALL below), not a short one.
         while (over.txQueueDepth() >= packet)
             check(payloadNonZero(over.buildNextControlPacket()),
                   "THE PRIME: once let go, a queue below the target still drains");
@@ -1633,6 +1633,7 @@ int main(int argc, char** argv)
               "THE PRIME: down to the last short packet, which is not held either");
         check(over.txPrimeHoldPackets() == 2 && log.primeLines().size() == 1,
               "THE PRIME: no second hold and no second line in the same over");
+        check(over.txPrimeRearms() == 0, "THE PRIME: a short packet does not re-arm it");
 
         // THE KEYED EDGE ARMS IT AGAIN. Same context, no flush, queue empty:
         // nothing but the edge itself can have armed this one.
@@ -1713,6 +1714,54 @@ int main(int argc, char** argv)
             check(anyFrameKeyed(resumed) && !payloadNonZero(resumed)
                       && mixed.txQueueDepth() == block,
                   "THE PRIME: voice that restarts after CW is held like the start of an over");
+        }
+
+        {   // A MID-OVER STALL RE-ARMS IT: an empty keyed packet, then the target again
+            TxTestAuthority stallTx;
+            MetisClient stalled;
+            MetisClientTestAccess::setStreaming(stalled);
+            stalled.enableTransmit(true);
+            stalled.setMox(true, stallTx.operation);
+            pastThePrime(stalled, stallTx.context);
+            while (stalled.txQueueDepth() > 0)
+                (void)stalled.buildNextControlPacket();
+            check(stalled.txPrimeRearms() == 0,
+                  "THE PRIME: draining to the last sample is not yet a stall");
+            const auto empty = stalled.buildNextControlPacket();
+            check(anyFrameKeyed(empty) && !payloadNonZero(empty) && stalled.txPrimeRearms() == 1,
+                  "THE PRIME: a keyed packet that finds the queue empty mid-over re-arms it");
+            (void)stalled.buildNextControlPacket();
+            check(stalled.txPrimeRearms() == 1, "THE PRIME: once per stall, not once per packet");
+            const std::uint64_t holdsBefore = stalled.txPrimeHoldPackets();
+            const std::uint64_t underflowBefore = stalled.txUnderflowPackets();
+            stalled.queueTxIq(oneBlock, stallTx.context);
+            const auto heldAfterStall = stalled.buildNextControlPacket();
+            check(!payloadNonZero(heldAfterStall) && stalled.txQueueDepth() == block
+                      && stalled.txPrimeHoldPackets() == holdsBefore + 1
+                      && stalled.txUnderflowPackets() == underflowBefore,
+                  "THE PRIME: audio that resumes after the stall is held, counted as a hold");
+            stalled.queueTxIq(oneBlock, stallTx.context);
+            stalled.queueTxIq(oneBlock, stallTx.context);
+            const auto refilled = ep2IqShape(stalled.buildNextControlPacket());
+            check(refilled.carryingIq == kTxSamplesPerPacket
+                      && stalled.txQueueDepth() == 3 * block - packet,
+                  "THE PRIME: and goes out whole at the target, as at key-down");
+            check(stalled.txPrimeDeadlineReleases() == 0 && stalled.txPrimeRearms() == 1,
+                  "THE PRIME: let go by its target, not its deadline");
+
+            // TUNE and CW are not held by a re-armed prime either.
+            while (stalled.txQueueDepth() > 0)
+                (void)stalled.buildNextControlPacket();
+            (void)stalled.buildNextControlPacket();          // empty: re-armed
+            stalled.queueTxIq(oneBlock, stallTx.context);
+            stalled.setTxTestTone(0.0, 0.5, stallTx.operation);
+            check(ep2IqShape(stalled.buildNextControlPacket()).carryingIq == kTxSamplesPerPacket
+                      && stalled.txQueueDepth() == block,
+                  "THE PRIME: a re-armed prime does not hold the test tone");
+            stalled.setTxTestTone(0.0, 0.0, stallTx.operation);
+            stalled.setCwKeyDown(true, stallTx.operation);
+            check(payloadNonZero(stalled.buildNextControlPacket()),
+                  "THE PRIME: nor the CW carrier");
         }
     }
 

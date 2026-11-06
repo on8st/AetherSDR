@@ -289,6 +289,62 @@ int main(int argc, char** argv)
         check(r.sequenceIntact, "and even then nothing is lost");
     }
 
+    // ---- A STALL, THEN JITTER (hl2-lab d212) ----
+    //
+    // Every block late by 0-25 ms, and from block 40 a 150 ms stall. Two
+    // shapes. STEP: the producer resumes 150 ms behind and stays there (a
+    // modulator block dropped on a stalled worker, a client that does not
+    // catch up). CATCH-UP: the blocks due in the stall arrive at its end in one
+    // burst, as d212's TCI client sent them. An empty keyed packet re-arms the
+    // prime, so after the stall the queue is primed again before it drains.
+    {
+        const int overBlocks = 5 * kRate / block;   // 5 s
+        const int stallBlock = 40;
+        const int stall = msToSamples(150.0);
+        std::vector<int> jitter(static_cast<std::size_t>(overBlocks), 0);
+        std::uint32_t lcg = 0xd212u;
+        for (auto& j : jitter) {
+            lcg = lcg * 1664525u + 1013904223u;
+            j = msToSamples(25.0 * static_cast<double>(lcg >> 8) / static_cast<double>(1u << 24));
+        }
+        std::vector<int> step = jitter;
+        std::vector<int> catchUp = jitter;
+        const long long stallStart = static_cast<long long>(stallBlock + 1) * block;
+        for (int j = stallBlock; j < overBlocks; ++j) {
+            const auto at = static_cast<std::size_t>(j);
+            step[at] += stall;
+            const long long due = static_cast<long long>(j + 1) * block;
+            if (due < stallStart + stall)
+                catchUp[at] = std::max(catchUp[at], static_cast<int>(stallStart + stall - due));
+        }
+        const auto total = static_cast<long long>(overBlocks) * block;
+
+        const OverResult s = runOver(step);
+        std::fprintf(stderr,
+            "PROBE  stall 150 ms then jitter 0-25 ms, STEP: %d gap(s), %.2f ms of keyed zeros,"
+            " longest %.2f ms\n",
+            s.gaps, samplesToMs(s.gapSamples), samplesToMs(s.longestGap));
+        check(s.gaps == 1,
+              "STEP: after a stall that empties the queue, later jitter puts NO further keyed "
+              "zeros in mid-over -- the queue is primed again before it drains");
+        check(s.longestGap <= stall + msToSamples(25.0) + kPacket,
+              "STEP: the one gap is the stall, at most its jitter and one packet more");
+        check(s.sequenceIntact && s.realSamples == total,
+              "STEP: and every sample still reaches the wire once, in order");
+
+        const OverResult c = runOver(catchUp);
+        std::fprintf(stderr,
+            "PROBE  stall 150 ms then jitter 0-25 ms, CATCH-UP: %d gap(s), %.2f ms of keyed"
+            " zeros, longest %.2f ms\n",
+            c.gaps, samplesToMs(c.gapSamples), samplesToMs(c.longestGap));
+        check(c.gaps == 1, "CATCH-UP: one gap, at the stall");
+        check(c.longestGap <= stall - (2 * block - msToSamples(25.0)) + kPacket,
+              "CATCH-UP: shorter than the stall by the margin: the burst refills past "
+              "the target at once, so the re-armed prime holds nothing");
+        check(c.sequenceIntact && c.realSamples == total,
+              "CATCH-UP: and every sample still reaches the wire once, in order");
+    }
+
     if (g_failures == 0)
         std::fprintf(stderr, "hl2_tx_queue_jitter_test: all checks passed\n");
     return g_failures == 0 ? 0 : 1;
