@@ -285,7 +285,7 @@ int main(int argc, char** argv)
         check(r.gaps >= 1 && r.longestGap >= msToSamples(100.0) - 2 * block - kPacket
                   && r.longestGap <= msToSamples(100.0) + kPacket,
               "POSITIVE CONTROL: a block later than the queue is deep is a gap, as long as "
-              "the lateness less whatever depth the queue had");
+              "the lateness at most (the re-armed prime holds the queue's depth back)");
         check(r.sequenceIntact, "and even then nothing is lost");
     }
 
