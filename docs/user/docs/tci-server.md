@@ -330,7 +330,7 @@ aethersdr_ext_enable:true;
 ```
 
 The server answers with the set's version and the items this radio offers,
-then one line with the current state of each item:
+then the lines with the current state of each item (shortened here):
 
 ```
 aethersdr_ext:1,tx_filter_band;
@@ -490,6 +490,43 @@ aethersdr_rx_span:1,192000;       # set it
   and the stream stay up; the panadapter and the audio of every receiver may
   glitch briefly, and the answer comes when the rebuild is done. Elsewhere a
   set is allowed while transmitting, as the span buttons are.
+
+#### Antennas: `rx_antenna` and `tx_antenna`
+
+`rx_antenna` is offered while a receiver of the connected radio has a receive
+antenna list, `tx_antenna` while one has a transmit antenna list and the radio
+can transmit. A Flex publishes its ports (for example `ANT1`, `ANT2`, `RX_A`);
+a Hermes-Lite 2 receives on `ANT` and transmits on `ANT` or `RF1`. An RTL-SDR
+is not offered `tx_antenna`.
+
+```
+aethersdr_rx_antennas:0;          # read: aethersdr_rx_antennas:0,ANT1,ANT2,RX_A;
+aethersdr_rx_antenna:0;           # read: aethersdr_rx_antenna:0,ANT1;
+aethersdr_rx_antenna:0,ANT2;      # set
+aethersdr_tx_antennas:0;          # read: aethersdr_tx_antennas:0,ANT,RF1;
+aethersdr_tx_antenna:0,RF1;       # set
+```
+
+- `<trx>` is the TCI receiver. A receiver without a list is ignored.
+- A set names an antenna from that receiver's list, in any case; the answer
+  uses the list's spelling. A name not in the list, or the antenna already in
+  use, gets no answer. A name with `:`, `,` or `;` is left out of the list.
+- The set goes the way the RX applet's antenna menus set it, so the radio's
+  own rules still apply. The answer, sent to every client that enabled the set,
+  is the antenna in use afterwards: if the radio refused, it is the old one.
+- Every change is sent the same way, whoever made it, and so is a list that
+  changes. When transmit moves to another receiver, its `aethersdr_tx_antenna`
+  line is sent again.
+- The receive antenna may change while transmitting. The transmit antenna may
+  not: while the radio transmits or tunes, a set is answered with the antenna in
+  use, to the sender only, and AetherSDR shows the reason in its status bar
+  once per transmission. On a Hermes-Lite 2, in the short tail after it stops
+  transmitting, the refusal comes from its backend instead, and the old antenna
+  is sent to every client that enabled the set. This is stricter than the RX applet on a Flex. On a Hermes-Lite 2, `RF1` turns
+  the PA off and has its own drive, which the `drive:` line reports.
+- KiwiSDR receivers that the RX applet lists as antennas are not in the list.
+  A receive-antenna set releases a KiwiSDR receiver assigned to that receiver,
+  as choosing a port in the RX applet does, even when it names the port in use.
 
 ## Known issues
 
