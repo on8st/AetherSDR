@@ -1105,6 +1105,8 @@ set(CORE_SOURCES
     src/core/TciRoutingState.cpp
     src/core/TciExtensionSet.cpp
     src/core/TciTxPassbandExtension.cpp
+    src/core/TciExtensionNotice.cpp
+    src/core/TciRxGainExtension.cpp
     src/core/RadioCertification.cpp
     src/core/TciTrxMap.cpp
     src/core/MqttClient.cpp
