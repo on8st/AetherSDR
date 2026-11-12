@@ -363,10 +363,22 @@ aethersdr_tx_filter_band:0,100,2900;
 - The older extensions (`rx_record`, `rx_play`, `tx_gain`, `active_slice`,
   `rx_ctun_ex`) work without the enable, as before.
 
-On a Hermes-Lite 2 with one receiver, for example, the answer is:
+On a Hermes-Lite 2 with one receiver, for example, the answer lists every
+group described below: the items, then each item's state lines in
+the same order.
 
 ```
-aethersdr_ext:1,rx_rf_gain,rx_auto_rf_gain,rx_overload;
+aethersdr_ext:1,tx_filter_band,rx_span,rx_antenna,tx_antenna,hl2,rx_rf_gain,rx_auto_rf_gain,rx_overload;
+aethersdr_tx_filter_band:0,50,3300;
+aethersdr_rx_span_rates:true,true,48000,96000,192000,384000;
+aethersdr_rx_span:0,96000;
+aethersdr_rx_antennas:0,ANT;
+aethersdr_rx_antenna:0,ANT;
+aethersdr_tx_antennas:0,ANT,RF1;
+aethersdr_tx_antenna:0,ANT;
+aethersdr_hl2_filter_board:n2adr_rxtx,false;
+aethersdr_hl2_tx_timing:-1,-1,-1;
+aethersdr_hl2_exttr:-1;
 aethersdr_rx_rf_gain_range:0,-12,48,1;
 aethersdr_rx_rf_gain:0,20;
 aethersdr_rx_auto_rf_gain:false;
