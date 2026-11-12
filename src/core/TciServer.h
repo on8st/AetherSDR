@@ -85,6 +85,7 @@ class TciServer : public QObject {
     friend class TciExtensionSetTest;
     friend class TciTxPassbandExtensionTest;
     friend class TciRxGainExtensionTest;
+    friend class TciSpanExtensionTest;
 
 public:
     explicit TciServer(RadioModel* model, QObject* parent = nullptr);
@@ -281,6 +282,25 @@ private:
     bool broadcastRxAutoGain();
     bool broadcastRxOverload();
     bool anyExtensionClient() const;
+    // Keyed, for the extension set's refusals: the radio transmitting,
+    // TransmitModel transmitting, tuning or in MOX, or a TCI key held.
+    bool extensionKeyed() const;
+    // Extension group `rx_span` (TciSpanExtension.h).
+    void registerSpanGroup();
+    void wireSpanSlice(SliceModel* slice);
+    void wireSpanPan(PanadapterModel* pan);
+    bool spanOffered() const;
+    QString spanRatesLine() const;
+    // The span of trx's pan in Hz, with the pan's limits (0 when unknown);
+    // nullopt when trx has no live slice or its pan has no model.
+    std::optional<qint64> spanForTrx(int trx, qint64* minHz = nullptr,
+                                     qint64* maxHz = nullptr) const;
+    QHash<int, qint64> currentSpans() const;
+    QStringList spanStateLines() const;
+    TciExtensionSet::Result handleSpan(const QString& name, const QStringList& args);
+    void queueSpanNotice();
+    bool broadcastSpan();
+    void resyncSpanAnnounced();
     void broadcastBinary(const QByteArray& data);
     SliceModel* sliceForTrx(int trx) const;
     // No first-slice fallback — for paths that key the radio (#4547).
@@ -557,6 +577,26 @@ private:
     QTimer*           m_txPassbandRateTimer{nullptr};
     bool              m_txPassbandPending{false};
     bool              m_txPassbandSendPosted{false};
+    // Extension set, span notice: posted, then rate-limited. The last values
+    // sent to enabled clients, so a notice carries what moved; a dispatched set
+    // owes its trx a line even when the radio kept the span it had.
+    QTimer*           m_spanRateTimer{nullptr};
+    QTimer*           m_spanAnswerTimer{nullptr};
+    bool              m_spanPending{false};
+    bool              m_spanSendPosted{false};
+    QHash<int, qint64> m_spanAnnounced;
+    QString           m_spanRatesAnnounced;
+    // A dispatched set, per trx: the pan it waits on, the span and centre then.
+    // Only a report after the dispatch can answer it.
+    struct SpanAnswer {
+        QString panId;
+        qint64  spanHz{0};
+        double  centerMhz{0.0};
+        bool    reported{false};
+    };
+    QHash<int, SpanAnswer> m_spanAnswerOwed;
+    bool              m_spanAnswerExpired{false};
+    QString           m_spanAdvertisementSeen;
     // Last split_enable:0 state publishMainSplit() settled on (-1 = none yet).
     int               m_announcedSplit{-1};
     TciClient*       m_txChronoClient{nullptr};

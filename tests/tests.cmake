@@ -7847,6 +7847,13 @@ if(Qt6WebSockets_FOUND)
     target_link_libraries(tci_ext_rx_gain_test PRIVATE
         aethercore Qt6::Core Qt6::Network Qt6::WebSockets)
     add_test(NAME tci_ext_rx_gain_test COMMAND tci_ext_rx_gain_test)
+
+    # The extension set's span group (aethersdr_rx_span_rates, aethersdr_rx_span).
+    add_executable(tci_ext_span_test tests/tci_ext_span_test.cpp)
+    target_include_directories(tci_ext_span_test PRIVATE src tests)
+    target_link_libraries(tci_ext_span_test PRIVATE
+        aethercore Qt6::Core Qt6::Network Qt6::WebSockets)
+    add_test(NAME tci_ext_span_test COMMAND tci_ext_span_test)
 endif()
 
 # aetherd RFC 2.3 — MeterModel touchpoint: meter-status wire decode.
@@ -11218,6 +11225,7 @@ set(AETHER_SETTINGS_CONSUMERS
     tci_extension_zero_traffic_test
     tci_ext_tx_passband_test
     tci_ext_rx_gain_test
+    tci_ext_span_test
     tci_applet_test
     tci_rx_applet_test
     bandscope_trace_render_test
